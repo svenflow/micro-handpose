@@ -40,6 +40,7 @@ import {
   makeDepthwise5x5FullUnrollShader,
   makePointwiseShader,
   makePointwise2OCShader,
+  makeFusedDwPwShader,
   getOptimalWorkgroupSize,
 } from './shaders.js';
 
@@ -231,7 +232,7 @@ export async function compileModel(
   const device = await adapter.requestDevice({
     requiredLimits: {
       maxStorageBuffersPerShaderStage: Math.min(
-        adapter.limits.maxStorageBuffersPerShaderStage, 10,
+        adapter.limits.maxStorageBuffersPerShaderStage, 8,
       ),
       maxComputeWorkgroupSizeX: Math.min(
         adapter.limits.maxComputeWorkgroupSizeX, 288,
@@ -299,6 +300,18 @@ export async function compileModel(
   const outputLandmarksShader = device.createShaderModule({ code: OUTPUT_HEAD_LANDMARKS_SHADER });
   const fusedDwPwShader = device.createShaderModule({ code: FUSED_DW_PW_288_SHADER });
 
+  // Generic fused DW+PW shaders for all channel configurations
+  const fusedShaderCache = new Map<string, GPUShaderModule>();
+  function getFusedShader(inCh: number, outCh: number): GPUShaderModule {
+    const key = `${inCh}_${outCh}`;
+    let shader = fusedShaderCache.get(key);
+    if (!shader) {
+      shader = device.createShaderModule({ code: makeFusedDwPwShader(inCh, outCh) });
+      fusedShaderCache.set(key, shader);
+    }
+    return shader;
+  }
+
   // ============ Create Bind Group Layouts ============
   const dwLayout = makeLayout(['r', 'r', 'r', 's', 'u']);
   const pwLayout = makeLayout(['r', 'r', 'r', 'r', 's', 'u']);
@@ -310,7 +323,7 @@ export async function compileModel(
   const conv1x1Layout = makeLayout(['r', 'r', 'r', 's', 'u']);
   const outputLayout = makeLayout(['r', 'r', 'r', 's', 'u']);
   const canvasInputLayout = makeTexLayout(['t', 's', 'u']);
-  const fusedOutputLayout = makeLayout(['r', 'r', 'r', 'r', 'r', 'r', 'r', 's', 's', 's']);
+  const fusedOutputLayout = makeLayout(['r', 'r', 'r', 'r', 'r', 'r', 'r', 's']);
   const fusedDwPwLayout = makeLayout(['r', 'r', 'r', 'r', 'r', 's', 'u']);
 
   // ============ Create Compute Pipelines ============
@@ -400,9 +413,7 @@ export async function compileModel(
   const bufB2 = makeBuf(1 * 96 * 32 * 32 * 4, SC);
   const bufB3 = makeBuf(1 * 96 * 16 * 16 * 4, SC);
   const bufTmp = makeBuf(1 * 96 * 64 * 64 * 4, SO);
-  const bufHandflag = makeBuf(4, SOC);
-  const bufHandedness = makeBuf(4, SOC);
-  const bufLandmarks = makeBuf(63 * 4, SOC);
+  const bufOutput = makeBuf(65 * 4, SOC); // unified: [handflag, handedness, landmarks[63]]
   const readbackBuf = makeBuf(65 * 4, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
   void makeBuf(65 * 4, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
   // For future double-buffered readback (pipeline mapAsync with compute)
@@ -566,14 +577,14 @@ export async function compileModel(
   const conv1x1BG = makeBind(conv1x1Layout, [bufA, bufConv1x1W, bufConv1x1B, bufTmp, bufConv1x1U]);
   const upsampleAddB1BG = makeBind(upsampleAddLayout, [bufTmp, bufB1, bufB, bufUpsample32to64U]);
 
-  // Output head bind groups
-  void makeBind(outputLayout, [bufA, bufHandflagW, bufHandflagB, bufHandflag, bufHandflagU]);
-  void makeBind(outputLayout, [bufA, bufHandednessW, bufHandednessB, bufHandedness, bufHandednessU]);
-  void makeBind(outputLayout, [bufA, bufLandmarksW, bufLandmarksB, bufLandmarks, bufLandmarksU]);
+  // Output head bind groups (legacy individual — kept for pipeline creation)
+  void makeBind(outputLayout, [bufA, bufHandflagW, bufHandflagB, bufOutput, bufHandflagU]);
+  void makeBind(outputLayout, [bufA, bufHandednessW, bufHandednessB, bufOutput, bufHandednessU]);
+  void makeBind(outputLayout, [bufA, bufLandmarksW, bufLandmarksB, bufOutput, bufLandmarksU]);
 
   const canvasInputBG = makeBind(canvasInputLayout, [canvasTexture.createView(), bufInput, bufCanvasU]);
 
-  const fusedOutputBG = makeBind(fusedOutputLayout, [bufA, bufHandflagW, bufHandflagB, bufHandednessW, bufHandednessB, bufLandmarksW, bufLandmarksB, bufHandflag, bufHandedness, bufLandmarks]);
+  const fusedOutputBG = makeBind(fusedOutputLayout, [bufA, bufHandflagW, bufHandflagB, bufHandednessW, bufHandednessB, bufLandmarksW, bufLandmarksB, bufOutput]);
 
   // Fused DW+PW bind groups for layers 24-42 (all 288→288 channels)
   const FUSED_START = 24;
@@ -772,10 +783,8 @@ export async function compileModel(
     pass.dispatchWorkgroups(1);
     pass.end();
 
-    // Copy all outputs to unified readback buffer
-    encoder.copyBufferToBuffer(bufHandflag, 0, readbackTarget, 0, 4);
-    encoder.copyBufferToBuffer(bufHandedness, 0, readbackTarget, 4, 4);
-    encoder.copyBufferToBuffer(bufLandmarks, 0, readbackTarget, 8, 63 * 4);
+    // Copy unified output to readback buffer (1 copy instead of 3)
+    encoder.copyBufferToBuffer(bufOutput, 0, readbackTarget, 0, 65 * 4);
   }
 
   // ============ Run Function (Float32Array input) ============
@@ -799,7 +808,10 @@ export async function compileModel(
 
     device.queue.submit([encoder.finish()]);
 
-    await readbackBuf.mapAsync(GPUMapMode.READ);
+    // Wait for GPU completion, then map — may help Safari resolve mapAsync faster
+    const mapPromise = readbackBuf.mapAsync(GPUMapMode.READ);
+    await device.queue.onSubmittedWorkDone();
+    await mapPromise;
     const mapped = new Float32Array(readbackBuf.getMappedRange());
     outputHandflag[0] = mapped[0]!;
     outputHandedness[0] = mapped[1]!;
@@ -841,7 +853,10 @@ export async function compileModel(
 
     device.queue.submit([encoder.finish()]);
 
-    await readbackBuf.mapAsync(GPUMapMode.READ);
+    // Wait for GPU completion, then map — may help Safari resolve mapAsync faster
+    const mapPromise = readbackBuf.mapAsync(GPUMapMode.READ);
+    await device.queue.onSubmittedWorkDone();
+    await mapPromise;
     const mapped = new Float32Array(readbackBuf.getMappedRange());
     outputHandflag[0] = mapped[0]!;
     outputHandedness[0] = mapped[1]!;

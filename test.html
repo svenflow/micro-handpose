@@ -23,6 +23,15 @@
       console.log(msg);
     }
 
+    function stats(times) {
+      const s = [...times].sort((a, b) => a - b);
+      return {
+        median: s[Math.floor(s.length / 2)],
+        min: s[0],
+        p90: s[Math.floor(s.length * 0.9)],
+      };
+    }
+
     async function run() {
       try {
         log('importing micro-handpose...');
@@ -48,8 +57,8 @@
         log('\nwarmup (10 runs)...');
         for (let i = 0; i < 10; i++) await handpose.detect(canvas);
 
-        // Benchmark
-        log('benchmark (50 runs)...');
+        // === Benchmark 1: Standard detect (end-to-end with readback) ===
+        log('\n--- Standard detect (50 runs) ---');
         const times = [];
         let result;
         for (let i = 0; i < 50; i++) {
@@ -57,12 +66,27 @@
           result = await handpose.detect(canvas);
           times.push(performance.now() - s);
         }
-        times.sort((a, b) => a - b);
+        const st = stats(times);
+        log(`median: ${st.median.toFixed(2)}ms (${(1000/st.median).toFixed(0)} FPS)`);
+        log(`min: ${st.min.toFixed(2)}ms | p90: ${st.p90.toFixed(2)}ms`);
 
-        log(`\nmedian: ${times[25].toFixed(2)}ms (${(1000/times[25]).toFixed(0)} FPS)`);
-        log(`min: ${times[0].toFixed(2)}ms`);
-        log(`p90: ${times[45].toFixed(2)}ms`);
+        // === Benchmark 2: Pipelined detect (overlapped readback) ===
+        log('\n--- Pipelined detect (50 runs) ---');
+        // Prime the pipeline
+        await handpose.detectPipelined(canvas);
+        const pipeTimes = [];
+        for (let i = 0; i < 50; i++) {
+          const s = performance.now();
+          const r = await handpose.detectPipelined(canvas);
+          pipeTimes.push(performance.now() - s);
+          if (i === 49) result = r;
+        }
+        await handpose.flushPipelined();
+        const pt = stats(pipeTimes);
+        log(`median: ${pt.median.toFixed(2)}ms (${(1000/pt.median).toFixed(0)} FPS)`);
+        log(`min: ${pt.min.toFixed(2)}ms | p90: ${pt.p90.toFixed(2)}ms`);
 
+        // === Results ===
         if (result) {
           log(`\nresult:`);
           log(`  score: ${result.score.toFixed(4)}`);
