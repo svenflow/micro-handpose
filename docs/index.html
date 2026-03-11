@@ -389,6 +389,86 @@
       font-size: 13px; color: #444;
     }
 
+    /* --- COMPARE BUTTON --- */
+    .compare-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: rgba(255, 165, 0, 0.15);
+      border: 1px solid rgba(255, 165, 0, 0.3);
+      color: #ffa500;
+      border-radius: 8px;
+      padding: 7px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: var(--font);
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-left: 8px;
+    }
+    .compare-btn:hover { background: rgba(255, 165, 0, 0.25); }
+    .compare-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* --- COMPARE RESULTS --- */
+    .compare-results {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-top: 16px;
+      overflow: hidden;
+      display: none;
+    }
+    .compare-results.visible { display: block; }
+    .compare-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .compare-header h3 {
+      font-size: 13px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--text-secondary);
+    }
+    .compare-header .close-btn {
+      background: none; border: none; color: var(--text-secondary);
+      cursor: pointer; font-size: 18px; padding: 0 4px;
+    }
+    .compare-summary {
+      padding: 12px 16px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono);
+    }
+    .compare-summary .metric { color: var(--text); font-weight: 500; }
+    .compare-summary .good { color: var(--green); }
+    .compare-summary .warn { color: #ffa500; }
+    .compare-summary .bad { color: #f87171; }
+    .compare-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      font-family: var(--mono);
+    }
+    .compare-table th {
+      padding: 8px 12px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-secondary);
+      background: rgba(255,255,255,0.02);
+      border-bottom: 1px solid var(--border);
+    }
+    .compare-table td {
+      padding: 6px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+      color: var(--text);
+    }
+    .compare-table tr:last-child td { border-bottom: none; }
+    .compare-table .lm-name { color: var(--text-secondary); }
+    .compare-table .diff-low { color: var(--green); }
+    .compare-table .diff-med { color: #ffa500; }
+    .compare-table .diff-high { color: #f87171; }
+
     /* --- RESPONSIVE --- */
     @media (max-width: 600px) {
       .hero { padding: 120px 0 60px; }
@@ -454,6 +534,10 @@
             <span class="toggle-dot"></span>MediaPipe WASM
           </button>
         </div>
+        <button class="compare-btn" id="compareBtn" onclick="runCompare()" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/></svg>
+          Compare
+        </button>
       </div>
 
       <div class="demo-card">
@@ -497,6 +581,16 @@
           </div>
         </div>
       </div>
+      <div class="compare-results" id="compareResults">
+        <div class="compare-header">
+          <h3>Landmark Comparison: micro-handpose vs MediaPipe</h3>
+          <button class="close-btn" onclick="closeCompare()">&times;</button>
+        </div>
+        <div class="compare-summary" id="compareSummary"></div>
+        <div style="max-height: 400px; overflow-y: auto;">
+          <table class="compare-table" id="compareTable"></table>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -507,7 +601,7 @@
       <div class="features-grid">
         <div class="feature">
           <div class="stat">8KB</div>
-          <div class="desc">Gzipped bundle</div>
+          <div class="desc">Gzipped bundle<br><span style="font-size:11px;color:#555">(37KB minified)</span></div>
         </div>
         <div class="feature">
           <div class="stat">2.2ms</div>
@@ -520,6 +614,24 @@
         <div class="feature">
           <div class="stat">TS</div>
           <div class="desc">Full TypeScript</div>
+        </div>
+      </div>
+
+      <h2 style="margin-top: 40px;">vs MediaPipe Bundle Size</h2>
+      <div class="features-grid">
+        <div class="feature">
+          <div class="stat" style="font-size: 24px;">micro-handpose</div>
+          <div class="desc" style="margin-top: 8px;">
+            <span style="color: var(--green); font-size: 20px; font-weight: 700;">8KB</span> gzipped total<br>
+            <span style="font-size: 11px; color: #555;">37KB JS (no WASM, no model file)</span>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="stat" style="font-size: 24px;">MediaPipe</div>
+          <div class="desc" style="margin-top: 8px;">
+            <span style="color: #f87171; font-size: 20px; font-weight: 700;">~18.7MB</span> total download<br>
+            <span style="font-size: 11px; color: #555;">WASM runtime: 11MB &bull; Model: 7.5MB &bull; JS: 0.2MB</span>
+          </div>
         </div>
       </div>
     </div>
@@ -806,6 +918,7 @@ handpose.<span class="fn">dispose</span>()</pre>
 
         placeholder.style.display = 'none';
         cameraReady = true;
+        document.getElementById('compareBtn').disabled = false;
 
         if (activeModel === 'micro') {
           await ensureMicroHandpose();
@@ -927,6 +1040,190 @@ handpose.<span class="fn">dispose</span>()</pre>
         frameCount = 0;
         lastFpsTime = now;
       }
+    }
+
+    // --- Compare mode ---
+    const LANDMARK_NAMES = [
+      'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+      'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+      'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+      'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+      'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip'
+    ];
+
+    window.runCompare = async function () {
+      if (!cameraReady) return;
+
+      const compareBtn = document.getElementById('compareBtn');
+      compareBtn.disabled = true;
+      compareBtn.textContent = 'Running...';
+
+      try {
+        // Ensure both models are loaded
+        await ensureMicroHandpose();
+        await ensureMediaPipeWasm();
+
+        // Pause the live loop
+        const wasRunning = running;
+        running = false;
+
+        // Run micro-handpose on current video frame
+        const microResult = await microHandpose.detect(video);
+
+        // Run MediaPipe on current video frame
+        mpWasmTimestamp += 33;
+        const mpResults = mpHandsWasm.detectForVideo(video, mpWasmTimestamp);
+
+        const mpLandmarks = (mpResults && mpResults.landmarks && mpResults.landmarks.length > 0)
+          ? mpResults.landmarks[0] : null;
+
+        // Draw both overlaid
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (mpLandmarks) {
+          drawHandColored(mpLandmarks, canvas.width, canvas.height, '#34d399', 0.6);
+        }
+        if (microResult) {
+          drawHandColored(microResult.landmarks, canvas.width, canvas.height, '#7c6aef', 0.9);
+        }
+
+        // Show overlay label
+        modelLabel.style.display = 'block';
+        modelLabel.innerHTML = '<span style="color:#7c6aef">\u25CF</span> micro &nbsp; <span style="color:#34d399">\u25CF</span> MediaPipe';
+        modelLabel.className = 'model-label-overlay';
+        modelLabel.style.background = 'rgba(0,0,0,0.7)';
+        modelLabel.style.color = '#fff';
+
+        // Build comparison table
+        showCompareResults(microResult, mpLandmarks);
+
+        // Resume if was running
+        if (wasRunning) {
+          // Don't auto-resume - let user see the comparison
+        }
+      } catch (err) {
+        console.error('Compare error:', err);
+        showError('Compare failed: ' + (err.message || err));
+      }
+
+      compareBtn.disabled = false;
+      compareBtn.textContent = 'Compare';
+    };
+
+    function showCompareResults(microResult, mpLandmarks) {
+      const panel = document.getElementById('compareResults');
+      const summary = document.getElementById('compareSummary');
+      const table = document.getElementById('compareTable');
+
+      if (!microResult && !mpLandmarks) {
+        summary.innerHTML = 'No hand detected by either model.';
+        table.innerHTML = '';
+        panel.classList.add('visible');
+        return;
+      }
+
+      if (!microResult) {
+        summary.innerHTML = '<span class="bad">micro-handpose: no detection</span> &bull; MediaPipe: detected';
+        table.innerHTML = '';
+        panel.classList.add('visible');
+        return;
+      }
+
+      if (!mpLandmarks) {
+        summary.innerHTML = 'micro-handpose: detected &bull; <span class="bad">MediaPipe: no detection</span>';
+        table.innerHTML = '';
+        panel.classList.add('visible');
+        return;
+      }
+
+      // Compute per-landmark distances
+      const diffs = [];
+      let totalDist = 0;
+      let maxDist = 0;
+
+      for (let i = 0; i < 21; i++) {
+        const mx = microResult.landmarks[i].x;
+        const my = microResult.landmarks[i].y;
+        const mz = microResult.landmarks[i].z;
+        const px = mpLandmarks[i].x;
+        const py = mpLandmarks[i].y;
+        const pz = mpLandmarks[i].z;
+        const dist2d = Math.sqrt((mx - px) ** 2 + (my - py) ** 2);
+        const dist3d = Math.sqrt((mx - px) ** 2 + (my - py) ** 2 + (mz - pz) ** 2);
+        diffs.push({ i, dist2d, dist3d, mx, my, mz, px, py, pz });
+        totalDist += dist2d;
+        maxDist = Math.max(maxDist, dist2d);
+      }
+
+      const avgDist = totalDist / 21;
+      const avgClass = avgDist < 0.02 ? 'good' : avgDist < 0.05 ? 'warn' : 'bad';
+      const maxClass = maxDist < 0.03 ? 'good' : maxDist < 0.08 ? 'warn' : 'bad';
+
+      summary.innerHTML = `
+        Score: <span class="metric">${microResult.score.toFixed(4)}</span> &bull;
+        Handedness: <span class="metric">${microResult.handedness}</span> &bull;
+        Avg 2D diff: <span class="metric ${avgClass}">${(avgDist * 100).toFixed(2)}%</span> &bull;
+        Max 2D diff: <span class="metric ${maxClass}">${(maxDist * 100).toFixed(2)}%</span>
+        <br><small>(differences as % of image dimensions)</small>
+      `;
+
+      let html = `
+        <tr>
+          <th>#</th><th>Landmark</th>
+          <th>micro x</th><th>micro y</th><th>micro z</th>
+          <th>MP x</th><th>MP y</th><th>MP z</th>
+          <th>2D diff</th>
+        </tr>
+      `;
+
+      for (const d of diffs) {
+        const diffClass = d.dist2d < 0.02 ? 'diff-low' : d.dist2d < 0.05 ? 'diff-med' : 'diff-high';
+        html += `
+          <tr>
+            <td>${d.i}</td>
+            <td class="lm-name">${LANDMARK_NAMES[d.i]}</td>
+            <td>${d.mx.toFixed(4)}</td><td>${d.my.toFixed(4)}</td><td>${d.mz.toFixed(4)}</td>
+            <td>${d.px.toFixed(4)}</td><td>${d.py.toFixed(4)}</td><td>${d.pz.toFixed(4)}</td>
+            <td class="${diffClass}">${(d.dist2d * 100).toFixed(2)}%</td>
+          </tr>
+        `;
+      }
+
+      table.innerHTML = html;
+      panel.classList.add('visible');
+    }
+
+    window.closeCompare = function () {
+      document.getElementById('compareResults').classList.remove('visible');
+      // Resume live detection
+      if (cameraReady && !running) {
+        running = true;
+        updateModelLabel();
+        detectLoop();
+      }
+    };
+
+    function drawHandColored(landmarks, w, h, color, alpha) {
+      ctx.globalAlpha = alpha;
+      for (const [a, b] of CONNECTIONS) {
+        const la = landmarks[a];
+        const lb = landmarks[b];
+        ctx.beginPath();
+        ctx.moveTo(la.x * w, la.y * h);
+        ctx.lineTo(lb.x * w, lb.y * h);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i];
+        ctx.beginPath();
+        ctx.arc(lm.x * w, lm.y * h, i === 0 ? 5 : 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
     }
 
     function drawHand(landmarks, w, h) {
