@@ -1463,44 +1463,11 @@ handpose.<span class="fn">dispose</span>()</pre>
         }
         drawTestHand();
 
-        // Try video approach first, fall back to canvas-only for iOS
-        let testSource = testCanvas; // default: use canvas directly
-        let useVideoSource = false;
-
-        if (testVideoUrl && testVideoUrl !== 'true' && testVideoUrl !== '') {
-          try {
-            video.src = testVideoUrl;
-            video.crossOrigin = 'anonymous';
-            video.loop = true;
-            video.muted = true;
-            await video.play();
-            testSource = video;
-            useVideoSource = true;
-          } catch (e) {
-            console.warn('Video URL failed, using canvas:', e);
-          }
-        } else {
-          // Try captureStream (works on desktop, may fail on iOS)
-          try {
-            if (typeof testCanvas.captureStream === 'function') {
-              const stream = testCanvas.captureStream(30);
-              video.srcObject = stream;
-              video.muted = true;
-              await video.play();
-              // Verify video has valid dimensions
-              if (video.videoWidth > 0 && video.videoHeight > 0) {
-                testSource = video;
-                useVideoSource = true;
-                setInterval(() => drawTestHand(), 33);
-              }
-            }
-          } catch (e) {
-            console.warn('captureStream failed (iOS?), using canvas directly:', e);
-          }
-        }
-
-        canvas.width = useVideoSource ? (video.videoWidth || 256) : 256;
-        canvas.height = useVideoSource ? (video.videoHeight || 256) : 256;
+        // Use the canvas directly as input source — no video/captureStream needed
+        // Canvas works reliably on all platforms (desktop + iOS)
+        const testSource = testCanvas;
+        canvas.width = 256;
+        canvas.height = 256;
 
         // Store test source globally so runProfile can use it
         window._testSource = testSource;
