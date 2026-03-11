@@ -1094,6 +1094,9 @@ handpose.<span class="fn">dispose</span>()</pre>
       const wasRunning = running;
       running = false;
 
+      // Use test source if available (canvas fallback for iOS), otherwise video
+      const source = window._testSource || video;
+
       const results = {};
 
       // Profile micro-handpose
@@ -1102,11 +1105,11 @@ handpose.<span class="fn">dispose</span>()</pre>
         await ensureMicroHandpose();
         btn.textContent = 'Profiling micro (0/' + N + ')...';
         // warmup
-        for (let i = 0; i < 3; i++) await microHandpose.detect(video);
+        for (let i = 0; i < 3; i++) await microHandpose.detect(source);
         const microTimes = [];
         for (let i = 0; i < N; i++) {
           const t0 = performance.now();
-          await microHandpose.detect(video);
+          await microHandpose.detect(source);
           microTimes.push(performance.now() - t0);
           btn.textContent = 'Profiling micro (' + (i+1) + '/' + N + ')...';
         }
@@ -1130,13 +1133,13 @@ handpose.<span class="fn">dispose</span>()</pre>
         // warmup
         for (let i = 0; i < 3; i++) {
           mpWasmTimestamp += 33;
-          mpHandsWasm.detectForVideo(video, mpWasmTimestamp);
+          mpHandsWasm.detectForVideo(source, mpWasmTimestamp);
         }
         const mpTimes = [];
         for (let i = 0; i < N; i++) {
           mpWasmTimestamp += 33;
           const t0 = performance.now();
-          mpHandsWasm.detectForVideo(video, mpWasmTimestamp);
+          mpHandsWasm.detectForVideo(source, mpWasmTimestamp);
           mpTimes.push(performance.now() - t0);
           btn.textContent = 'Profiling MediaPipe (' + (i+1) + '/' + N + ')...';
         }
@@ -1433,65 +1436,74 @@ handpose.<span class="fn">dispose</span>()</pre>
         const testVideoUrl = new URLSearchParams(location.search).get('testProfile');
 
         placeholder.style.display = 'none';
-        statusVal.textContent = 'Loading test video...';
+        statusVal.textContent = 'Loading test image...';
 
-        if (testVideoUrl && testVideoUrl !== 'true' && testVideoUrl !== '') {
-          // Use provided video URL
-          video.src = testVideoUrl;
-          video.crossOrigin = 'anonymous';
-          video.loop = true;
-          video.muted = true;
-          await video.play();
-        } else {
-          // No video URL - create a synthetic canvas source
-          // Draw a skin-tone blob roughly shaped like a hand
-          const offscreen = document.createElement('canvas');
-          offscreen.width = 256;
-          offscreen.height = 256;
-          const octx = offscreen.getContext('2d');
-          // Background
+        // Create a synthetic canvas with a hand-like shape
+        const testCanvas = document.createElement('canvas');
+        testCanvas.width = 256;
+        testCanvas.height = 256;
+        const octx = testCanvas.getContext('2d');
+
+        function drawTestHand() {
           octx.fillStyle = '#2a2a2a';
           octx.fillRect(0, 0, 256, 256);
-          // Fake hand shape (skin-colored oval + fingers)
           octx.fillStyle = '#d4a574';
           octx.beginPath();
           octx.ellipse(128, 160, 50, 70, 0, 0, Math.PI * 2);
           octx.fill();
-          // Fingers
           for (let i = 0; i < 5; i++) {
             const x = 88 + i * 20;
             octx.fillRect(x, 70, 12, 90);
           }
-          // Thumb
           octx.save();
           octx.translate(78, 150);
           octx.rotate(-0.5);
           octx.fillRect(-6, -40, 14, 50);
           octx.restore();
+        }
+        drawTestHand();
 
-          // Use captureStream to create a video-like source
-          const stream = offscreen.captureStream(30);
-          video.srcObject = stream;
-          video.muted = true;
-          await video.play();
+        // Try video approach first, fall back to canvas-only for iOS
+        let testSource = testCanvas; // default: use canvas directly
+        let useVideoSource = false;
 
-          // Keep redrawing to keep stream alive
-          setInterval(() => {
-            octx.fillStyle = '#2a2a2a';
-            octx.fillRect(0, 0, 256, 256);
-            octx.fillStyle = '#d4a574';
-            octx.beginPath();
-            octx.ellipse(128, 160, 50, 70, 0, 0, Math.PI * 2);
-            octx.fill();
-            for (let i = 0; i < 5; i++) {
-              const x = 88 + i * 20;
-              octx.fillRect(x, 70, 12, 90);
+        if (testVideoUrl && testVideoUrl !== 'true' && testVideoUrl !== '') {
+          try {
+            video.src = testVideoUrl;
+            video.crossOrigin = 'anonymous';
+            video.loop = true;
+            video.muted = true;
+            await video.play();
+            testSource = video;
+            useVideoSource = true;
+          } catch (e) {
+            console.warn('Video URL failed, using canvas:', e);
+          }
+        } else {
+          // Try captureStream (works on desktop, may fail on iOS)
+          try {
+            if (typeof testCanvas.captureStream === 'function') {
+              const stream = testCanvas.captureStream(30);
+              video.srcObject = stream;
+              video.muted = true;
+              await video.play();
+              // Verify video has valid dimensions
+              if (video.videoWidth > 0 && video.videoHeight > 0) {
+                testSource = video;
+                useVideoSource = true;
+                setInterval(() => drawTestHand(), 33);
+              }
             }
-          }, 33);
+          } catch (e) {
+            console.warn('captureStream failed (iOS?), using canvas directly:', e);
+          }
         }
 
-        canvas.width = video.videoWidth || 256;
-        canvas.height = video.videoHeight || 256;
+        canvas.width = useVideoSource ? (video.videoWidth || 256) : 256;
+        canvas.height = useVideoSource ? (video.videoHeight || 256) : 256;
+
+        // Store test source globally so runProfile can use it
+        window._testSource = testSource;
 
         cameraReady = true;
         document.getElementById('compareBtn').disabled = false;
@@ -1501,7 +1513,10 @@ handpose.<span class="fn">dispose</span>()</pre>
 
         // Run profile after brief warmup
         setTimeout(() => runProfile(), 3000);
-      })();
+      })().catch(e => {
+        console.error('testProfile init failed:', e);
+        statusVal.textContent = 'Error: ' + e.message;
+      });
     }
   </script>
 </body>
