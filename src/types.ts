@@ -51,6 +51,9 @@ export interface Handpose {
   /** Flush pipelined readback to get last frame's result */
   flushPipelined: () => Promise<HandposeResult | null>;
 
+  /** Run diagnostic benchmark measuring GPU time, mapAsync time, pipelining separately */
+  benchmarkDiagnostic: (source: HandposeInput, iterations?: number) => Promise<any>;
+
   /** Dispose GPU resources */
   dispose: () => void;
 }

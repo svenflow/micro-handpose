@@ -2,13 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>micro-handpose test</title>
   <style>
     body { font-family: system-ui; max-width: 600px; margin: 40px auto; padding: 20px; background: #111; color: #eee; }
-    pre { background: #222; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+    pre { background: #222; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; }
     .success { color: #4CAF50; }
     .error { color: #f44336; }
     img { max-width: 200px; border-radius: 8px; }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+    th, td { text-align: left; padding: 6px 12px; border: 1px solid #444; }
+    th { background: #333; }
+    .fast { color: #4CAF50; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -23,28 +28,16 @@
       console.log(msg);
     }
 
-    function stats(times) {
-      const s = [...times].sort((a, b) => a - b);
-      return {
-        median: s[Math.floor(s.length / 2)],
-        min: s[0],
-        p90: s[Math.floor(s.length * 0.9)],
-      };
-    }
-
     async function run() {
       try {
         log('importing micro-handpose...');
         const { createHandpose } = await import('./dist/index.js');
 
-        log('creating detector (loading weights + compiling WebGPU pipeline)...');
+        log('creating detector...');
         const t0 = performance.now();
-        const handpose = await createHandpose({
-          weightsUrl: '/weights',
-        });
+        const handpose = await createHandpose({ weightsUrl: '/weights' });
         log(`ready in ${(performance.now() - t0).toFixed(0)}ms`);
 
-        // Load test image onto canvas
         const img = document.getElementById('testImg');
         img.src = '/test_hand.png';
         await new Promise(r => img.onload = r);
@@ -53,56 +46,33 @@
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, 256, 256);
 
-        // Warmup
-        log('\nwarmup (10 runs)...');
-        for (let i = 0; i < 10; i++) await handpose.detect(canvas);
-
-        // === Benchmark 1: Standard detect (end-to-end with readback) ===
-        log('\n--- Standard detect (50 runs) ---');
-        const times = [];
-        let result;
-        for (let i = 0; i < 50; i++) {
-          const s = performance.now();
-          result = await handpose.detect(canvas);
-          times.push(performance.now() - s);
-        }
-        const st = stats(times);
-        log(`median: ${st.median.toFixed(2)}ms (${(1000/st.median).toFixed(0)} FPS)`);
-        log(`min: ${st.min.toFixed(2)}ms | p90: ${st.p90.toFixed(2)}ms`);
-
-        // === Benchmark 2: Pipelined detect (overlapped readback) ===
-        log('\n--- Pipelined detect (50 runs) ---');
-        // Prime the pipeline
-        await handpose.detectPipelined(canvas);
-        const pipeTimes = [];
-        for (let i = 0; i < 50; i++) {
-          const s = performance.now();
-          const r = await handpose.detectPipelined(canvas);
-          pipeTimes.push(performance.now() - s);
-          if (i === 49) result = r;
-        }
-        await handpose.flushPipelined();
-        const pt = stats(pipeTimes);
-        log(`median: ${pt.median.toFixed(2)}ms (${(1000/pt.median).toFixed(0)} FPS)`);
-        log(`min: ${pt.min.toFixed(2)}ms | p90: ${pt.p90.toFixed(2)}ms`);
-
-        // === Results ===
+        // Correctness check
+        const result = await handpose.detect(canvas);
         if (result) {
-          log(`\nresult:`);
-          log(`  score: ${result.score.toFixed(4)}`);
-          log(`  handedness: ${result.handedness}`);
-          log(`  landmarks (first 5):`);
-          for (let i = 0; i < 5; i++) {
-            const lm = result.landmarks[i];
-            log(`    [${i}] x=${lm.x.toFixed(4)} y=${lm.y.toFixed(4)} z=${lm.z.toFixed(4)}`);
-          }
-          log(`\n✅ detection successful!`);
+          log(`\n✅ score=${result.score.toFixed(4)} hand=${result.handedness}`);
         } else {
-          log('\n⚠️ no hand detected (below threshold)');
+          log('\n❌ no hand detected!');
+          return;
         }
+
+        // Diagnostic benchmark
+        log('\n🔬 Running diagnostic benchmark (250 iterations)...');
+        log('This tests GPU compute, mapAsync, and pipelining separately.\n');
+        const diag = await handpose.benchmarkDiagnostic(canvas, 50);
+
+        log('=== TIMING BREAKDOWN ===');
+        log(`GPU only (onSubmittedWorkDone): ${diag.gpuOnly.median.toFixed(1)}ms median, ${diag.gpuOnly.min.toFixed(1)}ms min`);
+        log(`mapAsync (with onSubmittedWorkDone): ${diag.mapAsyncOnly.median.toFixed(1)}ms median, ${diag.mapAsyncOnly.min.toFixed(1)}ms min`);
+        log(`mapAsync (raw, no wait): ${diag.mapAsyncNoWait.median.toFixed(1)}ms median, ${diag.mapAsyncNoWait.min.toFixed(1)}ms min`);
+        log(`Total end-to-end: ${diag.total.median.toFixed(1)}ms median, ${diag.total.min.toFixed(1)}ms min`);
+        log(`Pipelined throughput: ${diag.pipelined.median.toFixed(1)}ms median, ${diag.pipelined.min.toFixed(1)}ms min`);
+
+        const readbackOverhead = diag.total.median - diag.gpuOnly.median;
+        log(`\nReadback overhead: ~${readbackOverhead.toFixed(1)}ms (total - gpu)`);
+        log(`Pipelined saves: ~${(diag.total.median - diag.pipelined.median).toFixed(1)}ms vs standard`);
 
         handpose.dispose();
-        log('disposed.');
+        log('\ndone.');
 
       } catch (e) {
         log(`\n❌ error: ${e.message}`);

@@ -70,6 +70,13 @@ export interface CompiledModel {
   flushPipelined: () => Promise<HandLandmarksOutput | null>;
   benchmark: (iterations?: number) => Promise<{ avgMs: number; fps: number }>;
   benchmarkGPU: (iterations?: number) => Promise<{ avgMs: number; fps: number; medianMs: number; minMs: number }>;
+  benchmarkDiagnostic: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap, iterations?: number) => Promise<{
+    gpuOnly: { median: number; min: number };
+    mapAsyncOnly: { median: number; min: number };
+    mapAsyncNoWait: { median: number; min: number };
+    total: { median: number; min: number };
+    pipelined: { median: number; min: number };
+  }>;
 }
 
 /**
@@ -1017,9 +1024,97 @@ export async function compileModel(
     device.queue.submit([encoder.finish()]);
   }
 
+  // Diagnostic benchmark: measures GPU time, mapAsync time, and total separately
+  async function benchmarkDiagnostic(source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap, iterations = 50): Promise<{
+    gpuOnly: { median: number; min: number };
+    mapAsyncOnly: { median: number; min: number };
+    mapAsyncNoWait: { median: number; min: number };
+    total: { median: number; min: number };
+    pipelined: { median: number; min: number };
+  }> {
+    function stats(times: number[]) {
+      const s = [...times].sort((a, b) => a - b);
+      return { median: s[Math.floor(s.length / 2)]!, min: s[0]! };
+    }
+
+    // Warmup
+    for (let i = 0; i < 10; i++) await runFromCanvas(source);
+
+    // 1. GPU-only (submit + onSubmittedWorkDone, no mapAsync)
+    const gpuTimes: number[] = [];
+    for (let i = 0; i < iterations; i++) {
+      device.queue.copyExternalImageToTexture({ source }, { texture: canvasTexture }, [256, 256]);
+      const enc = device.createCommandEncoder();
+      { const p = enc.beginComputePass(); p.setPipeline(canvasInputPipeline); p.setBindGroup(0, canvasInputBG); p.dispatchWorkgroups(16, 16, 1); p.end(); }
+      encodeInference(enc, readbackBuf);
+      const t = performance.now();
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      gpuTimes.push(performance.now() - t);
+    }
+
+    // 2. mapAsync WITH onSubmittedWorkDone first (current approach)
+    const mapWaitTimes: number[] = [];
+    for (let i = 0; i < iterations; i++) {
+      device.queue.copyExternalImageToTexture({ source }, { texture: canvasTexture }, [256, 256]);
+      const enc = device.createCommandEncoder();
+      { const p = enc.beginComputePass(); p.setPipeline(canvasInputPipeline); p.setBindGroup(0, canvasInputBG); p.dispatchWorkgroups(16, 16, 1); p.end(); }
+      encodeInference(enc, readbackBuf);
+      device.queue.submit([enc.finish()]);
+      const mp = readbackBuf.mapAsync(GPUMapMode.READ);
+      const t = performance.now();
+      await device.queue.onSubmittedWorkDone();
+      await mp;
+      readbackBuf.getMappedRange();
+      readbackBuf.unmap();
+      mapWaitTimes.push(performance.now() - t);
+    }
+
+    // 3. mapAsync WITHOUT onSubmittedWorkDone (just raw mapAsync)
+    const mapNoWaitTimes: number[] = [];
+    for (let i = 0; i < iterations; i++) {
+      device.queue.copyExternalImageToTexture({ source }, { texture: canvasTexture }, [256, 256]);
+      const enc = device.createCommandEncoder();
+      { const p = enc.beginComputePass(); p.setPipeline(canvasInputPipeline); p.setBindGroup(0, canvasInputBG); p.dispatchWorkgroups(16, 16, 1); p.end(); }
+      encodeInference(enc, readbackBuf);
+      device.queue.submit([enc.finish()]);
+      const t = performance.now();
+      await readbackBuf.mapAsync(GPUMapMode.READ);
+      readbackBuf.getMappedRange();
+      readbackBuf.unmap();
+      mapNoWaitTimes.push(performance.now() - t);
+    }
+
+    // 4. Total end-to-end
+    const totalTimes: number[] = [];
+    for (let i = 0; i < iterations; i++) {
+      const t = performance.now();
+      await runFromCanvas(source);
+      totalTimes.push(performance.now() - t);
+    }
+
+    // 5. Pipelined throughput
+    await runFromCanvasPipelined(source); // prime
+    const pipeTimes: number[] = [];
+    for (let i = 0; i < iterations; i++) {
+      const t = performance.now();
+      await runFromCanvasPipelined(source);
+      pipeTimes.push(performance.now() - t);
+    }
+    await flushPipelined();
+
+    return {
+      gpuOnly: stats(gpuTimes),
+      mapAsyncOnly: stats(mapWaitTimes),
+      mapAsyncNoWait: stats(mapNoWaitTimes),
+      total: stats(totalTimes),
+      pipelined: stats(pipeTimes),
+    };
+  }
+
   return {
     device, run, runFromCanvas, runFromCanvasPipelined, flushPipelined,
-    benchmark, benchmarkGPU,
+    benchmark, benchmarkGPU, benchmarkDiagnostic,
     _device: device,
     _benchmarkSubmitOnly: submitOnly,
   };

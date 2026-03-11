@@ -145,5 +145,10 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     scratchCanvas = null;
   }
 
-  return { detect, detectPipelined, flushPipelined, dispose };
+  async function benchmarkDiagnostic(source: HandposeInput) {
+    const input = await toModelInput(source);
+    return model.benchmarkDiagnostic(input);
+  }
+
+  return { detect, detectPipelined, flushPipelined, dispose, benchmarkDiagnostic };
 }
