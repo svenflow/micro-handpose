@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>micro-handpose — Tiny, fast hand landmark detection</title>
+  <meta name="description" content="57KB WebGPU hand tracking. 2ms inference. Zero dependencies. TypeScript.">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0a0a0a;
+      --surface: #141414;
+      --border: #222;
+      --text: #ededed;
+      --text-secondary: #888;
+      --accent: #7c6aef;
+      --accent-dim: rgba(124, 106, 239, 0.15);
+      --green: #34d399;
+      --radius: 12px;
+      --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+    }
+
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .container { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+
+    /* --- NAV --- */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(10, 10, 10, 0.8);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    nav .container {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 56px;
+    }
+    nav .logo { font-weight: 600; font-size: 15px; letter-spacing: -0.02em; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-secondary); font-size: 14px; font-weight: 500; }
+    nav .links a:hover { color: var(--text); text-decoration: none; }
+
+    /* --- HERO --- */
+    .hero {
+      padding: 160px 0 80px;
+      text-align: center;
+    }
+    .hero .badge {
+      display: inline-block;
+      padding: 6px 14px;
+      background: var(--accent-dim);
+      border: 1px solid rgba(124, 106, 239, 0.25);
+      border-radius: 100px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--accent);
+      margin-bottom: 24px;
+    }
+    .hero h1 {
+      font-size: clamp(40px, 6vw, 64px);
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1.1;
+      margin-bottom: 16px;
+      background: linear-gradient(135deg, #fff 0%, #888 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero .tagline {
+      font-size: clamp(16px, 2.5vw, 20px);
+      color: var(--text-secondary);
+      max-width: 500px;
+      margin: 0 auto 40px;
+      font-weight: 400;
+    }
+    .install-box {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px 12px 20px;
+      font-family: var(--mono);
+      font-size: 14px;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .install-box:hover { border-color: #444; }
+    .install-box code { color: var(--text-secondary); }
+    .install-box code span { color: var(--green); }
+    .install-box .copy-btn {
+      background: none; border: none; cursor: pointer;
+      color: var(--text-secondary); padding: 4px;
+      display: flex; align-items: center; transition: color 0.2s;
+    }
+    .install-box .copy-btn:hover { color: var(--text); }
+    .install-box .copy-btn svg { width: 16px; height: 16px; }
+
+    /* --- DEMO --- */
+    .demo-section { padding: 40px 0 80px; }
+    .demo-section h2 {
+      font-size: 14px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-secondary);
+      margin-bottom: 24px;
+      text-align: center;
+    }
+    .demo-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .demo-viewport {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .demo-viewport video {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+    .demo-viewport canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      transform: scaleX(-1);
+    }
+    .demo-placeholder {
+      text-align: center;
+      color: var(--text-secondary);
+      z-index: 1;
+    }
+    .demo-placeholder svg {
+      width: 48px; height: 48px;
+      margin-bottom: 16px;
+      opacity: 0.4;
+    }
+    .demo-placeholder p { font-size: 14px; margin-bottom: 20px; }
+
+    .start-btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 24px;
+      font-size: 14px;
+      font-weight: 600;
+      font-family: var(--font);
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .start-btn:hover { opacity: 0.85; }
+    .start-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .demo-stats {
+      display: flex;
+      gap: 1px;
+      background: var(--border);
+      border-top: 1px solid var(--border);
+    }
+    .demo-stat {
+      flex: 1;
+      background: var(--surface);
+      padding: 12px 16px;
+      text-align: center;
+    }
+    .demo-stat .label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-secondary);
+      margin-bottom: 2px;
+    }
+    .demo-stat .value {
+      font-family: var(--mono);
+      font-size: 18px;
+      font-weight: 500;
+      color: var(--text);
+    }
+    .demo-stat .value.active { color: var(--green); }
+    .demo-error {
+      padding: 12px 16px;
+      background: rgba(239, 68, 68, 0.1);
+      border-top: 1px solid rgba(239, 68, 68, 0.2);
+      color: #f87171;
+      font-size: 13px;
+      text-align: center;
+      display: none;
+    }
+
+    /* --- FEATURES --- */
+    .features-section { padding: 40px 0 80px; }
+    .features-section h2 {
+      font-size: 14px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.1em;
+      color: var(--text-secondary); margin-bottom: 24px;
+      text-align: center;
+    }
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .feature {
+      background: var(--surface);
+      padding: 28px 24px;
+      text-align: center;
+    }
+    .feature .stat {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 4px;
+      background: linear-gradient(135deg, var(--accent), #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .feature .desc {
+      font-size: 13px;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+
+    /* --- CODE --- */
+    .code-section { padding: 40px 0 80px; }
+    .code-section h2 {
+      font-size: 14px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.1em;
+      color: var(--text-secondary); margin-bottom: 24px;
+      text-align: center;
+    }
+    .code-block {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .code-block .code-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+    .code-block pre {
+      padding: 20px 24px;
+      overflow-x: auto;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.7;
+      color: #c9d1d9;
+    }
+    .code-block .kw { color: #ff7b72; }
+    .code-block .fn { color: #d2a8ff; }
+    .code-block .str { color: #a5d6ff; }
+    .code-block .cm { color: #555; }
+    .code-block .const { color: #79c0ff; }
+
+    /* --- FOOTER --- */
+    footer {
+      padding: 40px 0;
+      border-top: 1px solid var(--border);
+      text-align: center;
+    }
+    .footer-links {
+      display: flex; gap: 24px; justify-content: center; margin-bottom: 16px;
+    }
+    .footer-links a {
+      color: var(--text-secondary); font-size: 14px; font-weight: 500;
+    }
+    .footer-links a:hover { color: var(--text); }
+    footer .copy {
+      font-size: 13px; color: #444;
+    }
+
+    /* --- RESPONSIVE --- */
+    @media (max-width: 600px) {
+      .hero { padding: 120px 0 60px; }
+      .install-box { font-size: 12px; padding: 10px 12px; }
+      .features-grid { grid-template-columns: repeat(2, 1fr); }
+      .demo-stats { flex-wrap: wrap; }
+      .demo-stat { min-width: 50%; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Nav -->
+  <nav>
+    <div class="container">
+      <div class="logo">@svenflow/micro-handpose</div>
+      <div class="links">
+        <a href="#demo">Demo</a>
+        <a href="#features">Features</a>
+        <a href="https://www.npmjs.com/package/@svenflow/micro-handpose" target="_blank">npm</a>
+        <a href="https://github.com/AnomalyInnovations/micro-handpose" target="_blank">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <div class="badge">v0.1.1 &mdash; WebGPU</div>
+      <h1>micro-handpose</h1>
+      <p class="tagline">Tiny, fast hand landmark detection. 2ms. Zero deps.</p>
+      <div class="install-box" onclick="copyInstall()" title="Click to copy">
+        <code>npm i <span>@svenflow/micro-handpose</span></code>
+        <button class="copy-btn" aria-label="Copy install command">
+          <svg id="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          <svg id="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Demo -->
+  <section class="demo-section" id="demo">
+    <div class="container">
+      <h2>Live Demo</h2>
+      <div class="demo-card">
+        <div class="demo-viewport" id="viewport">
+          <video id="video" autoplay playsinline></video>
+          <canvas id="canvas"></canvas>
+          <div class="demo-placeholder" id="placeholder">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2"/>
+              <path d="M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2"/>
+              <path d="M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8"/>
+              <path d="M18 8a2 2 0 0 1 2 2v7a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5v-1a2 2 0 0 1 2-2 2 2 0 0 1 2 2"/>
+            </svg>
+            <p>Hand tracking powered by WebGPU</p>
+            <button class="start-btn" id="startBtn" onclick="startDemo()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" stroke="none"/>
+              </svg>
+              Start Demo
+            </button>
+          </div>
+        </div>
+        <div class="demo-error" id="errorBar"></div>
+        <div class="demo-stats">
+          <div class="demo-stat">
+            <div class="label">Status</div>
+            <div class="value" id="statusVal">Idle</div>
+          </div>
+          <div class="demo-stat">
+            <div class="label">FPS</div>
+            <div class="value" id="fpsVal">&mdash;</div>
+          </div>
+          <div class="demo-stat">
+            <div class="label">Inference</div>
+            <div class="value" id="inferVal">&mdash;</div>
+          </div>
+          <div class="demo-stat">
+            <div class="label">Hand</div>
+            <div class="value" id="handVal">&mdash;</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="features-section" id="features">
+    <div class="container">
+      <h2>At a Glance</h2>
+      <div class="features-grid">
+        <div class="feature">
+          <div class="stat">57KB</div>
+          <div class="desc">Gzipped bundle</div>
+        </div>
+        <div class="feature">
+          <div class="stat">2.2ms</div>
+          <div class="desc">Inference time</div>
+        </div>
+        <div class="feature">
+          <div class="stat">0</div>
+          <div class="desc">Dependencies</div>
+        </div>
+        <div class="feature">
+          <div class="stat">TS</div>
+          <div class="desc">Full TypeScript</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Code Example -->
+  <section class="code-section" id="usage">
+    <div class="container">
+      <h2>Usage</h2>
+      <div class="code-block">
+        <div class="code-header">
+          <span>example.ts</span>
+        </div>
+        <pre><span class="kw">import</span> { <span class="fn">createHandpose</span> } <span class="kw">from</span> <span class="str">'@svenflow/micro-handpose'</span>
+
+<span class="cm">// Initialize once (downloads weights, compiles WebGPU pipeline)</span>
+<span class="kw">const</span> handpose = <span class="kw">await</span> <span class="fn">createHandpose</span>()
+
+<span class="cm">// Detect from any image source: canvas, video, image, ImageData</span>
+<span class="kw">const</span> result = <span class="kw">await</span> handpose.<span class="fn">detect</span>(videoElement)
+
+<span class="kw">if</span> (result) {
+  console.<span class="fn">log</span>(result.score)      <span class="cm">// 0.99</span>
+  console.<span class="fn">log</span>(result.handedness) <span class="cm">// 'left' | 'right'</span>
+  console.<span class="fn">log</span>(result.landmarks)  <span class="cm">// 21 { x, y, z } points</span>
+}
+
+<span class="cm">// Clean up GPU resources when done</span>
+handpose.<span class="fn">dispose</span>()</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://www.npmjs.com/package/@svenflow/micro-handpose" target="_blank">npm</a>
+        <a href="https://github.com/AnomalyInnovations/micro-handpose" target="_blank">GitHub</a>
+        <a href="https://github.com/AnomalyInnovations/micro-handpose/issues" target="_blank">Issues</a>
+      </div>
+      <p class="copy">@svenflow/micro-handpose</p>
+    </div>
+  </footer>
+
+  <script type="module">
+    // --- Copy install command ---
+    window.copyInstall = async function () {
+      await navigator.clipboard.writeText('npm i @svenflow/micro-handpose');
+      const ci = document.getElementById('copy-icon');
+      const ch = document.getElementById('check-icon');
+      ci.style.display = 'none';
+      ch.style.display = 'block';
+      setTimeout(() => { ci.style.display = 'block'; ch.style.display = 'none'; }, 1500);
+    };
+
+    // --- MediaPipe hand skeleton connections ---
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],         // thumb
+      [0,5],[5,6],[6,7],[7,8],         // index
+      [0,9],[9,10],[10,11],[11,12],    // middle (via wrist)
+      [0,13],[13,14],[14,15],[15,16],  // ring (via wrist)
+      [0,17],[17,18],[18,19],[19,20],  // pinky (via wrist)
+      [5,9],[9,13],[13,17],            // palm
+    ];
+
+    const FINGER_COLORS = {
+      thumb:  '#ff6b6b',
+      index:  '#ffd93d',
+      middle: '#6bcb77',
+      ring:   '#4d96ff',
+      pinky:  '#9b59b6',
+      palm:   '#888',
+    };
+
+    function connectionColor(a, b) {
+      if (a <= 4 && b <= 4) return FINGER_COLORS.thumb;
+      if ((a >= 5 && a <= 8) || (b >= 5 && b <= 8)) {
+        if (a === 0 || b === 0) return FINGER_COLORS.index;
+        return FINGER_COLORS.index;
+      }
+      if ((a >= 9 && a <= 12) || (b >= 9 && b <= 12)) {
+        if (a === 0 || b === 0) return FINGER_COLORS.middle;
+        return FINGER_COLORS.middle;
+      }
+      if ((a >= 13 && a <= 16) || (b >= 13 && b <= 16)) {
+        if (a === 0 || b === 0) return FINGER_COLORS.ring;
+        return FINGER_COLORS.ring;
+      }
+      if ((a >= 17 && a <= 20) || (b >= 17 && b <= 20)) {
+        if (a === 0 || b === 0) return FINGER_COLORS.pinky;
+        return FINGER_COLORS.pinky;
+      }
+      return FINGER_COLORS.palm;
+    }
+
+    function landmarkColor(i) {
+      if (i === 0) return '#fff';
+      if (i <= 4) return FINGER_COLORS.thumb;
+      if (i <= 8) return FINGER_COLORS.index;
+      if (i <= 12) return FINGER_COLORS.middle;
+      if (i <= 16) return FINGER_COLORS.ring;
+      return FINGER_COLORS.pinky;
+    }
+
+    // --- Demo state ---
+    let handpose = null;
+    let running = false;
+    let frameCount = 0;
+    let lastFpsTime = performance.now();
+
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const placeholder = document.getElementById('placeholder');
+    const startBtn = document.getElementById('startBtn');
+    const statusVal = document.getElementById('statusVal');
+    const fpsVal = document.getElementById('fpsVal');
+    const inferVal = document.getElementById('inferVal');
+    const handVal = document.getElementById('handVal');
+    const errorBar = document.getElementById('errorBar');
+
+    function showError(msg) {
+      errorBar.textContent = msg;
+      errorBar.style.display = 'block';
+    }
+
+    window.startDemo = async function () {
+      startBtn.disabled = true;
+      statusVal.textContent = 'Loading...';
+
+      try {
+        // Request camera
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        // Size canvas to match video
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        placeholder.style.display = 'none';
+
+        statusVal.textContent = 'Loading model...';
+
+        // Dynamic import from CDN
+        const { createHandpose } = await import(
+          'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.1/dist/index.js'
+        );
+
+        handpose = await createHandpose({
+          weightsUrl: 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.1/weights/'
+        });
+
+        statusVal.textContent = 'Running';
+        statusVal.classList.add('active');
+        running = true;
+        lastFpsTime = performance.now();
+        frameCount = 0;
+        detectLoop();
+
+      } catch (err) {
+        statusVal.textContent = 'Error';
+        startBtn.disabled = false;
+        if (err.message && err.message.includes('WebGPU')) {
+          showError('WebGPU is not supported in this browser. Try Chrome 113+ or Edge 113+.');
+        } else if (err.name === 'NotAllowedError') {
+          showError('Camera permission was denied.');
+        } else {
+          showError(err.message || 'An unknown error occurred.');
+        }
+        console.error(err);
+      }
+    };
+
+    async function detectLoop() {
+      if (!running) return;
+
+      const t0 = performance.now();
+      const result = await handpose.detect(video);
+      const inferTime = performance.now() - t0;
+
+      // Update inference display
+      inferVal.textContent = inferTime.toFixed(1) + 'ms';
+
+      // FPS
+      frameCount++;
+      const now = performance.now();
+      if (now - lastFpsTime >= 500) {
+        const fps = (frameCount / (now - lastFpsTime)) * 1000;
+        fpsVal.textContent = Math.round(fps);
+        frameCount = 0;
+        lastFpsTime = now;
+      }
+
+      // Draw
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (result) {
+        handVal.textContent = result.handedness;
+        handVal.classList.add('active');
+        drawHand(result.landmarks, canvas.width, canvas.height);
+      } else {
+        handVal.textContent = '\u2014';
+        handVal.classList.remove('active');
+      }
+
+      requestAnimationFrame(detectLoop);
+    }
+
+    function drawHand(landmarks, w, h) {
+      // Draw connections
+      for (const [a, b] of CONNECTIONS) {
+        const la = landmarks[a];
+        const lb = landmarks[b];
+        ctx.beginPath();
+        ctx.moveTo(la.x * w, la.y * h);
+        ctx.lineTo(lb.x * w, lb.y * h);
+        ctx.strokeStyle = connectionColor(a, b);
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.globalAlpha = 0.8;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
+      // Draw landmark dots
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i];
+        const x = lm.x * w;
+        const y = lm.y * h;
+        const r = i === 0 ? 6 : 4;
+
+        // Outer glow
+        ctx.beginPath();
+        ctx.arc(x, y, r + 2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fill();
+
+        // Dot
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = landmarkColor(i);
+        ctx.fill();
+      }
+    }
+  </script>
+</body>
+</html>

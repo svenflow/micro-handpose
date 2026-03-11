@@ -1,0 +1,59 @@
+/** A 3D landmark point (x, y in [0,1] image coords, z is relative depth) */
+export interface Landmark {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** Hand landmark names in order (21 landmarks) */
+export const LANDMARK_NAMES = [
+  'wrist',
+  'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+  'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+  'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+  'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+  'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+] as const;
+
+/** Detection result for a single hand */
+export interface HandposeResult {
+  /** Confidence score (0-1) that a hand is present */
+  score: number;
+  /** Whether this is a left or right hand */
+  handedness: 'left' | 'right';
+  /** 21 hand landmarks in order (wrist, thumb_cmc, ..., pinky_tip) */
+  landmarks: Landmark[];
+}
+
+/** Options for creating a handpose detector */
+export interface HandposeOptions {
+  /** URL to fetch weights from. Defaults to bundled weights or CDN. */
+  weightsUrl?: string;
+  /** Minimum confidence score to return a detection (0-1). Default: 0.5 */
+  scoreThreshold?: number;
+}
+
+/** A handpose detector instance */
+export interface Handpose {
+  /**
+   * Detect hand landmarks from an image source.
+   *
+   * Accepts: HTMLCanvasElement, OffscreenCanvas, ImageBitmap, HTMLImageElement,
+   * HTMLVideoElement, or ImageData.
+   *
+   * Returns null if no hand is detected (below score threshold).
+   */
+  detect: (source: HandposeInput) => Promise<HandposeResult | null>;
+
+  /** Dispose GPU resources */
+  dispose: () => void;
+}
+
+/** Accepted input types for detection */
+export type HandposeInput =
+  | HTMLCanvasElement
+  | OffscreenCanvas
+  | ImageBitmap
+  | HTMLImageElement
+  | HTMLVideoElement
+  | ImageData;

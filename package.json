@@ -1,0 +1,46 @@
+{
+  "name": "@svenflow/micro-handpose",
+  "publishConfig": {
+    "access": "public"
+  },
+  "version": "0.1.1",
+  "description": "Tiny, fast hand landmark detection. WebGPU-powered, 2ms inference, zero dependencies.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --minify",
+    "dev": "tsup src/index.ts --format esm --dts --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "hand",
+    "pose",
+    "landmark",
+    "detection",
+    "webgpu",
+    "mediapipe",
+    "blazehand",
+    "realtime",
+    "ml",
+    "ai"
+  ],
+  "devDependencies": {
+    "@webgpu/types": "^0.1.40",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0"
+  },
+  "files": [
+    "dist",
+    "weights",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "license": "MIT"
+}
