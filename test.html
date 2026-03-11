@@ -7,13 +7,7 @@
   <style>
     body { font-family: system-ui; max-width: 600px; margin: 40px auto; padding: 20px; background: #111; color: #eee; }
     pre { background: #222; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; }
-    .success { color: #4CAF50; }
-    .error { color: #f44336; }
     img { max-width: 200px; border-radius: 8px; }
-    table { border-collapse: collapse; width: 100%; margin: 10px 0; }
-    th, td { text-align: left; padding: 6px 12px; border: 1px solid #444; }
-    th { background: #333; }
-    .fast { color: #4CAF50; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -46,58 +40,51 @@
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, 256, 256);
 
-        // Correctness check (standard)
+        // Correctness
         const result = await handpose.detect(canvas);
         if (result) {
-          log(`✅ standard: score=${result.score.toFixed(4)} hand=${result.handedness}`);
+          log(`✅ score=${result.score.toFixed(4)} hand=${result.handedness}`);
         } else {
           log('❌ no hand detected!');
           return;
         }
 
-        // Correctness check (render readback - compare against standard)
-        try {
-          // Access internal model to test render readback
-          const { createHandpose: _ } = await import('./dist/index.js');
-          // Quick comparison: detect with both methods and compare scores
-          log('testing render readback correctness...');
-        } catch (e) {
-          log(`render readback test: ${e.message}`);
-        }
-
         // Diagnostic benchmark
-        log('\n🔬 Running diagnostic benchmark (250 iterations)...');
-        log('This tests GPU compute, mapAsync, and pipelining separately.\n');
+        log('\n🔬 Running diagnostic benchmark...\n');
         const diag = await handpose.benchmarkDiagnostic(canvas, 50);
 
-        log('=== TIMING BREAKDOWN ===');
-        log(`GPU only (onSubmittedWorkDone): ${diag.gpuOnly.median.toFixed(1)}ms median, ${diag.gpuOnly.min.toFixed(1)}ms min`);
-        log(`mapAsync (with onSubmittedWorkDone): ${diag.mapAsyncOnly.median.toFixed(1)}ms median, ${diag.mapAsyncOnly.min.toFixed(1)}ms min`);
-        log(`mapAsync (raw, no wait): ${diag.mapAsyncNoWait.median.toFixed(1)}ms median, ${diag.mapAsyncNoWait.min.toFixed(1)}ms min`);
-        log(`Total end-to-end: ${diag.total.median.toFixed(1)}ms median, ${diag.total.min.toFixed(1)}ms min`);
-        log(`Pipelined throughput: ${diag.pipelined.median.toFixed(1)}ms median, ${diag.pipelined.min.toFixed(1)}ms min`);
-
+        log('=== TIMING BREAKDOWN (median / min) ===');
+        log(`GPU only:              ${diag.gpuOnly.median.toFixed(1)}ms / ${diag.gpuOnly.min.toFixed(1)}ms`);
+        log(`mapAsync+wait:         ${diag.mapAsyncOnly.median.toFixed(1)}ms / ${diag.mapAsyncOnly.min.toFixed(1)}ms`);
+        log(`mapAsync raw:          ${diag.mapAsyncNoWait.median.toFixed(1)}ms / ${diag.mapAsyncNoWait.min.toFixed(1)}ms`);
+        log(`Total e2e:             ${diag.total.median.toFixed(1)}ms / ${diag.total.min.toFixed(1)}ms`);
+        log(`Pipelined:             ${diag.pipelined.median.toFixed(1)}ms / ${diag.pipelined.min.toFixed(1)}ms`);
         if (diag.renderReadback) {
-          log(`Render readback (canvas): ${diag.renderReadback.median.toFixed(1)}ms median, ${diag.renderReadback.min.toFixed(1)}ms min`);
+          log(`Render readback:       ${diag.renderReadback.median.toFixed(1)}ms / ${diag.renderReadback.min.toFixed(1)}ms`);
         } else {
-          log(`Render readback: not available (no WebGPU canvas context)`);
+          log(`Render readback:       N/A (no WebGPU canvas)`);
         }
 
-        const readbackOverhead = diag.total.median - diag.gpuOnly.median;
-        log(`\nReadback overhead: ~${readbackOverhead.toFixed(1)}ms (total - gpu)`);
-        log(`Pipelined saves: ~${(diag.total.median - diag.pipelined.median).toFixed(1)}ms vs standard`);
-        if (diag.renderReadback) {
-          const renderVsMap = diag.total.median - diag.renderReadback.median;
-          log(`Render vs mapAsync: ${renderVsMap > 0 ? 'faster' : 'slower'} by ${Math.abs(renderVsMap).toFixed(1)}ms`);
-        }
+        log(`\nReadback overhead: ~${(diag.total.median - diag.gpuOnly.median).toFixed(1)}ms`);
+        log(`Best approach: ${getBest(diag)}`);
 
         handpose.dispose();
         log('\ndone.');
 
       } catch (e) {
-        log(`\n❌ error: ${e.message}`);
+        log(`\n❌ error: ${e.message}\n${e.stack}`);
         console.error(e);
       }
+    }
+
+    function getBest(diag) {
+      const approaches = [
+        ['mapAsync', diag.total.median],
+        ['pipelined', diag.pipelined.median],
+      ];
+      if (diag.renderReadback) approaches.push(['render', diag.renderReadback.median]);
+      approaches.sort((a, b) => a[1] - b[1]);
+      return `${approaches[0][0]} (${approaches[0][1].toFixed(1)}ms)`;
     }
 
     run();
