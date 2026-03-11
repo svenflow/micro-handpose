@@ -155,79 +155,26 @@ interface ResModuleSpec {
   prefix: string;
 }
 
-// Full model layer sequence (all ResModules)
-// The non-ResModule ops (input conv, upsamples, adds, output heads) are handled separately
-const RESMODULE_LAYERS: ResModuleSpec[] = [
-  // backbone1: ResBlock(2) + ResModule stride=2
-  { type: 'resmodule', inCh: 24, outCh: 24, h: 128, w: 128, stride: 1, prefix: 'backbone1.3.f.0.' },
-  { type: 'resmodule', inCh: 24, outCh: 24, h: 128, w: 128, stride: 1, prefix: 'backbone1.3.f.1.' },
-  { type: 'resmodule', inCh: 24, outCh: 48, h: 128, w: 128, stride: 2, prefix: 'backbone1.4.' },
-
-  // backbone2: ResBlock(2) + ResModule stride=2
-  { type: 'resmodule', inCh: 48, outCh: 48, h: 64, w: 64, stride: 1, prefix: 'backbone2.0.f.0.' },
-  { type: 'resmodule', inCh: 48, outCh: 48, h: 64, w: 64, stride: 1, prefix: 'backbone2.0.f.1.' },
-  { type: 'resmodule', inCh: 48, outCh: 96, h: 64, w: 64, stride: 2, prefix: 'backbone2.1.' },
-
-  // backbone3: ResBlock(2) + ResModule stride=2
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 32, w: 32, stride: 1, prefix: 'backbone3.0.f.0.' },
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 32, w: 32, stride: 1, prefix: 'backbone3.0.f.1.' },
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 32, w: 32, stride: 2, prefix: 'backbone3.1.' },
-
-  // backbone4: ResBlock(2) + ResModule stride=2 (then upsample + add b3)
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 16, w: 16, stride: 1, prefix: 'backbone4.0.f.0.' },
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 16, w: 16, stride: 1, prefix: 'backbone4.0.f.1.' },
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 16, w: 16, stride: 2, prefix: 'backbone4.1.' },
-  // MARKER: after layer 11, do upsample + add b3
-
-  // backbone5: ResModule (then upsample + add b2)
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 16, w: 16, stride: 1, prefix: 'backbone5.0.' },
-  // MARKER: after layer 12, do upsample + add b2
-
-  // backbone6: ResModule (then conv1x1 + upsample + add b1)
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 32, w: 32, stride: 1, prefix: 'backbone6.0.' },
-  // MARKER: after layer 13, do conv1x1(96->48) + upsample + add b1
-
-  // ff.0: ResBlock(4) + ff.1 ResModule
-  { type: 'resmodule', inCh: 48, outCh: 48, h: 64, w: 64, stride: 1, prefix: 'ff.0.f.0.' },
-  { type: 'resmodule', inCh: 48, outCh: 48, h: 64, w: 64, stride: 1, prefix: 'ff.0.f.1.' },
-  { type: 'resmodule', inCh: 48, outCh: 48, h: 64, w: 64, stride: 1, prefix: 'ff.0.f.2.' },
-  { type: 'resmodule', inCh: 48, outCh: 48, h: 64, w: 64, stride: 1, prefix: 'ff.0.f.3.' },
-  { type: 'resmodule', inCh: 48, outCh: 96, h: 64, w: 64, stride: 2, prefix: 'ff.1.' },
-
-  // ff.2: ResBlock(4) + ff.3 ResModule
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 32, w: 32, stride: 1, prefix: 'ff.2.f.0.' },
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 32, w: 32, stride: 1, prefix: 'ff.2.f.1.' },
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 32, w: 32, stride: 1, prefix: 'ff.2.f.2.' },
-  { type: 'resmodule', inCh: 96, outCh: 96, h: 32, w: 32, stride: 1, prefix: 'ff.2.f.3.' },
-  { type: 'resmodule', inCh: 96, outCh: 288, h: 32, w: 32, stride: 2, prefix: 'ff.3.' },
-
-  // ff.4: ResBlock(4) + ff.5 ResModule
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 16, w: 16, stride: 1, prefix: 'ff.4.f.0.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 16, w: 16, stride: 1, prefix: 'ff.4.f.1.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 16, w: 16, stride: 1, prefix: 'ff.4.f.2.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 16, w: 16, stride: 1, prefix: 'ff.4.f.3.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 16, w: 16, stride: 2, prefix: 'ff.5.' },
-
-  // ff.6: ResBlock(4) + ff.7 ResModule
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 8, w: 8, stride: 1, prefix: 'ff.6.f.0.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 8, w: 8, stride: 1, prefix: 'ff.6.f.1.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 8, w: 8, stride: 1, prefix: 'ff.6.f.2.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 8, w: 8, stride: 1, prefix: 'ff.6.f.3.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 8, w: 8, stride: 2, prefix: 'ff.7.' },
-
-  // ff.8: ResBlock(4) + ff.9 ResModule
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 4, w: 4, stride: 1, prefix: 'ff.8.f.0.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 4, w: 4, stride: 1, prefix: 'ff.8.f.1.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 4, w: 4, stride: 1, prefix: 'ff.8.f.2.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 4, w: 4, stride: 1, prefix: 'ff.8.f.3.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 4, w: 4, stride: 2, prefix: 'ff.9.' },
-
-  // ff.10: ResBlock(4) - final block
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 2, w: 2, stride: 1, prefix: 'ff.10.f.0.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 2, w: 2, stride: 1, prefix: 'ff.10.f.1.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 2, w: 2, stride: 1, prefix: 'ff.10.f.2.' },
-  { type: 'resmodule', inCh: 288, outCh: 288, h: 2, w: 2, stride: 1, prefix: 'ff.10.f.3.' },
+// Compact layer config: [inCh, outCh, h, stride, prefix]
+// w is always equal to h, type is always 'resmodule'
+type LayerTuple = [number, number, number, 1 | 2, string];
+const LAYER_TUPLES: LayerTuple[] = [
+  [24,24,128,1,'backbone1.3.f.0.'],[24,24,128,1,'backbone1.3.f.1.'],[24,48,128,2,'backbone1.4.'],
+  [48,48,64,1,'backbone2.0.f.0.'],[48,48,64,1,'backbone2.0.f.1.'],[48,96,64,2,'backbone2.1.'],
+  [96,96,32,1,'backbone3.0.f.0.'],[96,96,32,1,'backbone3.0.f.1.'],[96,96,32,2,'backbone3.1.'],
+  [96,96,16,1,'backbone4.0.f.0.'],[96,96,16,1,'backbone4.0.f.1.'],[96,96,16,2,'backbone4.1.'],
+  [96,96,16,1,'backbone5.0.'],
+  [96,96,32,1,'backbone6.0.'],
+  [48,48,64,1,'ff.0.f.0.'],[48,48,64,1,'ff.0.f.1.'],[48,48,64,1,'ff.0.f.2.'],[48,48,64,1,'ff.0.f.3.'],[48,96,64,2,'ff.1.'],
+  [96,96,32,1,'ff.2.f.0.'],[96,96,32,1,'ff.2.f.1.'],[96,96,32,1,'ff.2.f.2.'],[96,96,32,1,'ff.2.f.3.'],[96,288,32,2,'ff.3.'],
+  [288,288,16,1,'ff.4.f.0.'],[288,288,16,1,'ff.4.f.1.'],[288,288,16,1,'ff.4.f.2.'],[288,288,16,1,'ff.4.f.3.'],[288,288,16,2,'ff.5.'],
+  [288,288,8,1,'ff.6.f.0.'],[288,288,8,1,'ff.6.f.1.'],[288,288,8,1,'ff.6.f.2.'],[288,288,8,1,'ff.6.f.3.'],[288,288,8,2,'ff.7.'],
+  [288,288,4,1,'ff.8.f.0.'],[288,288,4,1,'ff.8.f.1.'],[288,288,4,1,'ff.8.f.2.'],[288,288,4,1,'ff.8.f.3.'],[288,288,4,2,'ff.9.'],
+  [288,288,2,1,'ff.10.f.0.'],[288,288,2,1,'ff.10.f.1.'],[288,288,2,1,'ff.10.f.2.'],[288,288,2,1,'ff.10.f.3.'],
 ];
+const RESMODULE_LAYERS: ResModuleSpec[] = LAYER_TUPLES.map(([inCh, outCh, h, stride, prefix]) => ({
+  type: 'resmodule' as const, inCh, outCh, h, w: h, stride, prefix,
+}));
 
 // Layers where we need to save feature maps for skip connections
 const SAVE_B1_AFTER = 2;   // After backbone1.4 (layer idx 2), save b1 = 64x64x48
@@ -280,6 +227,46 @@ export async function compileModel(
 
   const device = await adapter.requestDevice();
 
+  // ============ Helpers ============
+  // r=read-only-storage, s=storage, u=uniform
+  const BT: Record<string, GPUBufferBindingType> = { r: 'read-only-storage', s: 'storage', u: 'uniform' };
+  function makeLayout(types: string[]): GPUBindGroupLayout {
+    return device.createBindGroupLayout({
+      entries: types.map((t, i) => ({ binding: i, visibility: GPUShaderStage.COMPUTE, buffer: { type: BT[t]! } })),
+    });
+  }
+  function makeTexLayout(types: string[]): GPUBindGroupLayout {
+    return device.createBindGroupLayout({
+      entries: types.map((t, i) => {
+        if (t === 't') return { binding: i, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' as const } };
+        return { binding: i, visibility: GPUShaderStage.COMPUTE, buffer: { type: BT[t]! } };
+      }),
+    });
+  }
+  const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+  const SCS = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const SO = GPUBufferUsage.STORAGE;
+  const SOC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC;
+  const UC = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
+  function makeBuf(size: number, usage: number): GPUBuffer {
+    return device.createBuffer({ size, usage });
+  }
+  function makeBind(layout: GPUBindGroupLayout, bufs: (GPUBuffer | GPUTextureView)[]): GPUBindGroup {
+    return device.createBindGroup({
+      layout,
+      entries: bufs.map((b, i) => ({
+        binding: i,
+        resource: 'size' in b ? { buffer: b as GPUBuffer } : b as GPUTextureView,
+      })),
+    });
+  }
+  function makePipe(layout: GPUBindGroupLayout, shader: GPUShaderModule): GPUComputePipeline {
+    return device.createComputePipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+      compute: { module: shader, entryPoint: 'main' },
+    });
+  }
+
   // ============ Create Shader Modules ============
   const padInputShader = device.createShaderModule({ code: PAD_INPUT_SHADER });
   const canvasInputShader = device.createShaderModule({ code: CANVAS_INPUT_SHADER });
@@ -297,144 +284,28 @@ export async function compileModel(
   const outputLandmarksShader = device.createShaderModule({ code: OUTPUT_HEAD_LANDMARKS_SHADER });
 
   // ============ Create Bind Group Layouts ============
-  const dwLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-
-  const pwLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-
-  // Padding layout (input 256x256 -> 257x257)
-  const padLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-
-  const inputConvLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-
-  const upsampleLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-
-  const addLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-
-  // Fused upsample+add layout (saves one dispatch per feature pyramid level)
-  const upsampleAddLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-
-  const conv1x1Layout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-
-  const outputLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-
-  // Canvas input layout: texture_2d + storage buffer + uniform
-  const canvasInputLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-
-  // Fused output heads layout: input + 3*(weight,bias) + 3*output = 10 bindings
-  const fusedOutputLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },  // input
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },  // handflag_w
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },  // handflag_b
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },  // handedness_w
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },  // handedness_b
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },  // landmarks_w
-      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },  // landmarks_b
-      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },            // handflag out
-      { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },            // handedness out
-      { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },            // landmarks out
-    ],
-  });
+  const dwLayout = makeLayout(['r', 'r', 'r', 's', 'u']);
+  const pwLayout = makeLayout(['r', 'r', 'r', 'r', 's', 'u']);
+  const padLayout = makeLayout(['r', 's', 'u']);
+  const inputConvLayout = makeLayout(['r', 'r', 'r', 's', 'u']);
+  const upsampleLayout = makeLayout(['r', 's', 'u']);
+  const addLayout = makeLayout(['r', 'r', 's', 'u']);
+  const upsampleAddLayout = makeLayout(['r', 'r', 's', 'u']);
+  const conv1x1Layout = makeLayout(['r', 'r', 'r', 's', 'u']);
+  const outputLayout = makeLayout(['r', 'r', 'r', 's', 'u']);
+  const canvasInputLayout = makeTexLayout(['t', 's', 'u']);
+  const fusedOutputLayout = makeLayout(['r', 'r', 'r', 'r', 'r', 'r', 'r', 's', 's', 's']);
 
   // ============ Create Compute Pipelines ============
-  // Default pipelines with (8,8,1) workgroup size
   const dwPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [dwLayout] });
   const pwPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [pwLayout] });
+  const mkDwPipe = (s: GPUShaderModule) => device.createComputePipeline({ layout: dwPipelineLayout, compute: { module: s, entryPoint: 'main' } });
+  const mkPwPipe = (s: GPUShaderModule) => device.createComputePipeline({ layout: pwPipelineLayout, compute: { module: s, entryPoint: 'main' } });
 
-  const dwPipeline = device.createComputePipeline({
-    layout: dwPipelineLayout,
-    compute: { module: dwShader, entryPoint: 'main' },
-  });
-
-  // Full 5x5 unroll - 2x faster on large spatial (>=64)
-  const dwFullUnrollPipeline = device.createComputePipeline({
-    layout: dwPipelineLayout,
-    compute: { module: dwFullUnrollShader, entryPoint: 'main' },
-  });
-
-  const pwPipeline = device.createComputePipeline({
-    layout: pwPipelineLayout,
-    compute: { module: pwShader, entryPoint: 'main' },
-  });
-
-  // 2 output channels per thread - 3x faster on large spatial with high channels
-  const pw2OCPipeline = device.createComputePipeline({
-    layout: pwPipelineLayout,
-    compute: { module: pw2OCShader, entryPoint: 'main' },
-  });
+  const dwPipeline = mkDwPipe(dwShader);
+  const dwFullUnrollPipeline = mkDwPipe(dwFullUnrollShader);
+  const pwPipeline = mkPwPipe(pwShader);
+  const pw2OCPipeline = mkPwPipe(pw2OCShader);
 
   // ============ Adaptive Workgroup Pipelines ============
   // Cache pipelines by workgroup size key to avoid duplicates
@@ -448,61 +319,19 @@ export async function compileModel(
   pwPipelineCache.set('8,8', pwPipeline);
   pw2OCPipelineCache.set('8,8', pw2OCPipeline);
 
-  function getOrCreateDwPipeline(wgX: number, wgY: number): GPUComputePipeline {
+  function getOrCreateCached(cache: Map<string, GPUComputePipeline>, wgX: number, wgY: number, mkShader: (x: number, y: number) => string, mkPipe: (s: GPUShaderModule) => GPUComputePipeline): GPUComputePipeline {
     const key = `${wgX},${wgY}`;
-    let pipeline = dwPipelineCache.get(key);
-    if (!pipeline) {
-      const shader = device.createShaderModule({ code: makeDepthwise5x5Shader(wgX, wgY) });
-      pipeline = device.createComputePipeline({
-        layout: dwPipelineLayout,
-        compute: { module: shader, entryPoint: 'main' },
-      });
-      dwPipelineCache.set(key, pipeline);
+    let p = cache.get(key);
+    if (!p) {
+      p = mkPipe(device.createShaderModule({ code: mkShader(wgX, wgY) }));
+      cache.set(key, p);
     }
-    return pipeline;
+    return p;
   }
-
-  function getOrCreateDwFullUnrollPipeline(wgX: number, wgY: number): GPUComputePipeline {
-    const key = `${wgX},${wgY}`;
-    let pipeline = dwFullUnrollPipelineCache.get(key);
-    if (!pipeline) {
-      const shader = device.createShaderModule({ code: makeDepthwise5x5FullUnrollShader(wgX, wgY) });
-      pipeline = device.createComputePipeline({
-        layout: dwPipelineLayout,
-        compute: { module: shader, entryPoint: 'main' },
-      });
-      dwFullUnrollPipelineCache.set(key, pipeline);
-    }
-    return pipeline;
-  }
-
-  function getOrCreatePwPipeline(wgX: number, wgY: number): GPUComputePipeline {
-    const key = `${wgX},${wgY}`;
-    let pipeline = pwPipelineCache.get(key);
-    if (!pipeline) {
-      const shader = device.createShaderModule({ code: makePointwiseShader(wgX, wgY) });
-      pipeline = device.createComputePipeline({
-        layout: pwPipelineLayout,
-        compute: { module: shader, entryPoint: 'main' },
-      });
-      pwPipelineCache.set(key, pipeline);
-    }
-    return pipeline;
-  }
-
-  function getOrCreatePw2OCPipeline(wgX: number, wgY: number): GPUComputePipeline {
-    const key = `${wgX},${wgY}`;
-    let pipeline = pw2OCPipelineCache.get(key);
-    if (!pipeline) {
-      const shader = device.createShaderModule({ code: makePointwise2OCShader(wgX, wgY) });
-      pipeline = device.createComputePipeline({
-        layout: pwPipelineLayout,
-        compute: { module: shader, entryPoint: 'main' },
-      });
-      pw2OCPipelineCache.set(key, pipeline);
-    }
-    return pipeline;
-  }
+  const getOrCreateDwPipeline = (x: number, y: number) => getOrCreateCached(dwPipelineCache, x, y, makeDepthwise5x5Shader, mkDwPipe);
+  const getOrCreateDwFullUnrollPipeline = (x: number, y: number) => getOrCreateCached(dwFullUnrollPipelineCache, x, y, makeDepthwise5x5FullUnrollShader, mkDwPipe);
+  const getOrCreatePwPipeline = (x: number, y: number) => getOrCreateCached(pwPipelineCache, x, y, makePointwiseShader, mkPwPipe);
+  const getOrCreatePw2OCPipeline = (x: number, y: number) => getOrCreateCached(pw2OCPipelineCache, x, y, makePointwise2OCShader, mkPwPipe);
 
   // Pre-compute all dispatch info per layer (avoids any runtime lookups)
   const layerDispatchInfos: LayerDispatchInfo[] = RESMODULE_LAYERS.map((spec) => {
@@ -529,140 +358,35 @@ export async function compileModel(
     };
   });
 
-  const padInputPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [padLayout] }),
-    compute: { module: padInputShader, entryPoint: 'main' },
-  });
-
-  const inputConvPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [inputConvLayout] }),
-    compute: { module: inputConvShader, entryPoint: 'main' },
-  });
-
-  // Upsample and add pipelines (kept for potential non-fused fallback)
-  void device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [upsampleLayout] }),
-    compute: { module: upsampleShader, entryPoint: 'main' },
-  });
-
-  void device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [addLayout] }),
-    compute: { module: addShader, entryPoint: 'main' },
-  });
-
-  // Fused upsample+add pipeline (saves one dispatch)
-  const upsampleAddPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [upsampleAddLayout] }),
-    compute: { module: upsampleAddShader, entryPoint: 'main' },
-  });
-
-  const conv1x1Pipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [conv1x1Layout] }),
-    compute: { module: conv1x1Shader, entryPoint: 'main' },
-  });
-
-  const outputSigmoidPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [outputLayout] }),
-    compute: { module: outputSigmoidShader, entryPoint: 'main' },
-  });
-
-  const outputLandmarksPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [outputLayout] }),
-    compute: { module: outputLandmarksShader, entryPoint: 'main' },
-  });
-
-  // Canvas input pipeline (texture → NCHW float32 padded)
-  const canvasInputPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [canvasInputLayout] }),
-    compute: { module: canvasInputShader, entryPoint: 'main' },
-  });
-
-  // Fused output heads pipeline (1 dispatch instead of 3)
-  // Fused output pipeline (kept for potential future use)
-  void device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [fusedOutputLayout] }),
-    compute: { module: fusedOutputShader, entryPoint: 'main' },
-  });
+  const padInputPipeline = makePipe(padLayout, padInputShader);
+  const inputConvPipeline = makePipe(inputConvLayout, inputConvShader);
+  void makePipe(upsampleLayout, upsampleShader);
+  void makePipe(addLayout, addShader);
+  const upsampleAddPipeline = makePipe(upsampleAddLayout, upsampleAddShader);
+  const conv1x1Pipeline = makePipe(conv1x1Layout, conv1x1Shader);
+  const outputSigmoidPipeline = makePipe(outputLayout, outputSigmoidShader);
+  const outputLandmarksPipeline = makePipe(outputLayout, outputLandmarksShader);
+  const canvasInputPipeline = makePipe(canvasInputLayout, canvasInputShader);
+  void makePipe(fusedOutputLayout, fusedOutputShader);
 
   // ============ Allocate Buffers ============
-  // Main ping-pong buffers (large enough for any intermediate)
   const maxSize = 1 * 288 * 128 * 128 * 4;
-  // Raw input (256x256x3) - written directly from CPU
-  const bufRawInput = device.createBuffer({
-    size: 1 * 3 * 256 * 256 * 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  // Padded input (257x257x3) - filled by GPU padding shader
-  const bufInput = device.createBuffer({
-    size: 1 * 3 * 257 * 257 * 4,  // 3ch RGB input with padding
-    usage: GPUBufferUsage.STORAGE,
-  });
-  // Padding uniform
-  const bufPadU = device.createBuffer({
-    size: 12,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
+  const bufRawInput = makeBuf(1 * 3 * 256 * 256 * 4, SC);
+  const bufInput = makeBuf(1 * 3 * 257 * 257 * 4, SO);
+  const bufPadU = makeBuf(12, UC);
   device.queue.writeBuffer(bufPadU, 0, new Uint32Array([3, 256, 257]));
-  const bufA = device.createBuffer({
-    size: maxSize,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-  });
-  const bufB = device.createBuffer({
-    size: maxSize,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-  });
-  const bufDW = device.createBuffer({
-    size: maxSize,
-    usage: GPUBufferUsage.STORAGE,
-  });
-
-  // Skip connection buffers (feature pyramid)
-  const bufB1 = device.createBuffer({
-    size: 1 * 48 * 64 * 64 * 4,  // 64x64x48
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufB2 = device.createBuffer({
-    size: 1 * 96 * 32 * 32 * 4,  // 32x32x96
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufB3 = device.createBuffer({
-    size: 1 * 96 * 16 * 16 * 4,  // 16x16x96
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-
-  // Temporary buffer for upsample (before add)
-  const bufTmp = device.createBuffer({
-    size: 1 * 96 * 64 * 64 * 4,  // max upsample size
-    usage: GPUBufferUsage.STORAGE,
-  });
-
-  // Output buffers (separate for GPU writes)
-  const bufHandflag = device.createBuffer({
-    size: 1 * 1 * 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-  });
-  const bufHandedness = device.createBuffer({
-    size: 1 * 1 * 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-  });
-  const bufLandmarks = device.createBuffer({
-    size: 1 * 63 * 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-  });
-
-  // Single unified readback buffer (1 mapAsync instead of 3)
-  // Layout: [handflag(1), handedness(1), landmarks(63)] = 65 floats
-  const readbackBuf = device.createBuffer({
-    size: 65 * 4,
-    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-  });
-
-  // Double-buffered readback (pipeline mapAsync with next frame's compute)
-  // Double-buffered readback B (kept for future double-buffered readback)
-  void device.createBuffer({
-    size: 65 * 4,
-    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-  });
+  const bufA = makeBuf(maxSize, SCS);
+  const bufB = makeBuf(maxSize, SOC);
+  const bufDW = makeBuf(maxSize, SO);
+  const bufB1 = makeBuf(1 * 48 * 64 * 64 * 4, SC);
+  const bufB2 = makeBuf(1 * 96 * 32 * 32 * 4, SC);
+  const bufB3 = makeBuf(1 * 96 * 16 * 16 * 4, SC);
+  const bufTmp = makeBuf(1 * 96 * 64 * 64 * 4, SO);
+  const bufHandflag = makeBuf(4, SOC);
+  const bufHandedness = makeBuf(4, SOC);
+  const bufLandmarks = makeBuf(63 * 4, SOC);
+  const readbackBuf = makeBuf(65 * 4, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
+  void makeBuf(65 * 4, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
   // For future double-buffered readback (pipeline mapAsync with compute)
   // let readbackIdx = 0;
   // const readbackBufs = [readbackBuf, readbackBufB];
@@ -674,11 +398,7 @@ export async function compileModel(
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
   });
 
-  // Canvas input uniform (same params as pad: in_size=256, out_size=257)
-  const bufCanvasU = device.createBuffer({
-    size: 8,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
+  const bufCanvasU = makeBuf(8, UC);
   device.queue.writeBuffer(bufCanvasU, 0, new Uint32Array([256, 257]));
 
   // ============ Upload Input Conv Weights ============
@@ -689,18 +409,9 @@ export async function compileModel(
     throw new Error('Missing input conv weights');
   }
 
-  const bufInputConvW = device.createBuffer({
-    size: inputConvW.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufInputConvB = device.createBuffer({
-    size: inputConvB.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufInputConvU = device.createBuffer({
-    size: 28,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
+  const bufInputConvW = makeBuf(inputConvW.byteLength, SC);
+  const bufInputConvB = makeBuf(inputConvB.byteLength, SC);
+  const bufInputConvU = makeBuf(28, UC);
   device.queue.writeBuffer(bufInputConvW, 0, inputConvW as any);
   device.queue.writeBuffer(bufInputConvB, 0, inputConvB as any);
   // Input: 3ch x 257x257 (padded), Output: 24ch x 128x128
@@ -713,18 +424,9 @@ export async function compileModel(
     throw new Error('Missing backbone6.1 conv1x1 weights');
   }
 
-  const bufConv1x1W = device.createBuffer({
-    size: conv1x1W.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufConv1x1B = device.createBuffer({
-    size: conv1x1B.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufConv1x1U = device.createBuffer({
-    size: 20,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
+  const bufConv1x1W = makeBuf(conv1x1W.byteLength, SC);
+  const bufConv1x1B = makeBuf(conv1x1B.byteLength, SC);
+  const bufConv1x1U = makeBuf(20, UC);
   device.queue.writeBuffer(bufConv1x1W, 0, conv1x1W as any);
   device.queue.writeBuffer(bufConv1x1B, 0, conv1x1B as any);
   // Conv1x1: 96ch -> 48ch at 32x32
@@ -738,18 +440,9 @@ export async function compileModel(
     throw new Error('Missing handflag weights');
   }
 
-  const bufHandflagW = device.createBuffer({
-    size: handflagW.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufHandflagB = device.createBuffer({
-    size: handflagB.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufHandflagU = device.createBuffer({
-    size: 12,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
+  const bufHandflagW = makeBuf(handflagW.byteLength, SC);
+  const bufHandflagB = makeBuf(handflagB.byteLength, SC);
+  const bufHandflagU = makeBuf(12, UC);
   device.queue.writeBuffer(bufHandflagW, 0, handflagW as any);
   device.queue.writeBuffer(bufHandflagB, 0, handflagB as any);
   device.queue.writeBuffer(bufHandflagU, 0, new Uint32Array([1, 288, 1]));
@@ -761,18 +454,9 @@ export async function compileModel(
     throw new Error('Missing handedness weights');
   }
 
-  const bufHandednessW = device.createBuffer({
-    size: handednessW.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufHandednessB = device.createBuffer({
-    size: handednessB.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufHandednessU = device.createBuffer({
-    size: 12,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
+  const bufHandednessW = makeBuf(handednessW.byteLength, SC);
+  const bufHandednessB = makeBuf(handednessB.byteLength, SC);
+  const bufHandednessU = makeBuf(12, UC);
   device.queue.writeBuffer(bufHandednessW, 0, handednessW as any);
   device.queue.writeBuffer(bufHandednessB, 0, handednessB as any);
   device.queue.writeBuffer(bufHandednessU, 0, new Uint32Array([1, 288, 1]));
@@ -784,18 +468,9 @@ export async function compileModel(
     throw new Error('Missing reg_3d weights');
   }
 
-  const bufLandmarksW = device.createBuffer({
-    size: landmarksW.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufLandmarksB = device.createBuffer({
-    size: landmarksB.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  const bufLandmarksU = device.createBuffer({
-    size: 12,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
+  const bufLandmarksW = makeBuf(landmarksW.byteLength, SC);
+  const bufLandmarksB = makeBuf(landmarksB.byteLength, SC);
+  const bufLandmarksU = makeBuf(12, UC);
   device.queue.writeBuffer(bufLandmarksW, 0, landmarksW as any);
   device.queue.writeBuffer(bufLandmarksB, 0, landmarksB as any);
   device.queue.writeBuffer(bufLandmarksU, 0, new Uint32Array([1, 288, 63]));
@@ -816,30 +491,12 @@ export async function compileModel(
       throw new Error(`Missing weights for ${prefix}`);
     }
 
-    const dwWeight = device.createBuffer({
-      size: dwW.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const dwBias = device.createBuffer({
-      size: dwB.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const pwWeight = device.createBuffer({
-      size: pwW.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const pwBias = device.createBuffer({
-      size: pwB.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const dwUniform = device.createBuffer({
-      size: 32,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    const pwUniform = device.createBuffer({
-      size: 36,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    const dwWeight = makeBuf(dwW.byteLength, SC);
+    const dwBias = makeBuf(dwB.byteLength, SC);
+    const pwWeight = makeBuf(pwW.byteLength, SC);
+    const pwBias = makeBuf(pwB.byteLength, SC);
+    const dwUniform = makeBuf(32, UC);
+    const pwUniform = makeBuf(36, UC);
 
     device.queue.writeBuffer(dwWeight, 0, dwW as any);
     device.queue.writeBuffer(dwBias, 0, dwB as any);
@@ -855,54 +512,22 @@ export async function compileModel(
     return { dwWeight, dwBias, pwWeight, pwBias, dwUniform, pwUniform, spec, outH, outW };
   });
 
-  // ============ Create Upsample Uniforms ============
-  // Upsample 8->16 (after backbone4)
-  const bufUpsample8to16U = device.createBuffer({ size: 24, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(bufUpsample8to16U, 0, new Uint32Array([1, 96, 8, 8, 16, 16]));
-
-  // Upsample 16->32 (after backbone5)
-  const bufUpsample16to32U = device.createBuffer({ size: 24, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(bufUpsample16to32U, 0, new Uint32Array([1, 96, 16, 16, 32, 32]));
-
-  // Upsample 32->64 (after backbone6)
-  const bufUpsample32to64U = device.createBuffer({ size: 24, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(bufUpsample32to64U, 0, new Uint32Array([1, 48, 32, 32, 64, 64]));
-
-  // ============ Create Add Uniforms ============
-  // Add b3 (16x16x96)
-  const bufAddB3U = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(bufAddB3U, 0, new Uint32Array([1 * 96 * 16 * 16]));
-
-  // Add b2 (32x32x96)
-  const bufAddB2U = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(bufAddB2U, 0, new Uint32Array([1 * 96 * 32 * 32]));
-
-  // Add b1 (64x64x48)
-  const bufAddB1U = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(bufAddB1U, 0, new Uint32Array([1 * 48 * 64 * 64]));
+  // ============ Create Upsample/Add Uniforms ============
+  function makeUniform(data: number[]): GPUBuffer {
+    const b = makeBuf(data.length * 4, UC);
+    device.queue.writeBuffer(b, 0, new Uint32Array(data));
+    return b;
+  }
+  const bufUpsample8to16U = makeUniform([1, 96, 8, 8, 16, 16]);
+  const bufUpsample16to32U = makeUniform([1, 96, 16, 16, 32, 32]);
+  const bufUpsample32to64U = makeUniform([1, 48, 32, 32, 64, 64]);
+  void makeUniform([1 * 96 * 16 * 16]);
+  void makeUniform([1 * 96 * 32 * 32]);
+  void makeUniform([1 * 48 * 64 * 64]);
 
   // ============ Pre-create Bind Groups ============
-  // Padding bind group
-  const padBG = device.createBindGroup({
-    layout: padLayout,
-    entries: [
-      { binding: 0, resource: { buffer: bufRawInput } },
-      { binding: 1, resource: { buffer: bufInput } },
-      { binding: 2, resource: { buffer: bufPadU } },
-    ],
-  });
-
-  // Input conv bind group
-  const inputConvBG = device.createBindGroup({
-    layout: inputConvLayout,
-    entries: [
-      { binding: 0, resource: { buffer: bufInput } },
-      { binding: 1, resource: { buffer: bufInputConvW } },
-      { binding: 2, resource: { buffer: bufInputConvB } },
-      { binding: 3, resource: { buffer: bufA } },
-      { binding: 4, resource: { buffer: bufInputConvU } },
-    ],
-  });
+  const padBG = makeBind(padLayout, [bufRawInput, bufInput, bufPadU]);
+  const inputConvBG = makeBind(inputConvLayout, [bufInput, bufInputConvW, bufInputConvB, bufA, bufInputConvU]);
 
   // ResModule bind groups for A->B and B->A directions
   const dwBindGroupsAtoB: GPUBindGroup[] = [];
@@ -911,169 +536,26 @@ export async function compileModel(
   const pwBindGroupsBtoA: GPUBindGroup[] = [];
 
   for (const ld of resmoduleData) {
-    dwBindGroupsAtoB.push(
-      device.createBindGroup({
-        layout: dwLayout,
-        entries: [
-          { binding: 0, resource: { buffer: bufA } },
-          { binding: 1, resource: { buffer: ld.dwWeight } },
-          { binding: 2, resource: { buffer: ld.dwBias } },
-          { binding: 3, resource: { buffer: bufDW } },
-          { binding: 4, resource: { buffer: ld.dwUniform } },
-        ],
-      }),
-    );
-    pwBindGroupsAtoB.push(
-      device.createBindGroup({
-        layout: pwLayout,
-        entries: [
-          { binding: 0, resource: { buffer: bufDW } },
-          { binding: 1, resource: { buffer: bufA } },
-          { binding: 2, resource: { buffer: ld.pwWeight } },
-          { binding: 3, resource: { buffer: ld.pwBias } },
-          { binding: 4, resource: { buffer: bufB } },
-          { binding: 5, resource: { buffer: ld.pwUniform } },
-        ],
-      }),
-    );
-    dwBindGroupsBtoA.push(
-      device.createBindGroup({
-        layout: dwLayout,
-        entries: [
-          { binding: 0, resource: { buffer: bufB } },
-          { binding: 1, resource: { buffer: ld.dwWeight } },
-          { binding: 2, resource: { buffer: ld.dwBias } },
-          { binding: 3, resource: { buffer: bufDW } },
-          { binding: 4, resource: { buffer: ld.dwUniform } },
-        ],
-      }),
-    );
-    pwBindGroupsBtoA.push(
-      device.createBindGroup({
-        layout: pwLayout,
-        entries: [
-          { binding: 0, resource: { buffer: bufDW } },
-          { binding: 1, resource: { buffer: bufB } },
-          { binding: 2, resource: { buffer: ld.pwWeight } },
-          { binding: 3, resource: { buffer: ld.pwBias } },
-          { binding: 4, resource: { buffer: bufA } },
-          { binding: 5, resource: { buffer: ld.pwUniform } },
-        ],
-      }),
-    );
+    dwBindGroupsAtoB.push(makeBind(dwLayout, [bufA, ld.dwWeight, ld.dwBias, bufDW, ld.dwUniform]));
+    pwBindGroupsAtoB.push(makeBind(pwLayout, [bufDW, bufA, ld.pwWeight, ld.pwBias, bufB, ld.pwUniform]));
+    dwBindGroupsBtoA.push(makeBind(dwLayout, [bufB, ld.dwWeight, ld.dwBias, bufDW, ld.dwUniform]));
+    pwBindGroupsBtoA.push(makeBind(pwLayout, [bufDW, bufB, ld.pwWeight, ld.pwBias, bufA, ld.pwUniform]));
   }
 
-  // Fused upsample+add bind groups (saves 3 dispatches total)
-  // Buffer state after each layer (starting from input conv output in bufA):
-  // Layer 11: B→A (useAtoB was false), output in bufA
-  // FP1: fused upsample bufA 8->16 + add b3, output to bufB
-  const upsampleAddB3BG = device.createBindGroup({
-    layout: upsampleAddLayout,
-    entries: [
-      { binding: 0, resource: { buffer: bufA } },   // layer 11 output
-      { binding: 1, resource: { buffer: bufB3 } },  // skip connection
-      { binding: 2, resource: { buffer: bufB } },   // output to B
-      { binding: 3, resource: { buffer: bufUpsample8to16U } },
-    ],
-  });
+  // Fused upsample+add bind groups
+  const upsampleAddB3BG = makeBind(upsampleAddLayout, [bufA, bufB3, bufB, bufUpsample8to16U]);
+  const upsampleAddB2BG = makeBind(upsampleAddLayout, [bufA, bufB2, bufB, bufUpsample16to32U]);
+  const conv1x1BG = makeBind(conv1x1Layout, [bufA, bufConv1x1W, bufConv1x1B, bufTmp, bufConv1x1U]);
+  const upsampleAddB1BG = makeBind(upsampleAddLayout, [bufTmp, bufB1, bufB, bufUpsample32to64U]);
 
-  // Layer 12: B→A (useAtoB was false after FP1 sets it), output in bufA
-  // FP2: fused upsample bufA 16->32 + add b2, output to bufB
-  const upsampleAddB2BG = device.createBindGroup({
-    layout: upsampleAddLayout,
-    entries: [
-      { binding: 0, resource: { buffer: bufA } },   // layer 12 output
-      { binding: 1, resource: { buffer: bufB2 } },  // skip connection
-      { binding: 2, resource: { buffer: bufB } },   // output to B
-      { binding: 3, resource: { buffer: bufUpsample16to32U } },
-    ],
-  });
+  // Output head bind groups
+  const handflagBG = makeBind(outputLayout, [bufA, bufHandflagW, bufHandflagB, bufHandflag, bufHandflagU]);
+  const handednessBG = makeBind(outputLayout, [bufA, bufHandednessW, bufHandednessB, bufHandedness, bufHandednessU]);
+  const landmarksBG = makeBind(outputLayout, [bufA, bufLandmarksW, bufLandmarksB, bufLandmarks, bufLandmarksU]);
 
-  // Layer 13: B→A (useAtoB was false), output in bufA
-  // FP3: conv1x1 bufA 96->48 to tmp, then fused upsample 32->64 + add b1, output to bufB
-  const conv1x1BG = device.createBindGroup({
-    layout: conv1x1Layout,
-    entries: [
-      { binding: 0, resource: { buffer: bufA } },  // layer 13 output
-      { binding: 1, resource: { buffer: bufConv1x1W } },
-      { binding: 2, resource: { buffer: bufConv1x1B } },
-      { binding: 3, resource: { buffer: bufTmp } },  // conv1x1 output to temp
-      { binding: 4, resource: { buffer: bufConv1x1U } },
-    ],
-  });
-  const upsampleAddB1BG = device.createBindGroup({
-    layout: upsampleAddLayout,
-    entries: [
-      { binding: 0, resource: { buffer: bufTmp } },  // conv1x1 output
-      { binding: 1, resource: { buffer: bufB1 } },   // skip connection
-      { binding: 2, resource: { buffer: bufB } },    // output to B
-      { binding: 3, resource: { buffer: bufUpsample32to64U } },
-    ],
-  });
+  const canvasInputBG = makeBind(canvasInputLayout, [canvasTexture.createView(), bufInput, bufCanvasU]);
 
-  // Output head bind groups (ff output is in final buffer after 43 layers)
-  // After tracing through: final ff output is in bufA (layer 42 writes to A)
-  // 43 layers with 3 feature pyramid ops (each resets to useAtoB=false) means:
-  // - After FP3 (layer 13): useAtoB=false
-  // - Layers 14-42: 29 more layers, starting with useAtoB=false
-  // - Layer 42 (odd index from 14): reads B, writes A -> final in bufA
-  const handflagBG = device.createBindGroup({
-    layout: outputLayout,
-    entries: [
-      { binding: 0, resource: { buffer: bufA } },
-      { binding: 1, resource: { buffer: bufHandflagW } },
-      { binding: 2, resource: { buffer: bufHandflagB } },
-      { binding: 3, resource: { buffer: bufHandflag } },
-      { binding: 4, resource: { buffer: bufHandflagU } },
-    ],
-  });
-  const handednessBG = device.createBindGroup({
-    layout: outputLayout,
-    entries: [
-      { binding: 0, resource: { buffer: bufA } },
-      { binding: 1, resource: { buffer: bufHandednessW } },
-      { binding: 2, resource: { buffer: bufHandednessB } },
-      { binding: 3, resource: { buffer: bufHandedness } },
-      { binding: 4, resource: { buffer: bufHandednessU } },
-    ],
-  });
-  const landmarksBG = device.createBindGroup({
-    layout: outputLayout,
-    entries: [
-      { binding: 0, resource: { buffer: bufA } },
-      { binding: 1, resource: { buffer: bufLandmarksW } },
-      { binding: 2, resource: { buffer: bufLandmarksB } },
-      { binding: 3, resource: { buffer: bufLandmarks } },
-      { binding: 4, resource: { buffer: bufLandmarksU } },
-    ],
-  });
-
-  // Canvas input bind group (texture → padded NCHW float32)
-  const canvasInputBG = device.createBindGroup({
-    layout: canvasInputLayout,
-    entries: [
-      { binding: 0, resource: canvasTexture.createView() },
-      { binding: 1, resource: { buffer: bufInput } },
-      { binding: 2, resource: { buffer: bufCanvasU } },
-    ],
-  });
-
-  // Fused output heads bind group (all 3 heads in 1 dispatch, kept for future use)
-  void device.createBindGroup({
-    layout: fusedOutputLayout,
-    entries: [
-      { binding: 0, resource: { buffer: bufA } },
-      { binding: 1, resource: { buffer: bufHandflagW } },
-      { binding: 2, resource: { buffer: bufHandflagB } },
-      { binding: 3, resource: { buffer: bufHandednessW } },
-      { binding: 4, resource: { buffer: bufHandednessB } },
-      { binding: 5, resource: { buffer: bufLandmarksW } },
-      { binding: 6, resource: { buffer: bufLandmarksB } },
-      { binding: 7, resource: { buffer: bufHandflag } },
-      { binding: 8, resource: { buffer: bufHandedness } },
-      { binding: 9, resource: { buffer: bufLandmarks } },
-    ],
-  });
+  void makeBind(fusedOutputLayout, [bufA, bufHandflagW, bufHandflagB, bufHandednessW, bufHandednessB, bufLandmarksW, bufLandmarksB, bufHandflag, bufHandedness, bufLandmarks]);
 
   // Pre-allocated output arrays (avoid per-frame allocations)
   const outputHandflag = new Float32Array(1);

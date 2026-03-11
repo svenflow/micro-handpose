@@ -627,11 +627,8 @@ handpose.<span class="fn">dispose</span>()</pre>
 
     // --- Demo state ---
     let microHandpose = null;    // micro-handpose instance (lazy loaded)
-    let mpHandsWasm = null;      // MediaPipe Hands WASM instance (legacy API)
-    let mpHandsGpu = null;       // MediaPipe Hands GPU instance (tasks-vision API)
-    let mpWasmLoaded = false;
-    let mpGpuLoaded = false;
-    let mpLatestResults = null;
+    let mpHandsWasm = null;      // MediaPipe Hands WASM instance (tasks-vision CPU)
+    let mpHandsGpu = null;       // MediaPipe Hands GPU instance (tasks-vision GPU)
     let activeModel = 'micro';   // 'micro' | 'mediapipe-gpu' | 'mediapipe-wasm'
     let running = false;
     let cameraReady = false;
@@ -683,78 +680,48 @@ handpose.<span class="fn">dispose</span>()</pre>
       });
     }
 
-    // --- Load script helper ---
-    function loadScript(src) {
-      return new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = src;
-        s.onload = resolve;
-        s.onerror = () => reject(new Error('Failed to load ' + src));
-        document.head.appendChild(s);
-      });
+    // --- Shared MediaPipe tasks-vision loader ---
+    let visionModule = null;
+    async function loadVisionModule() {
+      if (visionModule) return visionModule;
+      visionModule = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs');
+      return visionModule;
     }
 
-    // --- MediaPipe WASM (legacy @mediapipe/hands) ---
-    async function ensureMediaPipeWasm() {
-      if (mpHandsWasm) return mpHandsWasm;
-
-      statusVal.textContent = 'Loading MediaPipe WASM...';
-
-      if (!mpWasmLoaded) {
-        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js');
-        mpWasmLoaded = true;
-      }
-
-      mpHandsWasm = new window.Hands({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-      });
-      mpHandsWasm.setOptions({
-        maxNumHands: 1,
-        modelComplexity: 1,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5,
-      });
-      mpHandsWasm.onResults((results) => {
-        mpLatestResults = results;
-      });
-
-      await mpHandsWasm.send({ image: video });
-
-      statusVal.textContent = 'Running';
-      statusVal.classList.add('active');
-      return mpHandsWasm;
-    }
-
-    // --- MediaPipe GPU (tasks-vision API with GPU delegate) ---
-    async function ensureMediaPipeGpu() {
-      if (mpHandsGpu) return mpHandsGpu;
-
-      statusVal.textContent = 'Loading MediaPipe GPU...';
-
-      if (!mpGpuLoaded) {
-        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs');
-        mpGpuLoaded = true;
-      }
-
-      // tasks-vision exposes via globalThis
-      const vision = window.FilesetResolver ? window : await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs');
-      const { FilesetResolver, HandLandmarker } = vision;
+    async function createMediaPipeHandLandmarker(delegate) {
+      const { FilesetResolver, HandLandmarker } = await loadVisionModule();
 
       const wasmFileset = await FilesetResolver.forVisionTasks(
         'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm'
       );
 
-      mpHandsGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+      return await HandLandmarker.createFromOptions(wasmFileset, {
         baseOptions: {
           modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
-          delegate: 'GPU',
+          delegate: delegate,
         },
         runningMode: 'VIDEO',
         numHands: 1,
         minHandDetectionConfidence: 0.5,
         minTrackingConfidence: 0.5,
       });
+    }
 
+    // --- MediaPipe WASM (tasks-vision with CPU delegate) ---
+    async function ensureMediaPipeWasm() {
+      if (mpHandsWasm) return mpHandsWasm;
+      statusVal.textContent = 'Loading MediaPipe WASM...';
+      mpHandsWasm = await createMediaPipeHandLandmarker('CPU');
+      statusVal.textContent = 'Running';
+      statusVal.classList.add('active');
+      return mpHandsWasm;
+    }
+
+    // --- MediaPipe GPU (tasks-vision with GPU delegate) ---
+    async function ensureMediaPipeGpu() {
+      if (mpHandsGpu) return mpHandsGpu;
+      statusVal.textContent = 'Loading MediaPipe GPU...';
+      mpHandsGpu = await createMediaPipeHandLandmarker('GPU');
       statusVal.textContent = 'Running';
       statusVal.classList.add('active');
       return mpHandsGpu;
@@ -914,36 +881,16 @@ handpose.<span class="fn">dispose</span>()</pre>
       }
     }
 
-    async function detectMediaPipeWasm() {
-      mpLatestResults = null;
-
-      const t0 = performance.now();
-      await mpHandsWasm.send({ image: video });
-      const inferTime = performance.now() - t0;
-
-      inferVal.textContent = inferTime.toFixed(1) + 'ms';
-      updateFps();
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      if (mpLatestResults && mpLatestResults.multiHandLandmarks && mpLatestResults.multiHandLandmarks.length > 0) {
-        const landmarks = mpLatestResults.multiHandLandmarks[0];
-        const handedness = mpLatestResults.multiHandedness?.[0]?.label || '\u2014';
-        handVal.textContent = handedness;
-        handVal.classList.add('active');
-        drawHand(landmarks, canvas.width, canvas.height);
-      } else {
-        handVal.textContent = '\u2014';
-        handVal.classList.remove('active');
-      }
-    }
-
+    // Shared detect function for both MediaPipe variants (both use tasks-vision API)
+    let mpWasmTimestamp = 0;
     let mpGpuTimestamp = 0;
-    async function detectMediaPipeGpu() {
-      mpGpuTimestamp += 33; // tasks-vision VIDEO mode needs increasing timestamps
+
+    function detectMediaPipeVariant(landmarker, isGpu) {
+      if (isGpu) { mpGpuTimestamp += 33; } else { mpWasmTimestamp += 33; }
+      const ts = isGpu ? mpGpuTimestamp : mpWasmTimestamp;
 
       const t0 = performance.now();
-      const results = mpHandsGpu.detectForVideo(video, mpGpuTimestamp);
+      const results = landmarker.detectForVideo(video, ts);
       const inferTime = performance.now() - t0;
 
       inferVal.textContent = inferTime.toFixed(1) + 'ms';
@@ -961,6 +908,14 @@ handpose.<span class="fn">dispose</span>()</pre>
         handVal.textContent = '\u2014';
         handVal.classList.remove('active');
       }
+    }
+
+    async function detectMediaPipeWasm() {
+      detectMediaPipeVariant(mpHandsWasm, false);
+    }
+
+    async function detectMediaPipeGpu() {
+      detectMediaPipeVariant(mpHandsGpu, true);
     }
 
     function updateFps() {
