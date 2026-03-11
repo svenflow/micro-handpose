@@ -378,6 +378,108 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 }
 `);
 
+export const FUSED_DW_PW_288_SHADER = S(`
+struct FusedParams { batch:u32, channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, stride:u32, pad:u32, }
+@group(0)@binding(0) var<storage,read> input:array<f32>;
+@group(0)@binding(1) var<storage,read> dw_weight:array<f32>;
+@group(0)@binding(2) var<storage,read> dw_bias:array<f32>;
+@group(0)@binding(3) var<storage,read> pw_weight:array<f32>;
+@group(0)@binding(4) var<storage,read> pw_bias:array<f32>;
+@group(0)@binding(5) var<storage,read_write> output:array<f32>;
+@group(0)@binding(6) var<uniform> params:FusedParams;
+var<workgroup> shared_dw:array<f32,288>;
+fn load_input_f(base:u32, y:i32, x:i32, in_h:i32, in_w:i32)->f32 {
+  if(y>=0 && y<in_h && x>=0 && x<in_w){ return input[base+u32(y)*u32(in_w)+u32(x)]; }
+  return 0.0;
+}
+@compute @workgroup_size(288,1,1)
+fn main(@builtin(local_invocation_id) lid:vec3<u32>, @builtin(workgroup_id) wid:vec3<u32>){
+  let c=lid.x;
+  let out_x=wid.x;
+  let out_y=wid.y;
+  let outH=params.out_height;
+  let outW=params.out_width;
+  if(out_x>=outW||out_y>=outH){return;}
+  let inH=i32(params.in_height);
+  let inW=i32(params.in_width);
+  // Step 1: DW 5x5 convolution
+  let in_base=c*params.in_height*params.in_width;
+  let w_base=c*25u;
+  let by=i32(out_y*params.stride)-i32(params.pad);
+  let bx=i32(out_x*params.stride)-i32(params.pad);
+  var dw_sum:f32=0.0;
+  let w00=dw_weight[w_base];let w01=dw_weight[w_base+1u];let w02=dw_weight[w_base+2u];let w03=dw_weight[w_base+3u];let w04=dw_weight[w_base+4u];
+  let w10=dw_weight[w_base+5u];let w11=dw_weight[w_base+6u];let w12=dw_weight[w_base+7u];let w13=dw_weight[w_base+8u];let w14=dw_weight[w_base+9u];
+  let w20=dw_weight[w_base+10u];let w21=dw_weight[w_base+11u];let w22=dw_weight[w_base+12u];let w23=dw_weight[w_base+13u];let w24=dw_weight[w_base+14u];
+  let w30=dw_weight[w_base+15u];let w31=dw_weight[w_base+16u];let w32=dw_weight[w_base+17u];let w33=dw_weight[w_base+18u];let w34=dw_weight[w_base+19u];
+  let w40=dw_weight[w_base+20u];let w41=dw_weight[w_base+21u];let w42=dw_weight[w_base+22u];let w43=dw_weight[w_base+23u];let w44=dw_weight[w_base+24u];
+  let i00=load_input_f(in_base,by,bx,inH,inW);
+  let i01=load_input_f(in_base,by,bx+1,inH,inW);
+  let i02=load_input_f(in_base,by,bx+2,inH,inW);
+  let i03=load_input_f(in_base,by,bx+3,inH,inW);
+  let i04=load_input_f(in_base,by,bx+4,inH,inW);
+  let i10=load_input_f(in_base,by+1,bx,inH,inW);
+  let i11=load_input_f(in_base,by+1,bx+1,inH,inW);
+  let i12=load_input_f(in_base,by+1,bx+2,inH,inW);
+  let i13=load_input_f(in_base,by+1,bx+3,inH,inW);
+  let i14=load_input_f(in_base,by+1,bx+4,inH,inW);
+  let i20=load_input_f(in_base,by+2,bx,inH,inW);
+  let i21=load_input_f(in_base,by+2,bx+1,inH,inW);
+  let i22=load_input_f(in_base,by+2,bx+2,inH,inW);
+  let i23=load_input_f(in_base,by+2,bx+3,inH,inW);
+  let i24=load_input_f(in_base,by+2,bx+4,inH,inW);
+  let i30=load_input_f(in_base,by+3,bx,inH,inW);
+  let i31=load_input_f(in_base,by+3,bx+1,inH,inW);
+  let i32_=load_input_f(in_base,by+3,bx+2,inH,inW);
+  let i33=load_input_f(in_base,by+3,bx+3,inH,inW);
+  let i34=load_input_f(in_base,by+3,bx+4,inH,inW);
+  let i40=load_input_f(in_base,by+4,bx,inH,inW);
+  let i41=load_input_f(in_base,by+4,bx+1,inH,inW);
+  let i42=load_input_f(in_base,by+4,bx+2,inH,inW);
+  let i43=load_input_f(in_base,by+4,bx+3,inH,inW);
+  let i44=load_input_f(in_base,by+4,bx+4,inH,inW);
+  dw_sum=i00*w00+i01*w01+i02*w02+i03*w03+i04*w04+i10*w10+i11*w11+i12*w12+i13*w13+i14*w14+i20*w20+i21*w21+i22*w22+i23*w23+i24*w24+i30*w30+i31*w31+i32_*w32+i33*w33+i34*w34+i40*w40+i41*w41+i42*w42+i43*w43+i44*w44+dw_bias[c];
+  shared_dw[c]=dw_sum;
+  // Step 2: barrier
+  workgroupBarrier();
+  // Step 3: PW 1x1 + skip + ReLU
+  let pw_base=c*288u;
+  var sum0:f32=0.0; var sum1:f32=0.0; var sum2:f32=0.0; var sum3:f32=0.0;
+  var ic:u32=0u;
+  while(ic<288u){
+    sum0+=shared_dw[ic]*pw_weight[pw_base+ic];
+    sum1+=shared_dw[ic+1u]*pw_weight[pw_base+ic+1u];
+    sum2+=shared_dw[ic+2u]*pw_weight[pw_base+ic+2u];
+    sum3+=shared_dw[ic+3u]*pw_weight[pw_base+ic+3u];
+    ic+=4u;
+  }
+  var pw_sum=sum0+sum1+sum2+sum3+pw_bias[c];
+  // Skip connection
+  var skip_val:f32=0.0;
+  if(params.stride==2u){
+    var max_val:f32=-1e38;
+    for(var py:u32=0u;py<2u;py++){
+      for(var px:u32=0u;px<2u;px++){
+        let skip_y=out_y*2u+py; let skip_x=out_x*2u+px;
+        if(skip_y<params.in_height && skip_x<params.in_width){
+          let skip_idx=c*params.in_height*params.in_width+skip_y*params.in_width+skip_x;
+          max_val=max(max_val,input[skip_idx]);
+        }
+      }
+    }
+    skip_val=max_val;
+  } else {
+    skip_val=input[c*outH*outW+out_y*outW+out_x];
+  }
+  let result=max(0.0,pw_sum+skip_val);
+  output[c*outH*outW+out_y*outW+out_x]=result;
+}
+`);
+
+export function makeFusedDwPw288Shader(): string {
+  return FUSED_DW_PW_288_SHADER;
+}
+
 export const CANVAS_INPUT_SHADER = S(`
 struct CanvasParams { in_size:u32, out_size:u32, }
 @group(0)@binding(0) var input_tex:texture_2d<f32>;

@@ -880,7 +880,7 @@ handpose.<span class="fn">dispose</span>()</pre>
       statusVal.textContent = 'Loading model...';
 
       const { createHandpose } = await import(
-        'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.2/dist/index.js'
+        './dist/index.js'
       );
       microHandpose = await createHandpose({
         weightsUrl: 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.2/weights/'

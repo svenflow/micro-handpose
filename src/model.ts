@@ -35,6 +35,7 @@ import {
   OUTPUT_HEADS_FUSED_SHADER,
   PAD_INPUT_SHADER,
   CANVAS_INPUT_SHADER,
+  FUSED_DW_PW_288_SHADER,
   makeDepthwise5x5Shader,
   makeDepthwise5x5FullUnrollShader,
   makePointwiseShader,
@@ -282,6 +283,7 @@ export async function compileModel(
   const conv1x1Shader = device.createShaderModule({ code: CONV1X1_SHADER });
   const outputSigmoidShader = device.createShaderModule({ code: OUTPUT_HEAD_SIGMOID_SHADER });
   const outputLandmarksShader = device.createShaderModule({ code: OUTPUT_HEAD_LANDMARKS_SHADER });
+  const fusedDwPwShader = device.createShaderModule({ code: FUSED_DW_PW_288_SHADER });
 
   // ============ Create Bind Group Layouts ============
   const dwLayout = makeLayout(['r', 'r', 'r', 's', 'u']);
@@ -295,6 +297,7 @@ export async function compileModel(
   const outputLayout = makeLayout(['r', 'r', 'r', 's', 'u']);
   const canvasInputLayout = makeTexLayout(['t', 's', 'u']);
   const fusedOutputLayout = makeLayout(['r', 'r', 'r', 'r', 'r', 'r', 'r', 's', 's', 's']);
+  const fusedDwPwLayout = makeLayout(['r', 'r', 'r', 'r', 'r', 's', 'u']);
 
   // ============ Create Compute Pipelines ============
   const dwPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [dwLayout] });
@@ -364,10 +367,11 @@ export async function compileModel(
   void makePipe(addLayout, addShader);
   const upsampleAddPipeline = makePipe(upsampleAddLayout, upsampleAddShader);
   const conv1x1Pipeline = makePipe(conv1x1Layout, conv1x1Shader);
-  const outputSigmoidPipeline = makePipe(outputLayout, outputSigmoidShader);
-  const outputLandmarksPipeline = makePipe(outputLayout, outputLandmarksShader);
+  void makePipe(outputLayout, outputSigmoidShader);
+  void makePipe(outputLayout, outputLandmarksShader);
   const canvasInputPipeline = makePipe(canvasInputLayout, canvasInputShader);
-  void makePipe(fusedOutputLayout, fusedOutputShader);
+  const fusedOutputPipeline = makePipe(fusedOutputLayout, fusedOutputShader);
+  const fusedDwPwPipeline = makePipe(fusedDwPwLayout, fusedDwPwShader);
 
   // ============ Allocate Buffers ============
   const maxSize = 1 * 288 * 128 * 128 * 4;
@@ -549,13 +553,23 @@ export async function compileModel(
   const upsampleAddB1BG = makeBind(upsampleAddLayout, [bufTmp, bufB1, bufB, bufUpsample32to64U]);
 
   // Output head bind groups
-  const handflagBG = makeBind(outputLayout, [bufA, bufHandflagW, bufHandflagB, bufHandflag, bufHandflagU]);
-  const handednessBG = makeBind(outputLayout, [bufA, bufHandednessW, bufHandednessB, bufHandedness, bufHandednessU]);
-  const landmarksBG = makeBind(outputLayout, [bufA, bufLandmarksW, bufLandmarksB, bufLandmarks, bufLandmarksU]);
+  void makeBind(outputLayout, [bufA, bufHandflagW, bufHandflagB, bufHandflag, bufHandflagU]);
+  void makeBind(outputLayout, [bufA, bufHandednessW, bufHandednessB, bufHandedness, bufHandednessU]);
+  void makeBind(outputLayout, [bufA, bufLandmarksW, bufLandmarksB, bufLandmarks, bufLandmarksU]);
 
   const canvasInputBG = makeBind(canvasInputLayout, [canvasTexture.createView(), bufInput, bufCanvasU]);
 
-  void makeBind(fusedOutputLayout, [bufA, bufHandflagW, bufHandflagB, bufHandednessW, bufHandednessB, bufLandmarksW, bufLandmarksB, bufHandflag, bufHandedness, bufLandmarks]);
+  const fusedOutputBG = makeBind(fusedOutputLayout, [bufA, bufHandflagW, bufHandflagB, bufHandednessW, bufHandednessB, bufLandmarksW, bufLandmarksB, bufHandflag, bufHandedness, bufLandmarks]);
+
+  // Fused DW+PW bind groups for layers 24-42 (all 288→288 channels)
+  const FUSED_START = 24;
+  const fusedBindGroupsAtoB: GPUBindGroup[] = [];
+  const fusedBindGroupsBtoA: GPUBindGroup[] = [];
+  for (let i = FUSED_START; i < resmoduleData.length; i++) {
+    const ld = resmoduleData[i]!;
+    fusedBindGroupsAtoB.push(makeBind(fusedDwPwLayout, [bufA, ld.dwWeight, ld.dwBias, ld.pwWeight, ld.pwBias, bufB, ld.dwUniform]));
+    fusedBindGroupsBtoA.push(makeBind(fusedDwPwLayout, [bufB, ld.dwWeight, ld.dwBias, ld.pwWeight, ld.pwBias, bufA, ld.dwUniform]));
+  }
 
   // Pre-allocated output arrays (avoid per-frame allocations)
   const outputHandflag = new Float32Array(1);
@@ -711,10 +725,10 @@ export async function compileModel(
     useAtoB = false;
 
     // Pass 7: Remaining ff layers (14-42) + output heads
-    // NOTE: Splitting this pass was tested (1,2,5 splits) but always slower.
-    // The driver handles the single mega-pass better for these small spatial dims.
+    // Layers 14-23: separate DW+PW (channels < 288)
+    // Layers 24-42: fused DW+PW (all 288→288, saves 19 dispatches)
     pass = encoder.beginComputePass();
-    for (; layerIdx < resmoduleData.length; layerIdx++) {
+    for (; layerIdx < FUSED_START; layerIdx++) {
       const dwBG = useAtoB ? dwBindGroupsAtoB[layerIdx] : dwBindGroupsBtoA[layerIdx];
       const pwBG = useAtoB ? pwBindGroupsAtoB[layerIdx] : pwBindGroupsBtoA[layerIdx];
       const di = layerDispatchInfos[layerIdx]!;
@@ -727,15 +741,20 @@ export async function compileModel(
       useAtoB = !useAtoB;
     }
 
-    // Output heads (3 dispatches in same final pass — no pass boundary overhead)
-    pass.setPipeline(outputSigmoidPipeline);
-    pass.setBindGroup(0, handflagBG);
-    pass.dispatchWorkgroups(1);
-    pass.setPipeline(outputSigmoidPipeline);
-    pass.setBindGroup(0, handednessBG);
-    pass.dispatchWorkgroups(1);
-    pass.setPipeline(outputLandmarksPipeline);
-    pass.setBindGroup(0, landmarksBG);
+    // Layers 24-42: fused DW+PW (one dispatch per layer instead of two)
+    for (; layerIdx < resmoduleData.length; layerIdx++) {
+      const fusedIdx = layerIdx - FUSED_START;
+      const bg = useAtoB ? fusedBindGroupsAtoB[fusedIdx]! : fusedBindGroupsBtoA[fusedIdx]!;
+      const ld = resmoduleData[layerIdx]!;
+      pass.setPipeline(fusedDwPwPipeline);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(ld.outW, ld.outH, 1);
+      useAtoB = !useAtoB;
+    }
+
+    // Fused output heads (1 dispatch instead of 3)
+    pass.setPipeline(fusedOutputPipeline);
+    pass.setBindGroup(0, fusedOutputBG);
     pass.dispatchWorkgroups(1);
     pass.end();
 
