@@ -65,6 +65,8 @@ export interface CompiledModel {
   device: GPUDevice;
   run: (input: Float32Array) => Promise<HandLandmarksOutput>;
   runFromCanvas: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<HandLandmarksOutput>;
+  runFromCanvasPipelined: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<HandLandmarksOutput | null>;
+  flushPipelined: () => Promise<HandLandmarksOutput | null>;
   benchmark: (iterations?: number) => Promise<{ avgMs: number; fps: number }>;
   benchmarkGPU: (iterations?: number) => Promise<{ avgMs: number; fps: number; medianMs: number; minMs: number }>;
 }
@@ -853,6 +855,74 @@ export async function compileModel(
     };
   }
 
+  // ============ Pipelined Run (double-buffered readback) ============
+  // Overlaps GPU compute with CPU readback. Returns PREVIOUS frame's result.
+  // First call returns null (priming the pipeline). One frame of latency.
+  const readbackBufB = device.createBuffer({
+    size: 65 * 4,
+    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+  });
+  let pipeIdx = 0;
+  const pipeBufs = [readbackBuf, readbackBufB];
+  let pendingMap: Promise<void> | null = null;
+  let pendingBuf: GPUBuffer | null = null;
+
+  async function runFromCanvasPipelined(
+    source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap,
+  ): Promise<HandLandmarksOutput | null> {
+    const curBuf = pipeBufs[pipeIdx]!;
+    pipeIdx = 1 - pipeIdx;
+
+    // Submit current frame
+    device.queue.copyExternalImageToTexture(
+      { source }, { texture: canvasTexture }, [256, 256],
+    );
+    const encoder = device.createCommandEncoder();
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(canvasInputPipeline);
+      pass.setBindGroup(0, canvasInputBG);
+      pass.dispatchWorkgroups(Math.ceil(256 / 16), Math.ceil(256 / 16), 1);
+      pass.end();
+    }
+    encodeInference(encoder, curBuf);
+    device.queue.submit([encoder.finish()]);
+
+    // Read previous frame
+    let result: HandLandmarksOutput | null = null;
+    if (pendingMap !== null && pendingBuf !== null) {
+      await pendingMap;
+      const mapped = new Float32Array(pendingBuf.getMappedRange());
+      result = {
+        handflag: new Float32Array([mapped[0]!]),
+        handedness: new Float32Array([mapped[1]!]),
+        landmarks: new Float32Array(mapped.subarray(2, 65)),
+      };
+      pendingBuf.unmap();
+    }
+
+    // Start mapping current frame (will be read next call)
+    pendingBuf = curBuf;
+    pendingMap = curBuf.mapAsync(GPUMapMode.READ);
+
+    return result;
+  }
+
+  async function flushPipelined(): Promise<HandLandmarksOutput | null> {
+    if (!pendingMap || !pendingBuf) return null;
+    await pendingMap;
+    const mapped = new Float32Array(pendingBuf.getMappedRange());
+    const result: HandLandmarksOutput = {
+      handflag: new Float32Array([mapped[0]!]),
+      handedness: new Float32Array([mapped[1]!]),
+      landmarks: new Float32Array(mapped.subarray(2, 65)),
+    };
+    pendingBuf.unmap();
+    pendingMap = null;
+    pendingBuf = null;
+    return result;
+  }
+
   // ============ Benchmark Function ============
   async function benchmark(iterations = 50): Promise<{ avgMs: number; fps: number }> {
     const dummyInput = new Float32Array(1 * 3 * 256 * 256);
@@ -933,7 +1003,8 @@ export async function compileModel(
   }
 
   return {
-    device, run, runFromCanvas, benchmark, benchmarkGPU,
+    device, run, runFromCanvas, runFromCanvasPipelined, flushPipelined,
+    benchmark, benchmarkGPU,
     _device: device,
     _benchmarkSubmitOnly: submitOnly,
   };

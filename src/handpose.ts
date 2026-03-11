@@ -127,10 +127,23 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     return parseOutput(output.handflag, output.handedness, output.landmarks);
   }
 
+  async function detectPipelined(source: HandposeInput): Promise<HandposeResult | null> {
+    const input = await toModelInput(source);
+    const output = await model.runFromCanvasPipelined(input);
+    if (!output) return null;
+    return parseOutput(output.handflag, output.handedness, output.landmarks);
+  }
+
+  async function flushPipelined(): Promise<HandposeResult | null> {
+    const output = await model.flushPipelined();
+    if (!output) return null;
+    return parseOutput(output.handflag, output.handedness, output.landmarks);
+  }
+
   function dispose(): void {
     model.device.destroy();
     scratchCanvas = null;
   }
 
-  return { detect, dispose };
+  return { detect, detectPipelined, flushPipelined, dispose };
 }

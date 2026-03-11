@@ -1,0 +1,56 @@
+<!DOCTYPE html><html><head><title>Debug Fused Shader</title></head><body>
+<pre id="log"></pre>
+<script type="module">
+const L = msg => { document.getElementById('log').textContent += msg + '\n'; console.log(msg); };
+
+// Monkey-patch device to catch ALL validation errors
+const origReqDevice = GPUAdapter.prototype.requestDevice;
+GPUAdapter.prototype.requestDevice = async function(...args) {
+  const device = await origReqDevice.apply(this, args);
+  device.addEventListener('uncapturederror', e => L('GPU UNCAPTURED ERROR: ' + e.error.message));
+  return device;
+};
+
+// Monkey-patch createShaderModule to check compilation
+const origCreateShader = GPUDevice.prototype.createShaderModule;
+GPUDevice.prototype.createShaderModule = function(desc) {
+  const mod = origCreateShader.call(this, desc);
+  mod.getCompilationInfo().then(info => {
+    for (const m of info.messages) {
+      if (m.type === 'error') L('SHADER ERROR: ' + m.message);
+    }
+  });
+  return mod;
+};
+
+// Monkey-patch dispatchWorkgroups to log dispatches
+let dispatchCount = 0;
+const origDispatch = GPUComputePassEncoder.prototype.dispatchWorkgroups;
+GPUComputePassEncoder.prototype.dispatchWorkgroups = function(x, y, z) {
+  dispatchCount++;
+  return origDispatch.call(this, x, y, z);
+};
+
+L('loading...');
+const { createHandpose } = await import('./dist/index.js');
+const hp = await createHandpose({ weightsUrl: '/weights', scoreThreshold: 0.0 });
+L('loaded. detecting...');
+
+dispatchCount = 0;
+const result = await hp.detect(new OffscreenCanvas(256, 256));
+L('dispatch count: ' + dispatchCount);
+L('score: ' + result?.score);
+
+// Now test with actual image
+const img = new Image();
+img.src = '/test_hand.png';
+await new Promise(r => img.onload = r);
+const canvas = new OffscreenCanvas(256, 256);
+canvas.getContext('2d').drawImage(img, 0, 0, 256, 256);
+
+dispatchCount = 0;
+const result2 = await hp.detect(canvas);
+L('with image - dispatch count: ' + dispatchCount);
+L('with image - score: ' + result2?.score);
+L('with image - lm0: ' + JSON.stringify(result2?.landmarks?.[0]));
+</script></body></html>

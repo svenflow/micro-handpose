@@ -45,6 +45,12 @@ export interface Handpose {
    */
   detect: (source: HandposeInput) => Promise<HandposeResult | null>;
 
+  /** Pipelined detection: returns previous frame's result, one frame latency, lower overhead */
+  detectPipelined: (source: HandposeInput) => Promise<HandposeResult | null>;
+
+  /** Flush pipelined readback to get last frame's result */
+  flushPipelined: () => Promise<HandposeResult | null>;
+
   /** Dispose GPU resources */
   dispose: () => void;
 }
