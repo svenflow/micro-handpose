@@ -596,6 +596,30 @@ fn main(@builtin(local_invocation_id) lid:vec3<u32>, @builtin(workgroup_id) wid:
 `);
 }
 
+// Render-based readback: encodes float32 values as RGBA8 pixels
+// Each float → 1 pixel: r=byte3(MSB), g=byte2, b=byte1, a=byte0(LSB)
+// This bypasses mapAsync by using canvas getImageData instead
+export const READBACK_RENDER_VS = S(`
+@vertex fn vs(@builtin(vertex_index) vid:u32)->@builtin(position) vec4<f32>{
+  var pos=array<vec2<f32>,3>(vec2(-1,-1),vec2(3,-1),vec2(-1,3));
+  return vec4(pos[vid],0,1);
+}
+`);
+export const READBACK_RENDER_FS = S(`
+@group(0)@binding(0) var<storage,read> data:array<f32>;
+@fragment fn fs(@builtin(position) pos:vec4<f32>)->@location(0) vec4<f32>{
+  let x=u32(pos.x); let y=u32(pos.y);
+  let idx=y*9u+x;
+  if(idx>=65u){return vec4(0,0,0,1);}
+  let bits=bitcast<u32>(data[idx]);
+  let r=f32((bits>>24u)&0xFFu)/255.0;
+  let g=f32((bits>>16u)&0xFFu)/255.0;
+  let b=f32((bits>>8u)&0xFFu)/255.0;
+  let a=f32(bits&0xFFu)/255.0;
+  return vec4(r,g,b,a);
+}
+`);
+
 export const CANVAS_INPUT_SHADER = S(`
 struct CanvasParams { in_size:u32, out_size:u32, }
 @group(0)@binding(0) var input_tex:texture_2d<f32>;

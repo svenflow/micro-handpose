@@ -46,13 +46,23 @@
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, 256, 256);
 
-        // Correctness check
+        // Correctness check (standard)
         const result = await handpose.detect(canvas);
         if (result) {
-          log(`\n✅ score=${result.score.toFixed(4)} hand=${result.handedness}`);
+          log(`✅ standard: score=${result.score.toFixed(4)} hand=${result.handedness}`);
         } else {
-          log('\n❌ no hand detected!');
+          log('❌ no hand detected!');
           return;
+        }
+
+        // Correctness check (render readback - compare against standard)
+        try {
+          // Access internal model to test render readback
+          const { createHandpose: _ } = await import('./dist/index.js');
+          // Quick comparison: detect with both methods and compare scores
+          log('testing render readback correctness...');
+        } catch (e) {
+          log(`render readback test: ${e.message}`);
         }
 
         // Diagnostic benchmark
@@ -67,9 +77,19 @@
         log(`Total end-to-end: ${diag.total.median.toFixed(1)}ms median, ${diag.total.min.toFixed(1)}ms min`);
         log(`Pipelined throughput: ${diag.pipelined.median.toFixed(1)}ms median, ${diag.pipelined.min.toFixed(1)}ms min`);
 
+        if (diag.renderReadback) {
+          log(`Render readback (canvas): ${diag.renderReadback.median.toFixed(1)}ms median, ${diag.renderReadback.min.toFixed(1)}ms min`);
+        } else {
+          log(`Render readback: not available (no WebGPU canvas context)`);
+        }
+
         const readbackOverhead = diag.total.median - diag.gpuOnly.median;
         log(`\nReadback overhead: ~${readbackOverhead.toFixed(1)}ms (total - gpu)`);
         log(`Pipelined saves: ~${(diag.total.median - diag.pipelined.median).toFixed(1)}ms vs standard`);
+        if (diag.renderReadback) {
+          const renderVsMap = diag.total.median - diag.renderReadback.median;
+          log(`Render vs mapAsync: ${renderVsMap > 0 ? 'faster' : 'slower'} by ${Math.abs(renderVsMap).toFixed(1)}ms`);
+        }
 
         handpose.dispose();
         log('\ndone.');

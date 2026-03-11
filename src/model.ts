@@ -36,6 +36,8 @@ import {
   PAD_INPUT_SHADER,
   CANVAS_INPUT_SHADER,
   FUSED_DW_PW_288_SHADER,
+  READBACK_RENDER_VS,
+  READBACK_RENDER_FS,
   makeDepthwise5x5Shader,
   makeDepthwise5x5FullUnrollShader,
   makePointwiseShader,
@@ -70,12 +72,14 @@ export interface CompiledModel {
   flushPipelined: () => Promise<HandLandmarksOutput | null>;
   benchmark: (iterations?: number) => Promise<{ avgMs: number; fps: number }>;
   benchmarkGPU: (iterations?: number) => Promise<{ avgMs: number; fps: number; medianMs: number; minMs: number }>;
+  runFromCanvasViaRender: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<HandLandmarksOutput>;
   benchmarkDiagnostic: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap, iterations?: number) => Promise<{
     gpuOnly: { median: number; min: number };
     mapAsyncOnly: { median: number; min: number };
     mapAsyncNoWait: { median: number; min: number };
     total: { median: number; min: number };
     pipelined: { median: number; min: number };
+    renderReadback: { median: number; min: number } | null;
   }>;
 }
 
@@ -603,6 +607,48 @@ export async function compileModel(
     fusedBindGroupsBtoA.push(makeBind(fusedDwPwLayout, [bufB, ld.dwWeight, ld.dwBias, ld.pwWeight, ld.pwBias, bufA, ld.dwUniform]));
   }
 
+  // ============ Render-based Readback (bypasses mapAsync) ============
+  // Encodes float32 values as RGBA8 pixels, reads via canvas getImageData
+  // This may be faster than mapAsync on Safari iOS
+  const readbackCanvas = new OffscreenCanvas(9, 8); // 9*8=72 >= 65 values
+  const readbackCtx = readbackCanvas.getContext('2d', { willReadFrequently: true })!;
+  // Use 'copy' compositing to avoid alpha blending corrupting our float encoding
+  readbackCtx.globalCompositeOperation = 'copy';
+  const readbackGpuCanvas = new OffscreenCanvas(9, 8);
+  const readbackGpuCtx = readbackGpuCanvas.getContext('webgpu') as any;
+
+  let readbackRenderPipeline: GPURenderPipeline | null = null;
+  let readbackRenderBG: GPUBindGroup | null = null;
+
+  if (readbackGpuCtx) {
+    readbackGpuCtx.configure({
+      device,
+      format: 'rgba8unorm',
+      alphaMode: 'premultiplied',
+    });
+
+    const readbackBGL = device.createBindGroupLayout({
+      entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' as GPUBufferBindingType } }],
+    });
+
+    const vsModule = device.createShaderModule({ code: READBACK_RENDER_VS });
+    const fsModule = device.createShaderModule({ code: READBACK_RENDER_FS });
+
+    readbackRenderPipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [readbackBGL] }),
+      vertex: { module: vsModule, entryPoint: 'vs' },
+      fragment: {
+        module: fsModule, entryPoint: 'fs',
+        targets: [{ format: 'rgba8unorm' as GPUTextureFormat }],
+      },
+    });
+
+    readbackRenderBG = device.createBindGroup({
+      layout: readbackBGL,
+      entries: [{ binding: 0, resource: { buffer: bufOutput } }],
+    });
+  }
+
   // Pre-allocated output arrays (avoid per-frame allocations)
   const outputHandflag = new Float32Array(1);
   const outputHandedness = new Float32Array(1);
@@ -616,7 +662,7 @@ export async function compileModel(
   // Result: 7 compute passes instead of 86+ (saves pass boundary overhead)
   // NOTE: Merging passes 4-7 into 1 was tested but 1.75x SLOWER — the driver
   // uses pass boundaries for memory management and scheduling optimization.
-  function encodeInference(encoder: GPUCommandEncoder, readbackTarget: GPUBuffer) {
+  function encodeInference(encoder: GPUCommandEncoder, readbackTarget: GPUBuffer | null) {
     let useAtoB = true;
     let layerIdx = 0;
 
@@ -791,7 +837,9 @@ export async function compileModel(
     pass.end();
 
     // Copy unified output to readback buffer (1 copy instead of 3)
-    encoder.copyBufferToBuffer(bufOutput, 0, readbackTarget, 0, 65 * 4);
+    if (readbackTarget) {
+      encoder.copyBufferToBuffer(bufOutput, 0, readbackTarget, 0, 65 * 4);
+    }
   }
 
   // ============ Run Function (Float32Array input) ============
@@ -874,6 +922,73 @@ export async function compileModel(
       handflag: new Float32Array(outputHandflag),
       handedness: new Float32Array(outputHandedness),
       landmarks: new Float32Array(outputLandmarks),
+    };
+  }
+
+  // ============ Render-based Readback (bypasses mapAsync) ============
+  // Uses render pass to encode floats as RGBA8 pixels, reads via canvas getImageData
+  // May be faster than mapAsync on Safari iOS
+  async function runFromCanvasViaRender(
+    source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap,
+  ): Promise<HandLandmarksOutput> {
+    if (!readbackRenderPipeline || !readbackRenderBG || !readbackGpuCtx) {
+      throw new Error('Render-based readback not available (no WebGPU canvas context)');
+    }
+
+    device.queue.copyExternalImageToTexture(
+      { source }, { texture: canvasTexture }, [256, 256],
+    );
+    const encoder = device.createCommandEncoder();
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(canvasInputPipeline);
+      pass.setBindGroup(0, canvasInputBG);
+      pass.dispatchWorkgroups(16, 16, 1);
+      pass.end();
+    }
+
+    // Run inference without copying to readback buffer
+    encodeInference(encoder, null);
+
+    // Render float values as RGBA8 pixels to canvas
+    const renderTarget = readbackGpuCtx.getCurrentTexture();
+    const renderPass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: renderTarget.createView(),
+        loadOp: 'clear' as GPULoadOp,
+        storeOp: 'store' as GPUStoreOp,
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      }],
+    });
+    renderPass.setPipeline(readbackRenderPipeline);
+    renderPass.setBindGroup(0, readbackRenderBG);
+    renderPass.draw(3);
+    renderPass.end();
+
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+
+    // Read pixels from canvas (bypasses mapAsync!)
+    readbackCtx.drawImage(readbackGpuCanvas, 0, 0);
+    const imageData = readbackCtx.getImageData(0, 0, 9, 8);
+    const pixels = imageData.data; // Uint8ClampedArray
+
+    // Decode RGBA8 pixels back to float32
+    const decoded = new Float32Array(65);
+    const view = new DataView(new ArrayBuffer(4));
+    for (let i = 0; i < 65; i++) {
+      const pi = i * 4;
+      view.setUint8(0, pixels[pi]!);     // r = byte3 (MSB)
+      view.setUint8(1, pixels[pi + 1]!); // g = byte2
+      view.setUint8(2, pixels[pi + 2]!); // b = byte1
+      view.setUint8(3, pixels[pi + 3]!); // a = byte0 (LSB)
+      decoded[i] = view.getFloat32(0);
+    }
+
+    return {
+      handflag: new Float32Array([decoded[0]!]),
+      handedness: new Float32Array([decoded[1]!]),
+      landmarks: new Float32Array(decoded.subarray(2, 65)),
     };
   }
 
@@ -1103,17 +1218,30 @@ export async function compileModel(
     }
     await flushPipelined();
 
+    // 6. Render-based readback (bypasses mapAsync)
+    let renderReadback: { median: number; min: number } | null = null;
+    if (readbackRenderPipeline) {
+      const renderTimes: number[] = [];
+      for (let i = 0; i < iterations; i++) {
+        const t = performance.now();
+        await runFromCanvasViaRender(source);
+        renderTimes.push(performance.now() - t);
+      }
+      renderReadback = stats(renderTimes);
+    }
+
     return {
       gpuOnly: stats(gpuTimes),
       mapAsyncOnly: stats(mapWaitTimes),
       mapAsyncNoWait: stats(mapNoWaitTimes),
       total: stats(totalTimes),
       pipelined: stats(pipeTimes),
+      renderReadback,
     };
   }
 
   return {
-    device, run, runFromCanvas, runFromCanvasPipelined, flushPipelined,
+    device, run, runFromCanvas, runFromCanvasViaRender, runFromCanvasPipelined, flushPipelined,
     benchmark, benchmarkGPU, benchmarkDiagnostic,
     _device: device,
     _benchmarkSubmitOnly: submitOnly,
