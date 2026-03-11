@@ -86,7 +86,7 @@ Requires [WebGPU](https://webgpureport.org). Supported in Chrome 113+, Edge 113+
 
 ## Performance
 
-Benchmarked on Apple M2:
+Benchmarked on Apple M4:
 
 | | Median | p99 | Backend |
 |---|---|---|---|

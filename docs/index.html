@@ -143,13 +143,14 @@
       position: absolute;
       top: 0; left: 0;
       width: 100%; height: 100%;
-      object-fit: cover;
+      object-fit: contain;
       transform: scaleX(-1);
     }
     .demo-viewport canvas {
       position: absolute;
       top: 0; left: 0;
       width: 100%; height: 100%;
+      object-fit: contain;
       transform: scaleX(-1);
     }
     .demo-placeholder {
@@ -328,7 +329,7 @@
         <a href="#demo">Demo</a>
         <a href="#features">Features</a>
         <a href="https://www.npmjs.com/package/@svenflow/micro-handpose" target="_blank">npm</a>
-        <a href="https://github.com/AnomalyInnovations/micro-handpose" target="_blank">GitHub</a>
+        <a href="https://github.com/svenflow/micro-handpose" target="_blank">GitHub</a>
       </div>
     </div>
   </nav>
@@ -336,7 +337,7 @@
   <!-- Hero -->
   <section class="hero">
     <div class="container">
-      <div class="badge">v0.1.1 &mdash; WebGPU</div>
+      <div class="badge">v0.1.2 &mdash; WebGPU</div>
       <h1>micro-handpose</h1>
       <p class="tagline">Tiny, fast hand landmark detection. 2ms. Zero deps.</p>
       <div class="install-box" onclick="copyInstall()" title="Click to copy">
@@ -459,8 +460,8 @@ handpose.<span class="fn">dispose</span>()</pre>
     <div class="container">
       <div class="footer-links">
         <a href="https://www.npmjs.com/package/@svenflow/micro-handpose" target="_blank">npm</a>
-        <a href="https://github.com/AnomalyInnovations/micro-handpose" target="_blank">GitHub</a>
-        <a href="https://github.com/AnomalyInnovations/micro-handpose/issues" target="_blank">Issues</a>
+        <a href="https://github.com/svenflow/micro-handpose" target="_blank">GitHub</a>
+        <a href="https://github.com/svenflow/micro-handpose/issues" target="_blank">Issues</a>
       </div>
       <p class="copy">@svenflow/micro-handpose</p>
     </div>
@@ -560,9 +561,13 @@ handpose.<span class="fn">dispose</span>()</pre>
         video.srcObject = stream;
         await video.play();
 
-        // Size canvas to match video
+        // Size canvas to match video native resolution
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
+
+        // Update viewport aspect ratio to match camera
+        document.getElementById('viewport').style.aspectRatio =
+          `${video.videoWidth} / ${video.videoHeight}`;
 
         placeholder.style.display = 'none';
 
@@ -570,11 +575,11 @@ handpose.<span class="fn">dispose</span>()</pre>
 
         // Dynamic import from CDN
         const { createHandpose } = await import(
-          'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.1/dist/index.js'
+          'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.2/dist/index.js'
         );
 
         handpose = await createHandpose({
-          weightsUrl: 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.1/weights/'
+          weightsUrl: 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.2/weights/'
         });
 
         statusVal.textContent = 'Running';
