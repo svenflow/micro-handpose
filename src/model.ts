@@ -901,5 +901,28 @@ export async function compileModel(
     return { avgMs, fps: 1000 / avgMs, medianMs, minMs };
   }
 
-  return { device, run, runFromCanvas, benchmark, benchmarkGPU };
+  // Submit-only function for GPU-only benchmarking (no readback)
+  function submitOnly(source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) {
+    device.queue.copyExternalImageToTexture(
+      { source },
+      { texture: canvasTexture },
+      [256, 256],
+    );
+    const encoder = device.createCommandEncoder();
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(canvasInputPipeline);
+      pass.setBindGroup(0, canvasInputBG);
+      pass.dispatchWorkgroups(Math.ceil(256 / 16), Math.ceil(256 / 16), 1);
+      pass.end();
+    }
+    encodeInference(encoder, readbackBuf);
+    device.queue.submit([encoder.finish()]);
+  }
+
+  return {
+    device, run, runFromCanvas, benchmark, benchmarkGPU,
+    _device: device,
+    _benchmarkSubmitOnly: submitOnly,
+  };
 }

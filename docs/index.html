@@ -1238,6 +1238,28 @@ handpose.<span class="fn">dispose</span>()</pre>
       table.innerHTML = html;
       panel.classList.add('visible');
 
+      // GPU-only timing: submit N runs without readback, then do single readback
+      // This separates GPU compute time from mapAsync/readback overhead
+      try {
+        btn.textContent = 'Profiling GPU-only...';
+        const gpuDevice = microHandpose._device;
+        if (gpuDevice && microHandpose._benchmarkSubmitOnly) {
+          // warmup
+          for (let i = 0; i < 3; i++) await microHandpose.detect(source);
+          // Time N submits + single fence
+          const gpuT0 = performance.now();
+          for (let i = 0; i < N; i++) {
+            microHandpose._benchmarkSubmitOnly(source);
+          }
+          // Force GPU to finish all work
+          await gpuDevice.queue.onSubmittedWorkDone();
+          const gpuTotalMs = performance.now() - gpuT0;
+          results.gpuOnly = { totalMs: gpuTotalMs, perRunMs: gpuTotalMs / N };
+          summaryHtml += '<br><br>GPU-only (no readback): <span class="metric">' + (gpuTotalMs / N).toFixed(2) + 'ms/run</span> (total ' + gpuTotalMs.toFixed(1) + 'ms for ' + N + ' runs)';
+          summary.innerHTML = summaryHtml;
+        }
+      } catch(e) { console.warn('GPU-only benchmark failed:', e); }
+
       // Also log to console for Web Inspector
       console.log('PROFILE RESULTS:', JSON.stringify(results, null, 2));
 
