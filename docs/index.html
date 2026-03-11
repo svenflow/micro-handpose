@@ -973,6 +973,11 @@ handpose.<span class="fn">dispose</span>()</pre>
         updateModelLabel();
         detectLoop();
 
+        // Auto-profile if URL param is set
+        if (new URLSearchParams(location.search).has('autoProfile')) {
+          setTimeout(() => runProfile(), 2000); // wait 2s for warmup
+        }
+
       } catch (err) {
         statusVal.textContent = 'Error';
         startBtn.disabled = false;
@@ -1415,6 +1420,11 @@ handpose.<span class="fn">dispose</span>()</pre>
         ctx.fillStyle = landmarkColor(i);
         ctx.fill();
       }
+    }
+
+    // Auto-start camera if autoProfile param is set
+    if (new URLSearchParams(location.search).has('autoProfile')) {
+      startDemo();
     }
   </script>
 </body>
