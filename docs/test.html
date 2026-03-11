@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>micro-handpose test</title>
+  <style>
+    body { font-family: system-ui; max-width: 600px; margin: 40px auto; padding: 20px; background: #111; color: #eee; }
+    pre { background: #222; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; }
+    img { max-width: 200px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>micro-handpose test</h1>
+  <img id="testImg" alt="test hand">
+  <pre id="log"></pre>
+
+  <script type="module">
+    const logEl = document.getElementById('log');
+    function log(msg) {
+      logEl.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    async function run() {
+      try {
+        log('importing micro-handpose...');
+        const { createHandpose } = await import('./dist/index.js');
+
+        log('creating detector...');
+        const t0 = performance.now();
+        const handpose = await createHandpose({ weightsUrl: 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.2/weights/' });
+        log(`ready in ${(performance.now() - t0).toFixed(0)}ms`);
+
+        const img = document.getElementById('testImg');
+        img.src = 'test_hand.png';
+        await new Promise(r => img.onload = r);
+
+        const canvas = new OffscreenCanvas(256, 256);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, 256, 256);
+
+        // Correctness
+        const result = await handpose.detect(canvas);
+        if (result) {
+          log(`✅ score=${result.score.toFixed(4)} hand=${result.handedness}`);
+        } else {
+          log('❌ no hand detected!');
+          return;
+        }
+
+        // Diagnostic benchmark
+        log('\n🔬 Running diagnostic benchmark...\n');
+        const diag = await handpose.benchmarkDiagnostic(canvas, 50);
+
+        log('=== TIMING BREAKDOWN (median / min) ===');
+        log(`GPU only:              ${diag.gpuOnly.median.toFixed(1)}ms / ${diag.gpuOnly.min.toFixed(1)}ms`);
+        log(`mapAsync+wait:         ${diag.mapAsyncOnly.median.toFixed(1)}ms / ${diag.mapAsyncOnly.min.toFixed(1)}ms`);
+        log(`mapAsync raw:          ${diag.mapAsyncNoWait.median.toFixed(1)}ms / ${diag.mapAsyncNoWait.min.toFixed(1)}ms`);
+        log(`Total e2e:             ${diag.total.median.toFixed(1)}ms / ${diag.total.min.toFixed(1)}ms`);
+        log(`Pipelined:             ${diag.pipelined.median.toFixed(1)}ms / ${diag.pipelined.min.toFixed(1)}ms`);
+        if (diag.renderReadback) {
+          log(`Render readback:       ${diag.renderReadback.median.toFixed(1)}ms / ${diag.renderReadback.min.toFixed(1)}ms`);
+        } else {
+          log(`Render readback:       N/A (no WebGPU canvas)`);
+        }
+
+        log(`\nReadback overhead: ~${(diag.total.median - diag.gpuOnly.median).toFixed(1)}ms`);
+        log(`Best approach: ${getBest(diag)}`);
+
+        handpose.dispose();
+        log('\ndone.');
+
+      } catch (e) {
+        log(`\n❌ error: ${e.message}\n${e.stack}`);
+        console.error(e);
+      }
+    }
+
+    function getBest(diag) {
+      const approaches = [
+        ['mapAsync', diag.total.median],
+        ['pipelined', diag.pipelined.median],
+      ];
+      if (diag.renderReadback) approaches.push(['render', diag.renderReadback.median]);
+      approaches.sort((a, b) => a[1] - b[1]);
+      return `${approaches[0][0]} (${approaches[0][1].toFixed(1)}ms)`;
+    }
+
+    run();
+  </script>
+</body>
+</html>
