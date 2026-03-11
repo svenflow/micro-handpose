@@ -572,7 +572,7 @@
             <div class="value" id="fpsVal">&mdash;</div>
           </div>
           <div class="demo-stat">
-            <div class="label">Inference</div>
+            <div class="label">Inference (avg)</div>
             <div class="value" id="inferVal">&mdash;</div>
           </div>
           <div class="demo-stat">
@@ -759,6 +759,26 @@ handpose.<span class="fn">dispose</span>()</pre>
     let frameCount = 0;
     let lastFpsTime = performance.now();
 
+    // Moving average for inference time (exponential moving average, alpha=0.1)
+    let inferEma = 0;
+    let inferEmaInitialized = false;
+    const INFER_EMA_ALPHA = 0.1;
+
+    function updateInferDisplay(inferTime) {
+      if (!inferEmaInitialized) {
+        inferEma = inferTime;
+        inferEmaInitialized = true;
+      } else {
+        inferEma = INFER_EMA_ALPHA * inferTime + (1 - INFER_EMA_ALPHA) * inferEma;
+      }
+      inferVal.textContent = inferEma.toFixed(1) + 'ms';
+    }
+
+    function resetInferEma() {
+      inferEmaInitialized = false;
+      inferEma = 0;
+    }
+
     const video = document.getElementById('video');
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
@@ -882,6 +902,7 @@ handpose.<span class="fn">dispose</span>()</pre>
       handVal.classList.remove('active');
       frameCount = 0;
       lastFpsTime = performance.now();
+      resetInferEma();
 
       if (!running) {
         updateModelLabel();
@@ -991,7 +1012,7 @@ handpose.<span class="fn">dispose</span>()</pre>
       const result = await microHandpose.detect(video);
       const inferTime = performance.now() - t0;
 
-      inferVal.textContent = inferTime.toFixed(1) + 'ms';
+      updateInferDisplay(inferTime);
       updateFps();
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -1018,7 +1039,7 @@ handpose.<span class="fn">dispose</span>()</pre>
       const results = landmarker.detectForVideo(video, ts);
       const inferTime = performance.now() - t0;
 
-      inferVal.textContent = inferTime.toFixed(1) + 'ms';
+      updateInferDisplay(inferTime);
       updateFps();
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
