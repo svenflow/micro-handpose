@@ -226,7 +226,19 @@ export async function compileModel(
     throw new Error('No GPU adapter found');
   }
 
-  const device = await adapter.requestDevice();
+  const device = await adapter.requestDevice({
+    requiredLimits: {
+      maxStorageBuffersPerShaderStage: Math.min(
+        adapter.limits.maxStorageBuffersPerShaderStage, 10,
+      ),
+      maxComputeWorkgroupSizeX: Math.min(
+        adapter.limits.maxComputeWorkgroupSizeX, 288,
+      ),
+      maxComputeInvocationsPerWorkgroup: Math.min(
+        adapter.limits.maxComputeInvocationsPerWorkgroup, 288,
+      ),
+    },
+  });
 
   // ============ Helpers ============
   // r=read-only-storage, s=storage, u=uniform
