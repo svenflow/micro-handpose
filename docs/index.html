@@ -538,6 +538,9 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/></svg>
           Compare
         </button>
+        <button class="compare-btn" id="profileBtn" onclick="runProfile()" disabled style="background: rgba(100,149,237,0.15); border-color: rgba(100,149,237,0.3); color: cornflowerblue;">
+          Profile (20 runs)
+        </button>
       </div>
 
       <div class="demo-card">
@@ -952,6 +955,7 @@ handpose.<span class="fn">dispose</span>()</pre>
         placeholder.style.display = 'none';
         cameraReady = true;
         document.getElementById('compareBtn').disabled = false;
+        document.getElementById('profileBtn').disabled = false;
 
         if (activeModel === 'micro') {
           await ensureMicroHandpose();
@@ -1074,6 +1078,123 @@ handpose.<span class="fn">dispose</span>()</pre>
         lastFpsTime = now;
       }
     }
+
+    // --- Profile mode ---
+    window.runProfile = async function () {
+      if (!cameraReady) return;
+      const N = 20;
+      const btn = document.getElementById('profileBtn');
+      btn.disabled = true;
+
+      const wasRunning = running;
+      running = false;
+
+      const results = {};
+
+      // Profile micro-handpose
+      try {
+        btn.textContent = 'Loading micro...';
+        await ensureMicroHandpose();
+        btn.textContent = 'Profiling micro (0/' + N + ')...';
+        // warmup
+        for (let i = 0; i < 3; i++) await microHandpose.detect(video);
+        const microTimes = [];
+        for (let i = 0; i < N; i++) {
+          const t0 = performance.now();
+          await microHandpose.detect(video);
+          microTimes.push(performance.now() - t0);
+          btn.textContent = 'Profiling micro (' + (i+1) + '/' + N + ')...';
+        }
+        microTimes.sort((a, b) => a - b);
+        results.micro = {
+          median: microTimes[Math.floor(N/2)],
+          min: microTimes[0],
+          p90: microTimes[Math.floor(N*0.9)],
+          mean: microTimes.reduce((a,b) => a+b, 0) / N,
+          all: microTimes
+        };
+      } catch (e) {
+        results.micro = { error: e.message };
+      }
+
+      // Profile MediaPipe WASM
+      try {
+        btn.textContent = 'Loading MediaPipe...';
+        await ensureMediaPipeWasm();
+        btn.textContent = 'Profiling MediaPipe (0/' + N + ')...';
+        // warmup
+        for (let i = 0; i < 3; i++) {
+          mpWasmTimestamp += 33;
+          mpHandsWasm.detectForVideo(video, mpWasmTimestamp);
+        }
+        const mpTimes = [];
+        for (let i = 0; i < N; i++) {
+          mpWasmTimestamp += 33;
+          const t0 = performance.now();
+          mpHandsWasm.detectForVideo(video, mpWasmTimestamp);
+          mpTimes.push(performance.now() - t0);
+          btn.textContent = 'Profiling MediaPipe (' + (i+1) + '/' + N + ')...';
+        }
+        mpTimes.sort((a, b) => a - b);
+        results.mediapipe = {
+          median: mpTimes[Math.floor(N/2)],
+          min: mpTimes[0],
+          p90: mpTimes[Math.floor(N*0.9)],
+          mean: mpTimes.reduce((a,b) => a+b, 0) / N,
+          all: mpTimes
+        };
+      } catch (e) {
+        results.mediapipe = { error: e.message };
+      }
+
+      // Show results
+      const panel = document.getElementById('compareResults');
+      const summary = document.getElementById('compareSummary');
+      const table = document.getElementById('compareTable');
+
+      const fmt = (v) => v !== undefined ? v.toFixed(1) + 'ms' : 'N/A';
+      const ua = navigator.userAgent;
+      const device = /iPhone/.test(ua) ? 'iPhone' : /Mac/.test(ua) ? 'Mac' : 'Unknown';
+
+      let summaryHtml = '<strong>Profile Results (' + N + ' runs, ' + device + ')</strong><br>';
+      if (results.micro.error) {
+        summaryHtml += 'micro-handpose: <span class="bad">' + results.micro.error + '</span><br>';
+      } else {
+        summaryHtml += 'micro-handpose: median=<span class="metric">' + fmt(results.micro.median) + '</span> min=<span class="metric">' + fmt(results.micro.min) + '</span> p90=<span class="metric">' + fmt(results.micro.p90) + '</span><br>';
+      }
+      if (results.mediapipe.error) {
+        summaryHtml += 'MediaPipe WASM: <span class="bad">' + results.mediapipe.error + '</span>';
+      } else {
+        summaryHtml += 'MediaPipe WASM: median=<span class="metric">' + fmt(results.mediapipe.median) + '</span> min=<span class="metric">' + fmt(results.mediapipe.min) + '</span> p90=<span class="metric">' + fmt(results.mediapipe.p90) + '</span>';
+      }
+
+      if (results.micro.median && results.mediapipe.median) {
+        const ratio = results.mediapipe.median / results.micro.median;
+        const faster = ratio > 1 ? 'micro' : 'MediaPipe';
+        const rStr = ratio > 1 ? ratio.toFixed(1) : (1/ratio).toFixed(1);
+        summaryHtml += '<br><br><span class="metric" style="font-size:16px">' + faster + ' is ' + rStr + 'x faster</span>';
+      }
+
+      summary.innerHTML = summaryHtml;
+
+      // Build per-run table
+      let html = '<tr><th>Run</th><th>micro-handpose</th><th>MediaPipe WASM</th><th>Diff</th></tr>';
+      for (let i = 0; i < N; i++) {
+        const mt = results.micro.all ? results.micro.all[i] : null;
+        const mpt = results.mediapipe.all ? results.mediapipe.all[i] : null;
+        const diff = (mt && mpt) ? (mt - mpt) : null;
+        const diffClass = diff === null ? '' : diff < 0 ? 'diff-low' : diff > 0 ? 'diff-high' : '';
+        html += '<tr><td>' + (i+1) + '</td><td>' + (mt ? mt.toFixed(1) + 'ms' : 'err') + '</td><td>' + (mpt ? mpt.toFixed(1) + 'ms' : 'err') + '</td><td class="' + diffClass + '">' + (diff !== null ? (diff > 0 ? '+' : '') + diff.toFixed(1) + 'ms' : '') + '</td></tr>';
+      }
+      table.innerHTML = html;
+      panel.classList.add('visible');
+
+      // Also log to console for Web Inspector
+      console.log('PROFILE RESULTS:', JSON.stringify(results, null, 2));
+
+      btn.disabled = false;
+      btn.textContent = 'Profile (20 runs)';
+    };
 
     // --- Compare mode ---
     const LANDMARK_NAMES = [
