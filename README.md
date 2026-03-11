@@ -3,7 +3,7 @@
 Tiny, fast hand landmark detection for the browser. WebGPU-powered, zero dependencies.
 
 - **57KB** JS (9KB gzipped) + 7.7MB weights (served via CDN)
-- **2.2ms** median inference (455 FPS) — ~2x faster than MediaPipe
+- **~2x faster** than MediaPipe on the same hardware
 - **21 landmarks** per hand, 100% identical output to the PyTorch reference
 - TypeScript types included
 

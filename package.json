@@ -4,7 +4,7 @@
     "access": "public"
   },
   "version": "0.1.2",
-  "description": "Tiny, fast hand landmark detection. WebGPU-powered, 2ms inference, zero dependencies.",
+  "description": "Tiny, fast hand landmark detection. WebGPU-powered, ~2x faster than MediaPipe, zero dependencies.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
