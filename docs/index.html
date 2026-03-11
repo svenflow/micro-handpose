@@ -124,6 +124,86 @@
       margin-bottom: 24px;
       text-align: center;
     }
+
+    /* --- MODEL TOGGLE --- */
+    .model-toggle {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 16px;
+    }
+    .toggle-group {
+      display: inline-flex;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 3px;
+      gap: 2px;
+    }
+    .toggle-btn {
+      position: relative;
+      padding: 7px 20px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text-secondary);
+      font-family: var(--font);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .toggle-btn:hover:not(.active) {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .toggle-btn.active {
+      background: var(--accent);
+      color: #fff;
+      box-shadow: 0 1px 4px rgba(124, 106, 239, 0.3);
+    }
+    .toggle-btn .toggle-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+    }
+    .toggle-btn.active .toggle-dot {
+      background: rgba(255, 255, 255, 0.7);
+    }
+    .toggle-btn:not(.active) .toggle-dot {
+      background: var(--text-secondary);
+      opacity: 0.5;
+    }
+
+    /* --- MODEL OVERLAY LABEL --- */
+    .model-label-overlay {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 10;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: var(--mono);
+      letter-spacing: 0.03em;
+      pointer-events: none;
+      display: none;
+    }
+    .model-label-overlay.micro {
+      background: rgba(124, 106, 239, 0.85);
+      color: #fff;
+    }
+    .model-label-overlay.mediapipe {
+      background: rgba(52, 211, 153, 0.85);
+      color: #000;
+    }
+
     .demo-card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -316,6 +396,7 @@
       .features-grid { grid-template-columns: repeat(2, 1fr); }
       .demo-stats { flex-wrap: wrap; }
       .demo-stat { min-width: 50%; }
+      .toggle-btn { padding: 7px 14px; font-size: 12px; }
     }
   </style>
 </head>
@@ -359,10 +440,27 @@
   <section class="demo-section" id="demo">
     <div class="container">
       <h2>Live Demo</h2>
+
+      <!-- Model Toggle -->
+      <div class="model-toggle">
+        <div class="toggle-group">
+          <button class="toggle-btn active" data-model="micro" onclick="switchModel('micro')">
+            <span class="toggle-dot"></span>micro-handpose
+          </button>
+          <button class="toggle-btn" data-model="mediapipe-gpu" onclick="switchModel('mediapipe-gpu')">
+            <span class="toggle-dot"></span>MediaPipe GPU
+          </button>
+          <button class="toggle-btn" data-model="mediapipe-wasm" onclick="switchModel('mediapipe-wasm')">
+            <span class="toggle-dot"></span>MediaPipe WASM
+          </button>
+        </div>
+      </div>
+
       <div class="demo-card">
         <div class="demo-viewport" id="viewport">
           <video id="video" autoplay playsinline></video>
           <canvas id="canvas"></canvas>
+          <div class="model-label-overlay" id="modelLabel"></div>
           <div class="demo-placeholder" id="placeholder">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2"/>
@@ -528,8 +626,15 @@ handpose.<span class="fn">dispose</span>()</pre>
     }
 
     // --- Demo state ---
-    let handpose = null;
+    let microHandpose = null;    // micro-handpose instance (lazy loaded)
+    let mpHandsWasm = null;      // MediaPipe Hands WASM instance (legacy API)
+    let mpHandsGpu = null;       // MediaPipe Hands GPU instance (tasks-vision API)
+    let mpWasmLoaded = false;
+    let mpGpuLoaded = false;
+    let mpLatestResults = null;
+    let activeModel = 'micro';   // 'micro' | 'mediapipe-gpu' | 'mediapipe-wasm'
     let running = false;
+    let cameraReady = false;
     let frameCount = 0;
     let lastFpsTime = performance.now();
 
@@ -543,50 +648,212 @@ handpose.<span class="fn">dispose</span>()</pre>
     const inferVal = document.getElementById('inferVal');
     const handVal = document.getElementById('handVal');
     const errorBar = document.getElementById('errorBar');
+    const modelLabel = document.getElementById('modelLabel');
 
     function showError(msg) {
       errorBar.textContent = msg;
       errorBar.style.display = 'block';
     }
 
+    function clearError() {
+      errorBar.style.display = 'none';
+    }
+
+    function updateModelLabel() {
+      if (!running) {
+        modelLabel.style.display = 'none';
+        return;
+      }
+      modelLabel.style.display = 'block';
+      if (activeModel === 'micro') {
+        modelLabel.textContent = 'micro-handpose';
+        modelLabel.className = 'model-label-overlay micro';
+      } else if (activeModel === 'mediapipe-gpu') {
+        modelLabel.textContent = 'MediaPipe GPU';
+        modelLabel.className = 'model-label-overlay mediapipe';
+      } else {
+        modelLabel.textContent = 'MediaPipe WASM';
+        modelLabel.className = 'model-label-overlay mediapipe';
+      }
+    }
+
+    function updateToggleUI() {
+      document.querySelectorAll('.toggle-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.model === activeModel);
+      });
+    }
+
+    // --- Load script helper ---
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('Failed to load ' + src));
+        document.head.appendChild(s);
+      });
+    }
+
+    // --- MediaPipe WASM (legacy @mediapipe/hands) ---
+    async function ensureMediaPipeWasm() {
+      if (mpHandsWasm) return mpHandsWasm;
+
+      statusVal.textContent = 'Loading MediaPipe WASM...';
+
+      if (!mpWasmLoaded) {
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js');
+        mpWasmLoaded = true;
+      }
+
+      mpHandsWasm = new window.Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      });
+      mpHandsWasm.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+      mpHandsWasm.onResults((results) => {
+        mpLatestResults = results;
+      });
+
+      await mpHandsWasm.send({ image: video });
+
+      statusVal.textContent = 'Running';
+      statusVal.classList.add('active');
+      return mpHandsWasm;
+    }
+
+    // --- MediaPipe GPU (tasks-vision API with GPU delegate) ---
+    async function ensureMediaPipeGpu() {
+      if (mpHandsGpu) return mpHandsGpu;
+
+      statusVal.textContent = 'Loading MediaPipe GPU...';
+
+      if (!mpGpuLoaded) {
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs');
+        mpGpuLoaded = true;
+      }
+
+      // tasks-vision exposes via globalThis
+      const vision = window.FilesetResolver ? window : await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs');
+      const { FilesetResolver, HandLandmarker } = vision;
+
+      const wasmFileset = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm'
+      );
+
+      mpHandsGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+          delegate: 'GPU',
+        },
+        runningMode: 'VIDEO',
+        numHands: 1,
+        minHandDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+
+      statusVal.textContent = 'Running';
+      statusVal.classList.add('active');
+      return mpHandsGpu;
+    }
+
+    async function ensureMicroHandpose() {
+      if (microHandpose) return microHandpose;
+
+      statusVal.textContent = 'Loading model...';
+
+      const { createHandpose } = await import(
+        'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.2/dist/index.js'
+      );
+      microHandpose = await createHandpose({
+        weightsUrl: 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.2/weights/'
+      });
+
+      statusVal.textContent = 'Running';
+      statusVal.classList.add('active');
+      return microHandpose;
+    }
+
+    // --- Switch model ---
+    window.switchModel = async function (model) {
+      if (model === activeModel) return;
+
+      activeModel = model;
+      updateToggleUI();
+
+      // Reset stats on switch
+      fpsVal.textContent = '\u2014';
+      inferVal.textContent = '\u2014';
+      handVal.textContent = '\u2014';
+      handVal.classList.remove('active');
+      frameCount = 0;
+      lastFpsTime = performance.now();
+
+      if (!running) {
+        updateModelLabel();
+        return;
+      }
+
+      // Stop current loop, load new model, restart
+      running = false;
+      clearError();
+
+      try {
+        if (model === 'micro') {
+          await ensureMicroHandpose();
+        } else if (model === 'mediapipe-gpu') {
+          await ensureMediaPipeGpu();
+        } else {
+          await ensureMediaPipeWasm();
+        }
+        running = true;
+        updateModelLabel();
+        detectLoop();
+      } catch (err) {
+        statusVal.textContent = 'Error';
+        showError(err.message || 'Failed to load model.');
+        console.error(err);
+      }
+    };
+
+    // --- Start demo (first time) ---
     window.startDemo = async function () {
       startBtn.disabled = true;
       statusVal.textContent = 'Loading...';
 
       try {
-        // Request camera
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
         });
         video.srcObject = stream;
         await video.play();
 
-        // Size canvas to match video native resolution
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
 
-        // Update viewport aspect ratio to match camera
         document.getElementById('viewport').style.aspectRatio =
           `${video.videoWidth} / ${video.videoHeight}`;
 
         placeholder.style.display = 'none';
+        cameraReady = true;
 
-        statusVal.textContent = 'Loading model...';
-
-        // Dynamic import from CDN
-        const { createHandpose } = await import(
-          'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.2/dist/index.js'
-        );
-
-        handpose = await createHandpose({
-          weightsUrl: 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.2/weights/'
-        });
+        if (activeModel === 'micro') {
+          await ensureMicroHandpose();
+        } else if (activeModel === 'mediapipe-gpu') {
+          await ensureMediaPipeGpu();
+        } else {
+          await ensureMediaPipeWasm();
+        }
 
         statusVal.textContent = 'Running';
         statusVal.classList.add('active');
         running = true;
         lastFpsTime = performance.now();
         frameCount = 0;
+        updateModelLabel();
         detectLoop();
 
       } catch (err) {
@@ -603,27 +870,38 @@ handpose.<span class="fn">dispose</span>()</pre>
       }
     };
 
+    // --- Unified detect loop ---
     async function detectLoop() {
       if (!running) return;
 
-      const t0 = performance.now();
-      const result = await handpose.detect(video);
-      const inferTime = performance.now() - t0;
+      const currentModel = activeModel;
 
-      // Update inference display
-      inferVal.textContent = inferTime.toFixed(1) + 'ms';
-
-      // FPS
-      frameCount++;
-      const now = performance.now();
-      if (now - lastFpsTime >= 500) {
-        const fps = (frameCount / (now - lastFpsTime)) * 1000;
-        fpsVal.textContent = Math.round(fps);
-        frameCount = 0;
-        lastFpsTime = now;
+      try {
+        if (currentModel === 'micro') {
+          await detectMicro();
+        } else if (currentModel === 'mediapipe-gpu') {
+          await detectMediaPipeGpu();
+        } else {
+          await detectMediaPipeWasm();
+        }
+      } catch (err) {
+        if (activeModel !== currentModel) return;
+        console.error(err);
       }
 
-      // Draw
+      if (running && activeModel === currentModel) {
+        requestAnimationFrame(detectLoop);
+      }
+    }
+
+    async function detectMicro() {
+      const t0 = performance.now();
+      const result = await microHandpose.detect(video);
+      const inferTime = performance.now() - t0;
+
+      inferVal.textContent = inferTime.toFixed(1) + 'ms';
+      updateFps();
+
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       if (result) {
@@ -634,8 +912,66 @@ handpose.<span class="fn">dispose</span>()</pre>
         handVal.textContent = '\u2014';
         handVal.classList.remove('active');
       }
+    }
 
-      requestAnimationFrame(detectLoop);
+    async function detectMediaPipeWasm() {
+      mpLatestResults = null;
+
+      const t0 = performance.now();
+      await mpHandsWasm.send({ image: video });
+      const inferTime = performance.now() - t0;
+
+      inferVal.textContent = inferTime.toFixed(1) + 'ms';
+      updateFps();
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (mpLatestResults && mpLatestResults.multiHandLandmarks && mpLatestResults.multiHandLandmarks.length > 0) {
+        const landmarks = mpLatestResults.multiHandLandmarks[0];
+        const handedness = mpLatestResults.multiHandedness?.[0]?.label || '\u2014';
+        handVal.textContent = handedness;
+        handVal.classList.add('active');
+        drawHand(landmarks, canvas.width, canvas.height);
+      } else {
+        handVal.textContent = '\u2014';
+        handVal.classList.remove('active');
+      }
+    }
+
+    let mpGpuTimestamp = 0;
+    async function detectMediaPipeGpu() {
+      mpGpuTimestamp += 33; // tasks-vision VIDEO mode needs increasing timestamps
+
+      const t0 = performance.now();
+      const results = mpHandsGpu.detectForVideo(video, mpGpuTimestamp);
+      const inferTime = performance.now() - t0;
+
+      inferVal.textContent = inferTime.toFixed(1) + 'ms';
+      updateFps();
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (results && results.landmarks && results.landmarks.length > 0) {
+        const landmarks = results.landmarks[0];
+        const handedness = results.handedness?.[0]?.[0]?.categoryName || '\u2014';
+        handVal.textContent = handedness;
+        handVal.classList.add('active');
+        drawHand(landmarks, canvas.width, canvas.height);
+      } else {
+        handVal.textContent = '\u2014';
+        handVal.classList.remove('active');
+      }
+    }
+
+    function updateFps() {
+      frameCount++;
+      const now = performance.now();
+      if (now - lastFpsTime >= 500) {
+        const fps = (frameCount / (now - lastFpsTime)) * 1000;
+        fpsVal.textContent = Math.round(fps);
+        frameCount = 0;
+        lastFpsTime = now;
+      }
     }
 
     function drawHand(landmarks, w, h) {
