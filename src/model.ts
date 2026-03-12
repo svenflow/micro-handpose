@@ -264,13 +264,28 @@ export async function compileModel(
     },
   });
 
-  // Use f16 weights if device supports it AND weights have f16 data
+  // Validate f16 actually works by compiling a test shader
+  // Some browsers report shader-f16 as available but fail during compilation
+  let f16Works = false;
+  if (hasF16) {
+    try {
+      const testModule = device.createShaderModule({
+        code: 'enable f16;\n@compute @workgroup_size(1)\nfn main() { var x: f16 = f16(1.0); _ = x; }',
+      });
+      const info = await testModule.getCompilationInfo();
+      f16Works = !info.messages.some((m: GPUCompilationMessage) => m.type === 'error');
+    } catch {
+      f16Works = false;
+    }
+  }
+
+  // Use f16 weights if validated AND weights have f16 data
   const firstWeight = weights.values().next().value as Tensor | undefined;
-  const useF16 = hasF16 && !!firstWeight?.rawF16;
+  const useF16 = f16Works && !!firstWeight?.rawF16;
   if (useF16) {
-    console.log('[micro-handpose] Using f16 weight storage (shader-f16 enabled)');
+    console.log('[micro-handpose] Using f16 weight storage (shader-f16 validated)');
   } else {
-    console.log(`[micro-handpose] Using f32 weights (shader-f16: ${hasF16}, f16 data: ${!!firstWeight?.rawF16})`);
+    console.log(`[micro-handpose] Using f32 weights (shader-f16 feature: ${hasF16}, f16 validated: ${f16Works}, f16 data: ${!!firstWeight?.rawF16})`);
   }
 
   // Helper: get weight data for GPU upload (f16 raw bytes or f32)
