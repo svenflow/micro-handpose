@@ -3,6 +3,27 @@ function S(s: string): string {
   return s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ').replace(/\s*([{}();,=+\-*/<>!&|@])\s*/g, '$1').trim();
 }
 
+/**
+ * Transform shader to use f16 storage for weight/bias buffers.
+ * Keeps activation/intermediate buffers as f32 for precision.
+ * WGSL auto-promotes f16 reads to f32 in arithmetic.
+ */
+export function applyF16Weights(shader: string): string {
+  const weightNames = [
+    'weight', 'bias', 'pw_weight', 'pw_bias', 'dw_weight', 'dw_bias',
+    'handflag_w', 'handflag_b', 'handedness_w', 'handedness_b',
+    'landmarks_w', 'landmarks_b',
+  ];
+  let result = 'enable f16;' + shader;
+  for (const name of weightNames) {
+    // Replace all occurrences — some shaders have multiple weight/bias bindings
+    while (result.includes(`${name}:array<f32>`)) {
+      result = result.replace(`${name}:array<f32>`, `${name}:array<f16>`);
+    }
+  }
+  return result;
+}
+
 export const DEPTHWISE_5x5_FULL_UNROLL_SHADER = S(`
 struct DepthwiseParams { batch:u32, channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, stride:u32, pad:u32, }
 @group(0)@binding(0) var<storage,read> input:array<f32>;

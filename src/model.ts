@@ -44,11 +44,13 @@ import {
   makePointwise2OCShader,
   makeFusedDwPwShader,
   getOptimalWorkgroupSize,
+  applyF16Weights,
 } from './shaders.js';
 
 export interface Tensor {
   data: Float32Array;
   shape: number[];
+  rawF16?: ArrayBufferLike;  // Raw f16 bytes when loaded from f16 weights
 }
 
 export interface HandLandmarksOutput {
@@ -100,18 +102,21 @@ export function loadWeightsFromBuffer(
     const size = shape.reduce((a, b) => a * b, 1);
 
     let data: Float32Array;
+    let rawF16: ArrayBufferLike | undefined;
     if (dtype === 'float32') {
       data = new Float32Array(buffer, offset, size);
     } else {
-      // Convert float16 to float32
+      // Convert float16 to float32 (fallback path)
       const view = new DataView(buffer);
       data = new Float32Array(size);
       for (let j = 0; j < size; j++) {
         data[j] = float16ToFloat32(view.getUint16(offset + j * 2, true));
       }
+      // Also keep raw f16 bytes for direct GPU upload when shader-f16 is available
+      rawF16 = buffer.slice(offset, offset + size * 2);
     }
 
-    weights.set(key, { data, shape });
+    weights.set(key, { data, shape, rawF16 });
   }
 
   return weights;
@@ -240,7 +245,12 @@ export async function compileModel(
     throw new Error('No GPU adapter found');
   }
 
+  // Request shader-f16 if available — enables f16 weight storage on GPU
+  const hasF16 = adapter.features.has('shader-f16');
+  const requiredFeatures: GPUFeatureName[] = hasF16 ? ['shader-f16' as GPUFeatureName] : [];
+
   const device = await adapter.requestDevice({
+    requiredFeatures,
     requiredLimits: {
       maxStorageBuffersPerShaderStage: Math.min(
         adapter.limits.maxStorageBuffersPerShaderStage, 8,
@@ -253,6 +263,28 @@ export async function compileModel(
       ),
     },
   });
+
+  // Use f16 weights if device supports it AND weights have f16 data
+  const firstWeight = weights.values().next().value as Tensor | undefined;
+  const useF16 = hasF16 && !!firstWeight?.rawF16;
+  if (useF16) {
+    console.log('[micro-handpose] Using f16 weight storage (shader-f16 enabled)');
+  } else {
+    console.log(`[micro-handpose] Using f32 weights (shader-f16: ${hasF16}, f16 data: ${!!firstWeight?.rawF16})`);
+  }
+
+  // Helper: get weight data for GPU upload (f16 raw bytes or f32)
+  function getWeightData(tensor: Tensor): ArrayBufferView {
+    if (useF16 && tensor.rawF16) {
+      return new Uint16Array(tensor.rawF16);
+    }
+    return tensor.data;
+  }
+
+  // Helper: apply f16 transform to shader code if using f16 weights
+  function f16Shader(code: string): string {
+    return useF16 ? applyF16Weights(code) : code;
+  }
 
   // ============ Helpers ============
   // r=read-only-storage, s=storage, u=uniform
@@ -295,21 +327,22 @@ export async function compileModel(
   }
 
   // ============ Create Shader Modules ============
+  // Shaders with weight/bias bindings get f16 transform when available
   const padInputShader = device.createShaderModule({ code: PAD_INPUT_SHADER });
   const canvasInputShader = device.createShaderModule({ code: CANVAS_INPUT_SHADER });
-  const fusedOutputShader = device.createShaderModule({ code: OUTPUT_HEADS_FUSED_SHADER });
-  const dwShader = device.createShaderModule({ code: DEPTHWISE_5x5_SHADER });
-  const dwFullUnrollShader = device.createShaderModule({ code: DEPTHWISE_5x5_FULL_UNROLL_SHADER });
-  const pwShader = device.createShaderModule({ code: POINTWISE_SKIP_RELU_SHADER });
-  const pw2OCShader = device.createShaderModule({ code: POINTWISE_SKIP_RELU_2OC_SHADER });
-  const inputConvShader = device.createShaderModule({ code: CONV3X3_STRIDE2_RELU_SHADER });
+  const fusedOutputShader = device.createShaderModule({ code: f16Shader(OUTPUT_HEADS_FUSED_SHADER) });
+  const dwShader = device.createShaderModule({ code: f16Shader(DEPTHWISE_5x5_SHADER) });
+  const dwFullUnrollShader = device.createShaderModule({ code: f16Shader(DEPTHWISE_5x5_FULL_UNROLL_SHADER) });
+  const pwShader = device.createShaderModule({ code: f16Shader(POINTWISE_SKIP_RELU_SHADER) });
+  const pw2OCShader = device.createShaderModule({ code: f16Shader(POINTWISE_SKIP_RELU_2OC_SHADER) });
+  const inputConvShader = device.createShaderModule({ code: f16Shader(CONV3X3_STRIDE2_RELU_SHADER) });
   const upsampleShader = device.createShaderModule({ code: UPSAMPLE_2X_SHADER });
   const addShader = device.createShaderModule({ code: ADD_SHADER });
   const upsampleAddShader = device.createShaderModule({ code: UPSAMPLE_2X_ADD_SHADER });
-  const conv1x1Shader = device.createShaderModule({ code: CONV1X1_SHADER });
-  const outputSigmoidShader = device.createShaderModule({ code: OUTPUT_HEAD_SIGMOID_SHADER });
-  const outputLandmarksShader = device.createShaderModule({ code: OUTPUT_HEAD_LANDMARKS_SHADER });
-  const fusedDwPwShader = device.createShaderModule({ code: FUSED_DW_PW_288_SHADER });
+  const conv1x1Shader = device.createShaderModule({ code: f16Shader(CONV1X1_SHADER) });
+  const outputSigmoidShader = device.createShaderModule({ code: f16Shader(OUTPUT_HEAD_SIGMOID_SHADER) });
+  const outputLandmarksShader = device.createShaderModule({ code: f16Shader(OUTPUT_HEAD_LANDMARKS_SHADER) });
+  const fusedDwPwShader = device.createShaderModule({ code: f16Shader(FUSED_DW_PW_288_SHADER) });
 
   // Generic fused DW+PW shaders for all channel configurations
   const fusedShaderCache = new Map<string, GPUShaderModule>();
@@ -317,7 +350,7 @@ export async function compileModel(
     const key = `${inCh}_${outCh}`;
     let shader = fusedShaderCache.get(key);
     if (!shader) {
-      shader = device.createShaderModule({ code: makeFusedDwPwShader(inCh, outCh) });
+      shader = device.createShaderModule({ code: f16Shader(makeFusedDwPwShader(inCh, outCh)) });
       fusedShaderCache.set(key, shader);
     }
     return shader;
@@ -364,7 +397,7 @@ export async function compileModel(
     const key = `${wgX},${wgY}`;
     let p = cache.get(key);
     if (!p) {
-      p = mkPipe(device.createShaderModule({ code: mkShader(wgX, wgY) }));
+      p = mkPipe(device.createShaderModule({ code: f16Shader(mkShader(wgX, wgY)) }));
       cache.set(key, p);
     }
     return p;
@@ -443,11 +476,13 @@ export async function compileModel(
 
   // ============ Upload Input Conv Weights ============
   // backbone1.1: Conv2d(3, 24, 3, stride=2)
-  const inputConvW = weights.get('backbone1.1.weight')?.data;
-  const inputConvB = weights.get('backbone1.1.bias')?.data;
-  if (!inputConvW || !inputConvB) {
+  const inputConvWT = weights.get('backbone1.1.weight');
+  const inputConvBT = weights.get('backbone1.1.bias');
+  if (!inputConvWT || !inputConvBT) {
     throw new Error('Missing input conv weights');
   }
+  const inputConvW = getWeightData(inputConvWT);
+  const inputConvB = getWeightData(inputConvBT);
 
   const bufInputConvW = makeBuf(inputConvW.byteLength, SC);
   const bufInputConvB = makeBuf(inputConvB.byteLength, SC);
@@ -458,11 +493,13 @@ export async function compileModel(
   device.queue.writeBuffer(bufInputConvU, 0, new Uint32Array([1, 3, 24, 257, 257, 128, 128]));
 
   // ============ Upload Conv1x1 Weights (backbone6.1) ============
-  const conv1x1W = weights.get('backbone6.1.weight')?.data;
-  const conv1x1B = weights.get('backbone6.1.bias')?.data;
-  if (!conv1x1W || !conv1x1B) {
+  const conv1x1WT = weights.get('backbone6.1.weight');
+  const conv1x1BT = weights.get('backbone6.1.bias');
+  if (!conv1x1WT || !conv1x1BT) {
     throw new Error('Missing backbone6.1 conv1x1 weights');
   }
+  const conv1x1W = getWeightData(conv1x1WT);
+  const conv1x1B = getWeightData(conv1x1BT);
 
   const bufConv1x1W = makeBuf(conv1x1W.byteLength, SC);
   const bufConv1x1B = makeBuf(conv1x1B.byteLength, SC);
@@ -474,11 +511,13 @@ export async function compileModel(
 
   // ============ Upload Output Head Weights ============
   // handflag: Conv2d(288->1, 2x2)
-  const handflagW = weights.get('handflag.weight')?.data;
-  const handflagB = weights.get('handflag.bias')?.data;
-  if (!handflagW || !handflagB) {
+  const handflagWT = weights.get('handflag.weight');
+  const handflagBT = weights.get('handflag.bias');
+  if (!handflagWT || !handflagBT) {
     throw new Error('Missing handflag weights');
   }
+  const handflagW = getWeightData(handflagWT);
+  const handflagB = getWeightData(handflagBT);
 
   const bufHandflagW = makeBuf(handflagW.byteLength, SC);
   const bufHandflagB = makeBuf(handflagB.byteLength, SC);
@@ -488,11 +527,13 @@ export async function compileModel(
   device.queue.writeBuffer(bufHandflagU, 0, new Uint32Array([1, 288, 1]));
 
   // handedness: Conv2d(288->1, 2x2)
-  const handednessW = weights.get('handedness.weight')?.data;
-  const handednessB = weights.get('handedness.bias')?.data;
-  if (!handednessW || !handednessB) {
+  const handednessWT = weights.get('handedness.weight');
+  const handednessBT = weights.get('handedness.bias');
+  if (!handednessWT || !handednessBT) {
     throw new Error('Missing handedness weights');
   }
+  const handednessW = getWeightData(handednessWT);
+  const handednessB = getWeightData(handednessBT);
 
   const bufHandednessW = makeBuf(handednessW.byteLength, SC);
   const bufHandednessB = makeBuf(handednessB.byteLength, SC);
@@ -502,11 +543,13 @@ export async function compileModel(
   device.queue.writeBuffer(bufHandednessU, 0, new Uint32Array([1, 288, 1]));
 
   // landmarks (reg_3d): Conv2d(288->63, 2x2)
-  const landmarksW = weights.get('reg_3d.weight')?.data;
-  const landmarksB = weights.get('reg_3d.bias')?.data;
-  if (!landmarksW || !landmarksB) {
+  const landmarksWT = weights.get('reg_3d.weight');
+  const landmarksBT = weights.get('reg_3d.bias');
+  if (!landmarksWT || !landmarksBT) {
     throw new Error('Missing reg_3d weights');
   }
+  const landmarksW = getWeightData(landmarksWT);
+  const landmarksB = getWeightData(landmarksBT);
 
   const bufLandmarksW = makeBuf(landmarksW.byteLength, SC);
   const bufLandmarksB = makeBuf(landmarksB.byteLength, SC);
@@ -522,14 +565,19 @@ export async function compileModel(
     const outW = stride === 2 ? w / 2 : w;
     const pad = stride === 1 ? 2 : 1;
 
-    const dwW = weights.get(`${prefix}convs.0.weight`)?.data;
-    const dwB = weights.get(`${prefix}convs.0.bias`)?.data;
-    const pwW = weights.get(`${prefix}convs.1.weight`)?.data;
-    const pwB = weights.get(`${prefix}convs.1.bias`)?.data;
+    const dwWT = weights.get(`${prefix}convs.0.weight`);
+    const dwBT = weights.get(`${prefix}convs.0.bias`);
+    const pwWT = weights.get(`${prefix}convs.1.weight`);
+    const pwBT = weights.get(`${prefix}convs.1.bias`);
 
-    if (!dwW || !dwB || !pwW || !pwB) {
+    if (!dwWT || !dwBT || !pwWT || !pwBT) {
       throw new Error(`Missing weights for ${prefix}`);
     }
+
+    const dwW = getWeightData(dwWT);
+    const dwB = getWeightData(dwBT);
+    const pwW = getWeightData(pwWT);
+    const pwB = getWeightData(pwBT);
 
     const dwWeight = makeBuf(dwW.byteLength, SC);
     const dwBias = makeBuf(dwB.byteLength, SC);

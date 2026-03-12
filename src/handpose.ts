@@ -28,10 +28,11 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     throw new Error('micro-handpose requires WebGPU. Check browser support at https://webgpureport.org');
   }
 
-  // Load weights
+  // Load weights (prefer f16 — smaller download + enables GPU f16 path)
   const baseUrl = weightsUrl ?? DEFAULT_WEIGHTS_BASE;
-  const metaUrl = baseUrl.endsWith('/') ? `${baseUrl}weights.json` : `${baseUrl}/weights.json`;
-  const binUrl = baseUrl.endsWith('/') ? `${baseUrl}weights.bin` : `${baseUrl}/weights.bin`;
+  const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  const metaUrl = `${base}weights_f16.json`;
+  const binUrl = `${base}weights_f16.bin`;
 
   const [metaRes, binRes] = await Promise.all([
     fetch(metaUrl),
