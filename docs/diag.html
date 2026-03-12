@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>micro-handpose diagnostic</title>
-<style>body{background:#111;color:#eee;font-family:monospace;padding:16px;font-size:14px;white-space:pre-wrap;word-break:break-all;}</style>
+<style>body{background:#111;color:#eee;font-family:monospace;padding:16px;font-size:13px;white-space:pre-wrap;word-break:break-all;}</style>
 </head><body>
 <div id="log">Starting diagnostic...\n</div>
 <script type="module">
@@ -16,14 +16,14 @@ try {
   L('2. Requesting adapter...');
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) { L('ERROR: No adapter'); throw new Error('no adapter'); }
-  L('   OK - ' + adapter.info?.vendor + ' / ' + adapter.info?.architecture);
+  L('   vendor: ' + (adapter.info?.vendor || 'unknown'));
+  L('   arch: ' + (adapter.info?.architecture || 'unknown'));
 
   L('3. Checking shader-f16...');
   const hasF16 = adapter.features.has('shader-f16');
   L('   shader-f16: ' + hasF16);
-  L('   All features: ' + [...adapter.features].join(', '));
 
-  L('4. Requesting device (with f16 if available)...');
+  L('4. Requesting device...');
   const features = hasF16 ? ['shader-f16'] : [];
   const device = await adapter.requestDevice({ requiredFeatures: features });
   L('   OK');
@@ -36,55 +36,38 @@ try {
       });
       const info = await testModule.getCompilationInfo();
       const errors = info.messages.filter(m => m.type === 'error');
-      if (errors.length > 0) {
-        L('   COMPILE ERRORS: ' + JSON.stringify(errors.map(e => e.message)));
-      } else {
-        L('   f16 shader compilation OK!');
-      }
+      L(errors.length > 0 ? '   ERRORS: ' + JSON.stringify(errors.map(e => e.message)) : '   f16 compilation OK!');
     } catch (e) {
-      L('   f16 shader EXCEPTION: ' + e.message);
+      L('   f16 EXCEPTION: ' + e.message);
     }
   }
+  device.destroy();
 
-  L('6. Fetching f16 weights...');
-  const [metaRes, binRes] = await Promise.all([
-    fetch('./weights/weights_f16.json'),
-    fetch('./weights/weights_f16.bin'),
-  ]);
-  L('   meta: ' + metaRes.status + ' (' + metaRes.headers.get('content-type') + ')');
-  L('   bin: ' + binRes.status + ' (' + binRes.headers.get('content-length') + ' bytes)');
+  L('6. Creating handpose model...');
+  const { createHandpose } = await import('./dist/index.js');
+  const hp = await createHandpose({ weightsUrl: './weights/' });
+  L('   Model created OK!');
 
-  const metadata = await metaRes.json();
-  const buffer = await binRes.arrayBuffer();
-  L('   dtype: ' + metadata.dtype);
-  L('   keys: ' + metadata.keys.length);
-  L('   buffer: ' + buffer.byteLength + ' bytes');
-
-  L('7. Loading weights (f16->f32 conversion)...');
-  const { loadWeightsFromBuffer } = await import('./dist/index.js');
-  const weights = loadWeightsFromBuffer(metadata, buffer);
-  L('   loaded ' + weights.size + ' tensors');
-  const first = weights.values().next().value;
-  L('   first tensor: data.length=' + first.data.length + ' rawF16=' + (first.rawF16 ? first.rawF16.byteLength + 'B' : 'none'));
-
-  L('8. Compiling model...');
-  const { compileModel } = await import('./dist/index.js');
-  const model = await compileModel(weights);
-  L('   OK!');
-
-  L('9. Running inference...');
+  L('7. Running inference...');
   const canvas = new OffscreenCanvas(256, 256);
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#888';
   ctx.fillRect(0, 0, 256, 256);
-  const result = await model.runFromCanvas(canvas);
-  L('   handflag: ' + result.handflag[0].toFixed(4));
-  L('   handedness: ' + result.handedness[0].toFixed(4));
-  L('   landmarks[0..2]: ' + result.landmarks[0].toFixed(4) + ', ' + result.landmarks[1].toFixed(4) + ', ' + result.landmarks[2].toFixed(4));
+  const result = await hp.detect(canvas);
+  L('   result: ' + JSON.stringify(result));
+
+  L('8. Benchmarking (5 runs)...');
+  const times = [];
+  for (let i = 0; i < 5; i++) {
+    const t0 = performance.now();
+    await hp.detect(canvas);
+    times.push((performance.now() - t0).toFixed(1));
+  }
+  L('   times: ' + times.join(', ') + ' ms');
 
   L('\n=== ALL OK ===');
 } catch (e) {
-  L('\nFATAL ERROR: ' + e.message);
-  L('Stack: ' + e.stack);
+  L('\nFATAL: ' + e.message);
+  L('Stack: ' + (e.stack || 'no stack'));
 }
 </script></body></html>
