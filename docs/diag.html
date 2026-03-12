@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>micro-handpose diagnostic</title>
+<style>body{background:#111;color:#eee;font-family:monospace;padding:16px;font-size:14px;white-space:pre-wrap;word-break:break-all;}</style>
+</head><body>
+<div id="log">Starting diagnostic...\n</div>
+<script type="module">
+const log = document.getElementById('log');
+function L(msg) { log.textContent += msg + '\n'; console.log(msg); }
+
+try {
+  L('1. Checking WebGPU...');
+  if (!navigator.gpu) { L('ERROR: No WebGPU'); throw new Error('no webgpu'); }
+  L('   OK');
+
+  L('2. Requesting adapter...');
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) { L('ERROR: No adapter'); throw new Error('no adapter'); }
+  L('   OK - ' + adapter.info?.vendor + ' / ' + adapter.info?.architecture);
+
+  L('3. Checking shader-f16...');
+  const hasF16 = adapter.features.has('shader-f16');
+  L('   shader-f16: ' + hasF16);
+  L('   All features: ' + [...adapter.features].join(', '));
+
+  L('4. Requesting device (with f16 if available)...');
+  const features = hasF16 ? ['shader-f16'] : [];
+  const device = await adapter.requestDevice({ requiredFeatures: features });
+  L('   OK');
+
+  if (hasF16) {
+    L('5. Testing f16 shader compilation...');
+    try {
+      const testModule = device.createShaderModule({
+        code: 'enable f16;\n@compute @workgroup_size(1)\nfn main() { var x: f16 = f16(1.0); _ = x; }'
+      });
+      const info = await testModule.getCompilationInfo();
+      const errors = info.messages.filter(m => m.type === 'error');
+      if (errors.length > 0) {
+        L('   COMPILE ERRORS: ' + JSON.stringify(errors.map(e => e.message)));
+      } else {
+        L('   f16 shader compilation OK!');
+      }
+    } catch (e) {
+      L('   f16 shader EXCEPTION: ' + e.message);
+    }
+  }
+
+  L('6. Fetching f16 weights...');
+  const [metaRes, binRes] = await Promise.all([
+    fetch('./weights/weights_f16.json'),
+    fetch('./weights/weights_f16.bin'),
+  ]);
+  L('   meta: ' + metaRes.status + ' (' + metaRes.headers.get('content-type') + ')');
+  L('   bin: ' + binRes.status + ' (' + binRes.headers.get('content-length') + ' bytes)');
+
+  const metadata = await metaRes.json();
+  const buffer = await binRes.arrayBuffer();
+  L('   dtype: ' + metadata.dtype);
+  L('   keys: ' + metadata.keys.length);
+  L('   buffer: ' + buffer.byteLength + ' bytes');
+
+  L('7. Loading weights (f16->f32 conversion)...');
+  const { loadWeightsFromBuffer } = await import('./dist/index.js');
+  const weights = loadWeightsFromBuffer(metadata, buffer);
+  L('   loaded ' + weights.size + ' tensors');
+  const first = weights.values().next().value;
+  L('   first tensor: data.length=' + first.data.length + ' rawF16=' + (first.rawF16 ? first.rawF16.byteLength + 'B' : 'none'));
+
+  L('8. Compiling model...');
+  const { compileModel } = await import('./dist/index.js');
+  const model = await compileModel(weights);
+  L('   OK!');
+
+  L('9. Running inference...');
+  const canvas = new OffscreenCanvas(256, 256);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#888';
+  ctx.fillRect(0, 0, 256, 256);
+  const result = await model.runFromCanvas(canvas);
+  L('   handflag: ' + result.handflag[0].toFixed(4));
+  L('   handedness: ' + result.handedness[0].toFixed(4));
+  L('   landmarks[0..2]: ' + result.landmarks[0].toFixed(4) + ', ' + result.landmarks[1].toFixed(4) + ', ' + result.landmarks[2].toFixed(4));
+
+  L('\n=== ALL OK ===');
+} catch (e) {
+  L('\nFATAL ERROR: ' + e.message);
+  L('Stack: ' + e.stack);
+}
+</script></body></html>
