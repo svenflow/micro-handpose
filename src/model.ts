@@ -274,11 +274,29 @@ export async function compileModel(
   }
 
   // Helper: get weight data for GPU upload (f16 raw bytes or f32)
+  // WebGPU writeBuffer requires byte count to be a multiple of 4.
+  // f16 data with odd element count (e.g. 1-element bias = 2 bytes) needs padding.
   function getWeightData(tensor: Tensor): ArrayBufferView {
     if (useF16 && tensor.rawF16) {
-      return new Uint16Array(tensor.rawF16);
+      const u16 = new Uint16Array(tensor.rawF16);
+      // Pad to even number of f16 elements (= multiple of 4 bytes)
+      if (u16.length % 2 !== 0) {
+        const padded = new Uint16Array(u16.length + 1);
+        padded.set(u16);
+        return padded;
+      }
+      return u16;
     }
     return tensor.data;
+  }
+
+  // Helper: get buffer size for weight data (padded to multiple of 4 bytes)
+  function getWeightBufSize(tensor: Tensor): number {
+    if (useF16 && tensor.rawF16) {
+      const byteLen = tensor.rawF16.byteLength;
+      return Math.ceil(byteLen / 4) * 4;  // Round up to multiple of 4
+    }
+    return tensor.data.byteLength;
   }
 
   // Helper: apply f16 transform to shader code if using f16 weights
