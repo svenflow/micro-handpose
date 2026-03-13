@@ -212,7 +212,7 @@ try {
   device.destroy();
 
   L('6. Creating handpose model...');
-  const { createHandpose } = await import('./dist/index.js');
+  const { createHandpose } = await import('./dist/index.js?v=' + Date.now());
   // Use threshold 0 so detect() always returns a result (even for gray canvas)
   const hp = await createHandpose({ weightsUrl: './weights/', scoreThreshold: 0 });
   L('   Model created OK!');
