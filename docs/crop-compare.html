@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Crop Region Comparison</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; }
+    .row { display: flex; gap: 20px; flex-wrap: wrap; align-items: start; }
+    .box { background: #222; padding: 15px; border-radius: 8px; margin: 10px 0; }
+    canvas { border: 1px solid #444; }
+    #log { white-space: pre-wrap; font-size: 12px; max-height: 800px; overflow-y: auto; background: #111; padding: 10px; border-radius: 5px; }
+    h2 { color: #8af; margin-top: 0; }
+  </style>
+</head>
+<body>
+  <h1>Crop Region Comparison</h1>
+  <p>Shows what 256x256 crop each pipeline feeds to the landmark model.</p>
+
+  <div class="box">
+    <div class="row">
+      <div>
+        <h3>micro-handpose crop (256x256)</h3>
+        <canvas id="micro-crop" width="256" height="256"></canvas>
+      </div>
+      <div>
+        <h3>Pixel difference (amplified 10x)</h3>
+        <canvas id="diff-crop" width="256" height="256"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="box">
+    <h2>ROI & Pipeline Details</h2>
+    <div id="log"></div>
+  </div>
+
+  <script type="module">
+    const log = document.getElementById('log');
+    function addLog(msg) {
+      log.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    async function run() {
+      try {
+        // Load test image
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = 'hand_nikhil.jpg';
+        });
+        addLog(`Image: ${img.naturalWidth}x${img.naturalHeight}`);
+        addLog(`Aspect ratio: ${(img.naturalWidth/img.naturalHeight).toFixed(4)}`);
+
+        // === micro-handpose: expose internals ===
+        const { createHandpose } = await import('./dist/index.js?v=cropcompare');
+
+        // Create with f32 to eliminate precision as a variable
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.1,
+          forceF32: true,
+        });
+        addLog('micro-handpose loaded (forceF32=true)');
+
+        const microResults = await handpose.detect(img);
+        addLog(`micro-handpose: ${microResults.length} hand(s), score=${microResults[0]?.score.toFixed(4)}`);
+
+        if (microResults.length > 0) {
+          const lm = microResults[0].landmarks;
+          addLog('\nmicro-handpose landmarks:');
+          const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip','index_mcp','index_pip','index_dip','index_tip','middle_mcp','middle_pip','middle_dip','middle_tip','ring_mcp','ring_pip','ring_dip','ring_tip','pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
+          for (let i = 0; i < 21; i++) {
+            addLog(`  [${i}] ${NAMES[i].padEnd(12)} x=${lm[i].x.toFixed(4)} y=${lm[i].y.toFixed(4)}`);
+          }
+        }
+
+        // === MediaPipe ===
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const mpHandLandmarker = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'CPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+        });
+
+        const mpResults = mpHandLandmarker.detect(img);
+        addLog(`\nMediaPipe: ${mpResults.landmarks?.length || 0} hand(s)`);
+
+        if (mpResults.landmarks?.length > 0) {
+          const lm = mpResults.landmarks[0];
+          const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip','index_mcp','index_pip','index_dip','index_tip','middle_mcp','middle_pip','middle_dip','middle_tip','ring_mcp','ring_pip','ring_dip','ring_tip','pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
+          addLog('\nMediaPipe landmarks:');
+          for (let i = 0; i < 21; i++) {
+            addLog(`  [${i}] ${NAMES[i].padEnd(12)} x=${lm[i].x.toFixed(4)} y=${lm[i].y.toFixed(4)}`);
+          }
+        }
+
+        // Compare with f32
+        if (microResults.length > 0 && mpResults.landmarks?.length > 0) {
+          const microLm = microResults[0].landmarks;
+          const mpLm = mpResults.landmarks[0];
+          let totalDist = 0;
+          let maxDist = 0;
+          let maxIdx = 0;
+          const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip','index_mcp','index_pip','index_dip','index_tip','middle_mcp','middle_pip','middle_dip','middle_tip','ring_mcp','ring_pip','ring_dip','ring_tip','pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
+
+          addLog('\n=== F32 COMPARISON ===');
+          for (let i = 0; i < 21; i++) {
+            const dx = microLm[i].x - mpLm[i].x;
+            const dy = microLm[i].y - mpLm[i].y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            totalDist += dist;
+            if (dist > maxDist) { maxDist = dist; maxIdx = i; }
+          }
+          addLog(`Avg distance (f32): ${(totalDist/21).toFixed(4)}`);
+          addLog(`Max distance (f32): ${maxDist.toFixed(4)} at ${NAMES[maxIdx]}`);
+
+          let microMeanX = 0, mpMeanX = 0, microMeanY = 0, mpMeanY = 0;
+          for (let i = 0; i < 21; i++) {
+            microMeanX += microLm[i].x; mpMeanX += mpLm[i].x;
+            microMeanY += microLm[i].y; mpMeanY += mpLm[i].y;
+          }
+          addLog(`Center offset: dx=${((microMeanX-mpMeanX)/21).toFixed(4)}, dy=${((microMeanY-mpMeanY)/21).toFixed(4)}`);
+        }
+
+        // Now let's trace the letterbox computation
+        const srcW = img.naturalWidth;
+        const srcH = img.naturalHeight;
+        const scale = Math.min(192 / srcW, 192 / srcH);
+        const dstW = Math.round(srcW * scale);
+        const dstH = Math.round(srcH * scale);
+        const offsetX = (192 - dstW) / 2;
+        const offsetY = (192 - dstH) / 2;
+
+        addLog(`\n=== LETTERBOX INFO ===`);
+        addLog(`scale: ${scale.toFixed(6)}`);
+        addLog(`dstW: ${dstW}, dstH: ${dstH}`);
+        addLog(`offsetX: ${offsetX}, offsetY: ${offsetY}`);
+        addLog(`padX: ${(offsetX/192).toFixed(6)}, padY: ${(offsetY/192).toFixed(6)}`);
+
+      } catch (e) {
+        addLog(`ERROR: ${e.message}\n${e.stack}`);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

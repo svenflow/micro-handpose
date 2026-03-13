@@ -110,7 +110,7 @@
         await new Promise((resolve, reject) => {
           img.onload = resolve;
           img.onerror = reject;
-          img.src = 'hand_nikhil.jpg';
+          img.src = new URLSearchParams(location.search).get('img') || 'hand_nikhil.jpg';
         });
         addLog(`Image loaded: ${img.width}x${img.height}`);
 

@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Layer-by-Layer Comparison: micro vs MediaPipe</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; max-width: 1400px; margin: 0 auto; }
+    canvas { border: 1px solid #444; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: start; }
+    .box { background: #222; padding: 15px; border-radius: 8px; margin: 10px 0; }
+    .status { font-size: 14px; padding: 8px 12px; border-radius: 5px; margin: 8px 0; }
+    .status.ok { background: #143; color: #3f8; }
+    .status.err { background: #421; color: #f84; }
+    .status.working { background: #331; color: #fe8; }
+    h2 { color: #8af; margin-top: 0; }
+    #log { white-space: pre-wrap; font-size: 11px; max-height: 800px; overflow-y: auto; background: #111; padding: 10px; border-radius: 5px; line-height: 1.4; }
+    .section { border-left: 3px solid #8af; padding-left: 12px; margin: 16px 0; }
+  </style>
+</head>
+<body>
+  <h1>Layer-by-Layer Pipeline Comparison</h1>
+  <div id="status" class="status working">Loading...</div>
+
+  <div class="row">
+    <div>
+      <h3>Input Image</h3>
+      <canvas id="input-canvas" width="300" height="400"></canvas>
+    </div>
+    <div>
+      <h3>micro-handpose crop</h3>
+      <canvas id="micro-crop" width="256" height="256"></canvas>
+    </div>
+    <div>
+      <h3>Overlay</h3>
+      <canvas id="overlay" width="300" height="400"></canvas>
+    </div>
+  </div>
+
+  <div class="box">
+    <h2>Comparison Log</h2>
+    <div id="log"></div>
+  </div>
+
+  <script type="module">
+    const logEl = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+
+    function log(msg) {
+      logEl.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    function logSection(title) {
+      log('\n' + '='.repeat(70));
+      log(title);
+      log('='.repeat(70));
+    }
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],
+      [0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],
+      [5,9],[9,13],[13,17],
+    ];
+
+    function drawHand(ctx, landmarks, w, h, color, dotSize = 3) {
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.8;
+      for (const [a, b] of CONNECTIONS) {
+        const la = landmarks[a], lb = landmarks[b];
+        if (!la || !lb) continue;
+        ctx.beginPath();
+        ctx.moveTo(la.x * w, la.y * h);
+        ctx.lineTo(lb.x * w, lb.y * h);
+        ctx.stroke();
+      }
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i];
+        if (!lm) continue;
+        ctx.beginPath();
+        ctx.arc(lm.x * w, lm.y * h, dotSize, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    async function run() {
+      try {
+        // === Load test image ===
+        statusEl.textContent = 'Loading image...';
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = 'hand_nikhil.jpg';
+        });
+        log(`Image: ${img.width}x${img.height}`);
+
+        // Draw input
+        const inputCtx = document.getElementById('input-canvas').getContext('2d');
+        inputCtx.drawImage(img, 0, 0, 300, 400);
+
+        // === Step 1: Load micro-handpose internals ===
+        logSection('STEP 1: Load Models');
+        statusEl.textContent = 'Loading micro-handpose...';
+
+        const microModule = await import('./dist/index.js?v=layer3');
+        const { createHandpose, compilePalmModel, createPalmDetector, projectLandmarksToOriginal } = microModule;
+
+        // Load weights manually to get access to internals
+        const base = 'weights/';
+        const [lmMetaRes, lmBinRes, palmMetaRes, palmBinRes] = await Promise.all([
+          fetch(base + 'weights_f16.json'),
+          fetch(base + 'weights_f16.bin'),
+          fetch(base + 'palm_detection_weights.json'),
+          fetch(base + 'palm_detection_weights.bin'),
+        ]);
+        const lmMeta = await lmMetaRes.json();
+        const lmBuf = await lmBinRes.arrayBuffer();
+        const palmMeta = await palmMetaRes.json();
+        const palmBuf = await palmBinRes.arrayBuffer();
+
+        function loadWeights(metadata, buffer) {
+          const weights = new Map();
+          for (let i = 0; i < metadata.keys.length; i++) {
+            const key = metadata.keys[i];
+            const shape = metadata.shapes[i];
+            const offset = metadata.offsets[i];
+            const size = shape.reduce((a, b) => a * b, 1);
+            const byteSize = metadata.dtype === 'float16' ? 2 : 4;
+            const data = byteSize === 2
+              ? new Float32Array(Array.from(new Uint16Array(buffer, offset, size)).map(h => {
+                  const sign = (h >> 15) & 1;
+                  const exp = (h >> 10) & 0x1f;
+                  const frac = h & 0x3ff;
+                  if (exp === 0) return (sign ? -1 : 1) * Math.pow(2, -14) * (frac / 1024);
+                  if (exp === 31) return frac === 0 ? (sign ? -Infinity : Infinity) : NaN;
+                  return (sign ? -1 : 1) * Math.pow(2, exp - 15) * (1 + frac / 1024);
+                }))
+              : new Float32Array(buffer, offset, size);
+            weights.set(key, { data, shape });
+          }
+          return weights;
+        }
+
+        const palmWeights = loadWeights(palmMeta, palmBuf);
+        const palmModel = await compilePalmModel(palmWeights);
+        const palmDetector = createPalmDetector(palmModel, { scoreThreshold: 0.5, maxHands: 1 });
+
+        log('micro-handpose loaded');
+
+        // === Step 2: Run palm detection ===
+        logSection('STEP 2: Palm Detection');
+        statusEl.textContent = 'Running palm detection...';
+
+        // Resize to 192x192 for palm detection
+        const palmCanvas = new OffscreenCanvas(192, 192);
+        const palmCtx = palmCanvas.getContext('2d');
+        palmCtx.drawImage(img, 0, 0, 192, 192);
+
+        const rois = await palmDetector.detect(palmCanvas);
+        const rawDets = await palmDetector.detectRaw(palmCanvas);
+
+        log(`Raw detections: ${rawDets.length}`);
+        for (const det of rawDets) {
+          log(`  score=${det.score.toFixed(4)}, box=[${det.box.map(v=>v.toFixed(4)).join(', ')}]`);
+          for (let k = 0; k < det.keypoints.length; k++) {
+            log(`  kp${k}: [${det.keypoints[k].map(v=>v.toFixed(4)).join(', ')}]`);
+          }
+        }
+
+        log(`\nROIs: ${rois.length}`);
+        for (const roi of rois) {
+          log(`  center=(${roi.centerX.toFixed(6)}, ${roi.centerY.toFixed(6)})`);
+          log(`  size=(${roi.width.toFixed(6)}, ${roi.height.toFixed(6)})`);
+          log(`  rotation=${roi.rotation.toFixed(6)} rad = ${(roi.rotation * 180 / Math.PI).toFixed(2)}°`);
+        }
+
+        // === Step 3: Crop hand region ===
+        logSection('STEP 3: Crop Hand Region');
+        if (rois.length > 0) {
+          const roi = rois[0];
+          const srcW = img.width, srcH = img.height;
+
+          // Replicate the crop from handpose.ts
+          const cropCanvas = new OffscreenCanvas(256, 256);
+          const cropCtx = cropCanvas.getContext('2d');
+
+          const refDim = Math.min(srcW, srcH);
+          const scaleX = 256 / (roi.width * refDim);
+          const scaleY = 256 / (roi.height * refDim);
+          const cosR = Math.cos(roi.rotation);
+          const sinR = Math.sin(roi.rotation);
+          const srcCX = roi.centerX * srcW;
+          const srcCY = roi.centerY * srcH;
+
+          const a = cosR * scaleX;
+          const b = sinR * scaleX;
+          const c = -sinR * scaleY;
+          const d = cosR * scaleY;
+          const e = -srcCX * a - srcCY * c + 128;
+          const f = -srcCX * b - srcCY * d + 128;
+
+          cropCtx.setTransform(a, b, c, d, e, f);
+          cropCtx.drawImage(img, 0, 0);
+          cropCtx.setTransform(1, 0, 0, 1, 0, 0);
+
+          // Show the crop
+          const microCropCtx = document.getElementById('micro-crop').getContext('2d');
+          microCropCtx.drawImage(cropCanvas, 0, 0);
+
+          log(`Crop transform: a=${a.toFixed(6)}, b=${b.toFixed(6)}, c=${c.toFixed(6)}, d=${d.toFixed(6)}`);
+          log(`  e=${e.toFixed(6)}, f=${f.toFixed(6)}`);
+          log(`  srcCenter=(${srcCX.toFixed(1)}, ${srcCY.toFixed(1)})`);
+          log(`  refDim=${refDim}, scaleX=${scaleX.toFixed(6)}, scaleY=${scaleY.toFixed(6)}`);
+        }
+
+        // === Step 4: Run full micro-handpose ===
+        logSection('STEP 4: Run micro-handpose (full pipeline)');
+        statusEl.textContent = 'Running micro-handpose...';
+
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
+        });
+        const microResults = await handpose.detect(img);
+
+        log(`micro-handpose: ${microResults.length} hand(s)`);
+        if (microResults.length > 0) {
+          const h = microResults[0];
+          log(`  score=${h.score.toFixed(4)}, handedness=${h.handedness}`);
+          for (let i = 0; i < 21; i++) {
+            const lm = h.landmarks[i];
+            log(`  [${i}] x=${lm.x.toFixed(6)} y=${lm.y.toFixed(6)} z=${lm.z.toFixed(6)}`);
+          }
+        }
+
+        // === Step 5: Run MediaPipe ===
+        logSection('STEP 5: Run MediaPipe');
+        statusEl.textContent = 'Loading MediaPipe...';
+
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const mpLandmarker = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'CPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 1,
+        });
+
+        log('MediaPipe loaded');
+        const mpResults = mpLandmarker.detect(img);
+
+        log(`MediaPipe: ${mpResults.landmarks?.length || 0} hand(s)`);
+        if (mpResults.landmarks?.length > 0) {
+          const mpLm = mpResults.landmarks[0];
+          log(`  handedness: ${mpResults.handednesses?.[0]?.[0]?.categoryName}`);
+          for (let i = 0; i < 21; i++) {
+            const lm = mpLm[i];
+            log(`  [${i}] x=${lm.x.toFixed(6)} y=${lm.y.toFixed(6)} z=${lm.z.toFixed(6)}`);
+          }
+        }
+
+        // === Step 6: Compare ===
+        logSection('STEP 6: Landmark-by-Landmark Comparison');
+
+        const NAMES = [
+          'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+          'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+          'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+          'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+          'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+        ];
+
+        if (microResults.length > 0 && mpResults.landmarks?.length > 0) {
+          const mLm = microResults[0].landmarks;
+          const pLm = mpResults.landmarks[0];
+
+          let totalDist = 0, maxDist = 0, maxIdx = 0;
+
+          log(`${'#'.padEnd(3)} ${'Name'.padEnd(12)} ${'m_x'.padEnd(9)} ${'p_x'.padEnd(9)} ${'dx'.padEnd(9)} ${'m_y'.padEnd(9)} ${'p_y'.padEnd(9)} ${'dy'.padEnd(9)} dist`);
+
+          for (let i = 0; i < 21; i++) {
+            const m = mLm[i], p = pLm[i];
+            const dx = m.x - p.x, dy = m.y - p.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            totalDist += dist;
+            if (dist > maxDist) { maxDist = dist; maxIdx = i; }
+            log(`${String(i).padEnd(3)} ${NAMES[i].padEnd(12)} ${m.x.toFixed(4).padEnd(9)} ${p.x.toFixed(4).padEnd(9)} ${(dx>0?'+':'')+dx.toFixed(4).padStart(8)} ${m.y.toFixed(4).padEnd(9)} ${p.y.toFixed(4).padEnd(9)} ${(dy>0?'+':'')+dy.toFixed(4).padStart(8)} ${dist.toFixed(4)}`);
+          }
+
+          log(`\nAvg distance: ${(totalDist/21).toFixed(4)} (${(totalDist/21*100).toFixed(2)}%)`);
+          log(`Max distance: ${maxDist.toFixed(4)} at ${NAMES[maxIdx]}`);
+          log(`Handedness: micro=${microResults[0].handedness}, mp=${mpResults.handednesses?.[0]?.[0]?.categoryName}`);
+
+          // Draw overlay
+          const overlayCtx = document.getElementById('overlay').getContext('2d');
+          overlayCtx.drawImage(img, 0, 0, 300, 400);
+          drawHand(overlayCtx, pLm, 300, 400, '#34d399', 4);
+          drawHand(overlayCtx, mLm, 300, 400, '#7c6aef', 3);
+        }
+
+        // === Step 7: Analyze error pattern ===
+        logSection('STEP 7: Error Analysis');
+        if (microResults.length > 0 && mpResults.landmarks?.length > 0) {
+          const mLm = microResults[0].landmarks;
+          const pLm = mpResults.landmarks[0];
+
+          // Check for systematic offset
+          let sumDx = 0, sumDy = 0;
+          for (let i = 0; i < 21; i++) {
+            sumDx += mLm[i].x - pLm[i].x;
+            sumDy += mLm[i].y - pLm[i].y;
+          }
+          log(`Systematic offset: dx=${(sumDx/21).toFixed(5)}, dy=${(sumDy/21).toFixed(5)}`);
+
+          // Check for rotation error: compute best-fit rotation between the two sets
+          // Using Procrustes-style analysis
+          const mCx = mLm.reduce((s,l) => s+l.x, 0)/21;
+          const mCy = mLm.reduce((s,l) => s+l.y, 0)/21;
+          const pCx = pLm.reduce((s,l) => s+l.x, 0)/21;
+          const pCy = pLm.reduce((s,l) => s+l.y, 0)/21;
+
+          let num = 0, den = 0;
+          for (let i = 0; i < 21; i++) {
+            const mx = mLm[i].x - mCx, my = mLm[i].y - mCy;
+            const px = pLm[i].x - pCx, py = pLm[i].y - pCy;
+            num += mx * py - my * px;
+            den += mx * px + my * py;
+          }
+          const rotError = Math.atan2(num, den);
+          log(`Rotation error: ${rotError.toFixed(5)} rad = ${(rotError*180/Math.PI).toFixed(3)}°`);
+
+          // Check for scale error
+          let mScale = 0, pScale = 0;
+          for (let i = 0; i < 21; i++) {
+            mScale += Math.sqrt((mLm[i].x-mCx)**2 + (mLm[i].y-mCy)**2);
+            pScale += Math.sqrt((pLm[i].x-pCx)**2 + (pLm[i].y-pCy)**2);
+          }
+          log(`Scale ratio: ${(mScale/pScale).toFixed(5)} (1.0 = identical)`);
+
+          // Per-finger error
+          const fingers = [
+            ['thumb', [1,2,3,4]],
+            ['index', [5,6,7,8]],
+            ['middle', [9,10,11,12]],
+            ['ring', [13,14,15,16]],
+            ['pinky', [17,18,19,20]],
+          ];
+          log('\nPer-finger avg error:');
+          for (const [name, indices] of fingers) {
+            let fd = 0;
+            for (const i of indices) {
+              const dx = mLm[i].x - pLm[i].x, dy = mLm[i].y - pLm[i].y;
+              fd += Math.sqrt(dx*dx + dy*dy);
+            }
+            log(`  ${name.padEnd(8)}: ${(fd/indices.length*100).toFixed(2)}%`);
+          }
+        }
+
+        statusEl.textContent = '✅ Done';
+        statusEl.className = 'status ok';
+
+      } catch (e) {
+        log(`\nERROR: ${e.message}\n${e.stack}`);
+        statusEl.textContent = `❌ ${e.message}`;
+        statusEl.className = 'status err';
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

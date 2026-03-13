@@ -201,7 +201,7 @@ function computeIoU(a: PalmDetection, b: PalmDetection): number {
  * 5: thumb CMC (approximate)
  * 6: thumb tip (approximate)
  */
-function detectionToROI(detection: PalmDetection): HandROI {
+export function detectionToROI(detection: PalmDetection): HandROI {
   const [cx, cy, w, h] = detection.box;
 
   // Compute rotation from wrist (kp0) to middle finger MCP (kp2)
@@ -231,11 +231,12 @@ function detectionToROI(detection: PalmDetection): HandROI {
 
   // Shift in rotated frame: shift_x=0, shift_y=-0.5 (toward fingers in crop-up direction)
   // In image space: apply rotation to the shift vector
+  // MediaPipe's convention: x_shift = shift_y * longSide * sin(r_mp), y_shift = shift_y * longSide * cos(r_mp)
+  // Our rotation = -r_mp, so: x_shift = -shift_y * L * sin(r_ours), y_shift = shift_y * L * cos(r_ours)
   const shiftAmount = -0.5 * longSide;
   const cosR = Math.cos(rotation);
   const sinR = Math.sin(rotation);
-  // shift_x=0, so: result_x = -shift_y*sin(rot), result_y = shift_y*cos(rot)
-  const shiftX = -shiftAmount * sinR;
+  const shiftX = shiftAmount * sinR;
   const shiftY = shiftAmount * cosR;
 
   return {

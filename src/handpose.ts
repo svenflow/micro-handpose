@@ -1,8 +1,8 @@
 import { compileModel, loadWeightsFromBuffer } from './model.js';
 import type { CompiledModel, WeightsMetadata } from './model.js';
 import { compilePalmModel } from './palm_model.js';
-import { createPalmDetector, computeCropTransform, projectLandmarksToOriginal } from './palm_detection.js';
-import type { HandROI } from './palm_detection.js';
+import { createPalmDetector } from './palm_detection.js';
+import type { PalmDetection } from './palm_detection.js';
 import type { Handpose, HandposeInput, HandposeOptions, HandposeResult, Landmark } from './types.js';
 import { toKeypoints } from './types.js';
 import { createLandmarkSmoother } from './filter.js';
@@ -112,47 +112,124 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     return cropScratchCanvas;
   }
 
-  /** Convert input to 192x192 for palm detection */
-  async function toPalmInput(source: HandposeInput): Promise<HTMLCanvasElement | OffscreenCanvas | ImageBitmap> {
-    if (source instanceof HTMLCanvasElement || source instanceof OffscreenCanvas) {
-      if (source.width === 192 && source.height === 192) return source;
-      const canvas = getPalmScratchCanvas();
-      canvas.width = 192;
-      canvas.height = 192;
-      const ctx = canvas.getContext('2d')!;
-      ctx.drawImage(source, 0, 0, 192, 192);
-      return canvas;
-    }
-    if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) {
-      if (source.width === 192 && source.height === 192) return source;
-      const canvas = getPalmScratchCanvas();
-      canvas.width = 192;
-      canvas.height = 192;
-      const ctx = canvas.getContext('2d')!;
-      ctx.drawImage(source, 0, 0, 192, 192);
-      return canvas;
-    }
+  // Letterbox padding for removing letterbox from detections
+  let lbPadX = 0; // normalized padding on left (and right)
+  let lbPadY = 0; // normalized padding on top (and bottom)
+
+  /**
+   * Convert input to 192x192 for palm detection using LETTERBOXING.
+   * MediaPipe uses FIT mode (maintain aspect ratio, zero-pad) not STRETCH.
+   */
+  function toPalmInputLetterbox(source: HandposeInput, srcW: number, srcH: number): OffscreenCanvas {
     const canvas = getPalmScratchCanvas();
     canvas.width = 192;
     canvas.height = 192;
     const ctx = canvas.getContext('2d')!;
+
+    ctx.clearRect(0, 0, 192, 192);
+
+    const scale = Math.min(192 / srcW, 192 / srcH);
+    const dstW = Math.round(srcW * scale);
+    const dstH = Math.round(srcH * scale);
+    const offsetX = (192 - dstW) / 2;
+    const offsetY = (192 - dstH) / 2;
+
+    lbPadX = offsetX / 192;
+    lbPadY = offsetY / 192;
+
     if (source instanceof ImageData) {
       const tmp = new OffscreenCanvas(source.width, source.height);
       const tmpCtx = tmp.getContext('2d')!;
       tmpCtx.putImageData(source, 0, 0);
-      ctx.drawImage(tmp, 0, 0, 192, 192);
+      ctx.drawImage(tmp, offsetX, offsetY, dstW, dstH);
     } else {
-      ctx.drawImage(source, 0, 0, 192, 192);
+      ctx.drawImage(source as CanvasImageSource, 0, 0, srcW, srcH, offsetX, offsetY, dstW, dstH);
     }
     return canvas;
   }
 
-  /** Crop a hand region from the source image and render to 256x256 canvas */
+  /**
+   * Remove letterbox from a palm detection.
+   * Matches MediaPipe's DetectionLetterboxRemovalCalculator.
+   * Converts from letterbox [0,1] coords to image [0,1] coords.
+   */
+  function removeLetterbox(det: PalmDetection): PalmDetection {
+    const sx = 1 / (1 - 2 * lbPadX);
+    const sy = 1 / (1 - 2 * lbPadY);
+    return {
+      score: det.score,
+      box: [
+        (det.box[0] - lbPadX) * sx,
+        (det.box[1] - lbPadY) * sy,
+        det.box[2] * sx,
+        det.box[3] * sy,
+      ],
+      keypoints: det.keypoints.map(([kx, ky]) => [
+        (kx - lbPadX) * sx,
+        (ky - lbPadY) * sy,
+      ]),
+    };
+  }
+
+  /**
+   * Compute hand crop ROI from a detection in image-normalized coords.
+   * Matches MediaPipe's DetectionsToRectsCalculator + RectTransformationCalculator.
+   *
+   * Returns pixel-based ROI for cropping (center in pixels, size in pixels).
+   * The crop is always SQUARE in pixel space.
+   */
+  function detectionToPixelROI(
+    det: PalmDetection, imgW: number, imgH: number
+  ): { centerXpx: number; centerYpx: number; sizePx: number; rotation: number } {
+    // Step 1: DetectionsToRectsCalculator — compute rotation from keypoints
+    const wrist = det.keypoints[0];
+    const middleMCP = det.keypoints[2];
+
+    // MediaPipe uses: rotation = target_angle - atan2(-(y2-y0), x2-x0)
+    // The negated Y accounts for image coords (Y down) vs math coords (Y up)
+    const dx = middleMCP[0] - wrist[0];
+    const dy = middleMCP[1] - wrist[1];
+    const angle = Math.atan2(-dy, dx); // MediaPipe's convention: negate Y
+    const targetAngle = Math.PI / 2;   // 90 degrees (MediaPipe's target)
+    const rotation = targetAngle - angle;
+
+    // Step 2: RectTransformationCalculator
+    // long_side is computed in PIXELS (critical for non-square images!)
+    const [cx, cy, w, h] = det.box;
+    const longSidePx = Math.max(w * imgW, h * imgH);
+
+    // Shift in normalized coords, but scaled by pixel-based long_side
+    // MediaPipe: shift_x = shift_x_ * long_side / image_width
+    //            shift_y = shift_y_ * long_side / image_height
+    const shiftXnorm = 0; // shift_x_ = 0
+    const shiftYnorm = -0.5 * longSidePx / imgH;
+
+    // Apply rotation to shift vector
+    const cosR = Math.cos(rotation);
+    const sinR = Math.sin(rotation);
+    const newCx = cx + (shiftXnorm * cosR - shiftYnorm * sinR);
+    const newCy = cy + (shiftXnorm * sinR + shiftYnorm * cosR);
+
+    // Scale: final size in pixels
+    const scale = 2.6;
+    const sizePx = longSidePx * scale;
+
+    return {
+      centerXpx: newCx * imgW,
+      centerYpx: newCy * imgH,
+      sizePx,
+      rotation,
+    };
+  }
+
+  /**
+   * Crop a hand region from the source image and render to 256x256 canvas.
+   * Uses pixel-based ROI (center and size in original image pixels).
+   * The crop is always SQUARE in pixel space, matching MediaPipe.
+   */
   function cropHandRegion(
     source: HandposeInput,
-    roi: HandROI,
-    sourceWidth: number,
-    sourceHeight: number,
+    pxROI: { centerXpx: number; centerYpx: number; sizePx: number; rotation: number },
   ): OffscreenCanvas {
     const canvas = getCropScratchCanvas();
     canvas.width = 256;
@@ -160,29 +237,22 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     const ctx = canvas.getContext('2d')!;
 
     ctx.clearRect(0, 0, 256, 256);
-    ctx.save();
-    ctx.translate(128, 128);
-    ctx.scale(roi.width * sourceWidth / 256, roi.height * sourceHeight / 256);
-    ctx.rotate(-roi.rotation);
-    ctx.translate(-128, -128);
 
-    const srcCenterX = roi.centerX * sourceWidth;
-    const srcCenterY = roi.centerY * sourceHeight;
-    ctx.restore();
+    const s = 256 / pxROI.sizePx;
+    const cosR = Math.cos(pxROI.rotation);
+    const sinR = Math.sin(pxROI.rotation);
 
-    const refDim = Math.min(sourceWidth, sourceHeight);
-    const scaleX = 256 / (roi.width * refDim);
-    const scaleY = 256 / (roi.height * refDim);
-
-    const cosR = Math.cos(roi.rotation);
-    const sinR = Math.sin(roi.rotation);
-
-    const a = cosR * scaleX;
-    const b = sinR * scaleX;
-    const c = -sinR * scaleY;
-    const d = cosR * scaleY;
-    const e = -srcCenterX * a - srcCenterY * c + 128;
-    const f = -srcCenterX * b - srcCenterY * d + 128;
+    // Apply R(-rotation) to straighten the hand in the crop.
+    // setTransform(a, b, c, d, e, f) maps source (x,y) → canvas:
+    //   canvas_x = a*x + c*y + e
+    //   canvas_y = b*x + d*y + f
+    // R(-θ) = [[cos(θ), sin(θ)], [-sin(θ), cos(θ)]]
+    const a = cosR * s;
+    const b = -sinR * s;
+    const c = sinR * s;
+    const d = cosR * s;
+    const e = -pxROI.centerXpx * a - pxROI.centerYpx * c + 128;
+    const f = -pxROI.centerXpx * b - pxROI.centerYpx * d + 128;
 
     ctx.setTransform(a, b, c, d, e, f);
 
@@ -219,12 +289,13 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   }
 
   async function detect(source: HandposeInput): Promise<HandposeResult[]> {
-    // Step 1: Palm detection on full frame
-    const palmInput = await toPalmInput(source);
-    const rois = await palmDetector.detect(palmInput);
+    const [srcWidth, srcHeight] = getSourceDimensions(source);
 
-    if (rois.length === 0) {
-      // Reset all smoothers when no hands detected
+    // Step 1: Palm detection on letterboxed input
+    const palmInput = toPalmInputLetterbox(source, srcWidth, srcHeight);
+    const rawDetections = await palmDetector.detectRaw(palmInput);
+
+    if (rawDetections.length === 0) {
       if (prevHandCount > 0) {
         for (let i = 0; i < prevHandCount && i < smoothers.length; i++) {
           smoothers[i]!.reset();
@@ -234,12 +305,16 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       return [];
     }
 
-    const [srcWidth, srcHeight] = getSourceDimensions(source);
     const results: HandposeResult[] = [];
 
-    // Step 2: For each detected palm, crop and run landmark model
-    for (const roi of rois) {
-      const croppedCanvas = cropHandRegion(source, roi, srcWidth, srcHeight);
+    // Step 2: For each detection, remove letterbox → compute ROI → crop → landmark
+    for (const rawDet of rawDetections) {
+      // Remove letterbox from detection (letterbox → image normalized coords)
+      const det = removeLetterbox(rawDet);
+
+      // Compute pixel-based ROI matching MediaPipe's exact pipeline
+      const pxROI = detectionToPixelROI(det, srcWidth, srcHeight);
+      const croppedCanvas = cropHandRegion(source, pxROI);
       const output = await landmarkModel.runFromCanvas(croppedCanvas);
       const handScore = output.handflag[0]!;
 
@@ -247,24 +322,38 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
 
       const isRight = output.handedness[0]! > 0.5;
 
-      // Parse landmarks in crop space [0, 1]
-      const cropLandmarks: Landmark[] = [];
+      // Parse landmarks in crop space [0, 1] and project to original image [0, 1]
+      const landmarks: Landmark[] = [];
+      const cosR = Math.cos(pxROI.rotation);
+      const sinR = Math.sin(pxROI.rotation);
+
       for (let i = 0; i < 21; i++) {
-        cropLandmarks.push({
-          x: output.landmarks[i * 3]!,
-          y: output.landmarks[i * 3 + 1]!,
-          z: output.landmarks[i * 3 + 2]!,
+        const lx = output.landmarks[i * 3]!;     // crop x [0,1]
+        const ly = output.landmarks[i * 3 + 1]!; // crop y [0,1]
+        const lz = output.landmarks[i * 3 + 2]!;
+
+        // Project from 256x256 crop back to original image pixels
+        // Crop [0,1] → centered [-0.5,0.5] → scale by physical size → inverse rotate → add center
+        const dx = (lx - 0.5) * pxROI.sizePx;
+        const dy = (ly - 0.5) * pxROI.sizePx;
+
+        // Inverse of R(-rotation) = R(+rotation): crop → original image
+        // R(θ) = [[cos(θ), -sin(θ)], [sin(θ), cos(θ)]]
+        const origXpx = cosR * dx - sinR * dy + pxROI.centerXpx;
+        const origYpx = sinR * dx + cosR * dy + pxROI.centerYpx;
+
+        landmarks.push({
+          x: origXpx / srcWidth,
+          y: origYpx / srcHeight,
+          z: lz,
         });
       }
-
-      // Project back to original image coordinates
-      const originalLandmarks = projectLandmarksToOriginal(cropLandmarks, roi, srcWidth, srcHeight);
 
       // Apply one euro filter for temporal smoothing
       const handIdx = results.length;
       const smoothedLandmarks = handIdx < smoothers.length
-        ? smoothers[handIdx]!.apply(originalLandmarks)
-        : originalLandmarks;
+        ? smoothers[handIdx]!.apply(landmarks)
+        : landmarks;
 
       results.push({
         score: handScore,
