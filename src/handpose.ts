@@ -76,6 +76,10 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     }
   }
 
+  // One euro filter for temporal smoothing (reduces jitter between frames)
+  const smoother = createLandmarkSmoother();
+  let hadHand = false;
+
   // Scratch canvas for converting various input types to ImageBitmap
   let scratchCanvas: OffscreenCanvas | null = null;
 
@@ -153,20 +157,44 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   async function detect(source: HandposeInput): Promise<HandposeResult | null> {
     const input = await toModelInput(source);
     const output = await model.runFromCanvas(input);
-    return parseOutput(output.handflag, output.handedness, output.landmarks);
+    const result = parseOutput(output.handflag, output.handedness, output.landmarks);
+    if (!result) {
+      if (hadHand) { smoother.reset(); hadHand = false; }
+      return null;
+    }
+    hadHand = true;
+    result.landmarks = smoother.apply(result.landmarks);
+    result.keypoints = toKeypoints(result.landmarks);
+    return result;
   }
 
   async function detectPipelined(source: HandposeInput): Promise<HandposeResult | null> {
     const input = await toModelInput(source);
     const output = await model.runFromCanvasPipelined(input);
     if (!output) return null;
-    return parseOutput(output.handflag, output.handedness, output.landmarks);
+    const result = parseOutput(output.handflag, output.handedness, output.landmarks);
+    if (!result) {
+      if (hadHand) { smoother.reset(); hadHand = false; }
+      return null;
+    }
+    hadHand = true;
+    result.landmarks = smoother.apply(result.landmarks);
+    result.keypoints = toKeypoints(result.landmarks);
+    return result;
   }
 
   async function flushPipelined(): Promise<HandposeResult | null> {
     const output = await model.flushPipelined();
     if (!output) return null;
-    return parseOutput(output.handflag, output.handedness, output.landmarks);
+    const result = parseOutput(output.handflag, output.handedness, output.landmarks);
+    if (!result) {
+      if (hadHand) { smoother.reset(); hadHand = false; }
+      return null;
+    }
+    hadHand = true;
+    result.landmarks = smoother.apply(result.landmarks);
+    result.keypoints = toKeypoints(result.landmarks);
+    return result;
   }
 
   function dispose(): void {
