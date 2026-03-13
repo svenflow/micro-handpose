@@ -590,13 +590,9 @@
             <span class="toggle-dot"></span>MediaPipe WASM
           </button>
         </div>
-        <button class="compare-btn" id="compareBtn" onclick="runCompare()" disabled>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/></svg>
-          Compare
-        </button>
-        <button class="compare-btn" id="profileBtn" onclick="runProfile()" disabled style="background: rgba(100,149,237,0.15); border-color: rgba(100,149,237,0.3); color: cornflowerblue;">
-          Profile (20 runs)
-        </button>
+        <!-- Compare and Profile buttons hidden for now -->
+        <button class="compare-btn" id="compareBtn" onclick="runCompare()" disabled style="display:none">Compare</button>
+        <button class="compare-btn" id="profileBtn" onclick="runProfile()" disabled style="display:none">Profile (20 runs)</button>
       </div>
 
       <div class="demo-card">
