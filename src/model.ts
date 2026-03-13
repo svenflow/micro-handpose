@@ -419,7 +419,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         const allNonZero = result[0]! !== 0 && result[47]! !== 0 && result[95]! !== 0;
         const closeEnough = Math.abs(result[0]! - expected) < 1.0; // generous tolerance for f16
         f16Works = allNonZero && closeEnough;
-        console.log(`[micro-handpose] f16 validation: result[0]=${result[0]}, expected=${expected.toFixed(2)}, allNonZero=${allNonZero}, closeEnough=${closeEnough}, f16Works=${f16Works}`);
         readBuf.unmap();
         inputBuf.destroy(); dwWBuf.destroy(); dwBBuf.destroy(); interBuf.destroy();
         pwWBuf.destroy(); pwBBuf.destroy(); outBuf.destroy(); readBuf.destroy();
