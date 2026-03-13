@@ -1,4 +1,4 @@
-function S(u){return u.replace(/\/\/[^\n]*/g,"").replace(/\s+/g," ").replace(/\s*([{}();,=+\-*/<>!&|@])\s*/g,"$1").trim()}function Ka(u){let d=["weight","bias","pw_weight","pw_bias","dw_weight","dw_bias","handflag_w","handflag_b","handedness_w","handedness_b","landmarks_w","landmarks_b"],b="enable f16;"+u;for(let g of d)for(;b.includes(`${g}:array<f32>`);)b=b.replace(`${g}:array<f32>`,`${g}:array<f16>`);return b}var Le=S(`
+function D(u){return u.replace(/\/\/[^\n]*/g,"").replace(/\s+/g," ").replace(/\s*([{}();,=+\-*/<>!&|@])\s*/g,"$1").trim()}function Ka(u){let p=["weight","bias","pw_weight","pw_bias","dw_weight","dw_bias","handflag_w","handflag_b","handedness_w","handedness_b","landmarks_w","landmarks_b"],f="enable f16;"+u;for(let h of p)for(;f.includes(`${h}:array<f32>`);)f=f.replace(`${h}:array<f32>`,`${h}:array<f16>`);return f}var Le=D(`
 struct DepthwiseParams { batch:u32, channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, stride:u32, pad:u32, }
 @group(0)@binding(0) var<storage,read> input:array<f32>;
 @group(0)@binding(1) var<storage,read> weight:array<f32>;
@@ -51,7 +51,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let out_idx=batch*params.channels*params.out_height*params.out_width+c*params.out_height*params.out_width+out_y*params.out_width+out_x;
   output[out_idx]=sum;
 }
-`),Re=S(`
+`),Re=D(`
 struct DepthwiseParams { batch:u32, channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, stride:u32, pad:u32, }
 @group(0)@binding(0) var<storage,read> input:array<f32>;
 @group(0)@binding(1) var<storage,read> weight:array<f32>;
@@ -81,7 +81,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let out_idx=batch*params.channels*params.out_height*params.out_width+c*params.out_height*params.out_width+out_y*params.out_width+out_x;
   output[out_idx]=sum;
 }
-`),Oe=S(`
+`),Oe=D(`
 struct PointwiseParams { batch:u32, in_channels:u32, out_channels:u32, height:u32, width:u32, channel_pad:u32, stride:u32, in_height:u32, in_width:u32, }
 @group(0)@binding(0) var<storage,read> dw_output:array<f32>;
 @group(0)@binding(1) var<storage,read> skip_input:array<f32>;
@@ -122,7 +122,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let out_idx=batch*params.out_channels*params.height*params.width+oc*params.height*params.width+out_y*params.width+out_x;
   output[out_idx]=result;
 }
-`),Fe=S(`
+`),Fe=D(`
 struct PointwiseParams { batch:u32, in_channels:u32, out_channels:u32, height:u32, width:u32, channel_pad:u32, stride:u32, in_height:u32, in_width:u32, }
 @group(0)@binding(0) var<storage,read> dw_output:array<f32>;
 @group(0)@binding(1) var<storage,read> skip_input:array<f32>;
@@ -166,7 +166,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   output[out_base+oc0*params.height*params.width+out_y*params.width+out_x]=result0;
   if(oc1<params.out_channels){ output[out_base+oc1*params.height*params.width+out_y*params.width+out_x]=result1; }
 }
-`);function ja(u,d){return Re.replace("@compute @workgroup_size(8,8,1)",`@compute @workgroup_size(${u},${d},1)`)}function Ja(u,d){return Le.replace("@compute @workgroup_size(8,8,1)",`@compute @workgroup_size(${u},${d},1)`)}function Qa(u,d){return Oe.replace("@compute @workgroup_size(8,8,1)",`@compute @workgroup_size(${u},${d},1)`)}function et(u,d){return Fe.replace("@compute @workgroup_size(8,8,1)",`@compute @workgroup_size(${u},${d},1)`)}function at(u,d){return[8,8]}var tt=S(`
+`);function ja(u,p){return Re.replace("@compute @workgroup_size(8,8,1)",`@compute @workgroup_size(${u},${p},1)`)}function Ja(u,p){return Le.replace("@compute @workgroup_size(8,8,1)",`@compute @workgroup_size(${u},${p},1)`)}function Qa(u,p){return Oe.replace("@compute @workgroup_size(8,8,1)",`@compute @workgroup_size(${u},${p},1)`)}function et(u,p){return Fe.replace("@compute @workgroup_size(8,8,1)",`@compute @workgroup_size(${u},${p},1)`)}function at(u,p){return[8,8]}var tt=D(`
 struct PadParams { channels:u32, in_size:u32, out_size:u32, }
 @group(0)@binding(0) var<storage,read> input:array<f32>;
 @group(0)@binding(1) var<storage,read_write> output:array<f32>;
@@ -179,7 +179,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let out_idx=c*params.out_size*params.out_size+y*params.out_size+x;
   output[out_idx]=input[in_idx];
 }
-`),it=S(`
+`),it=D(`
 struct Conv3x3Params { batch:u32, in_channels:u32, out_channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, }
 @group(0)@binding(0) var<storage,read> input:array<f32>;
 @group(0)@binding(1) var<storage,read> weight:array<f32>;
@@ -204,7 +204,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let out_idx=batch*params.out_channels*params.out_height*params.out_width+oc*params.out_height*params.out_width+out_y*params.out_width+out_x;
   output[out_idx]=sum;
 }
-`);function nt(u){return S(`
+`);function nt(u){return D(`
 struct UpsampleParams { batch:u32, channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, }
 ${u?`@group(0)@binding(0) var<storage,read> input:array<f32>;
 @group(0)@binding(1) var<storage,read> skip:array<f32>;
@@ -229,7 +229,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let out_idx=batch*params.channels*params.out_height*params.out_width+c*params.out_height*params.out_width+out_y*params.out_width+out_x;
   output[out_idx]=val${u?"+skip[out_idx]":""};
 }
-`)}var rt=nt(!1),st=nt(!0),ut=S(`
+`)}var rt=nt(!1),st=nt(!0),ut=D(`
 @group(0)@binding(0) var<storage,read> a:array<f32>;
 @group(0)@binding(1) var<storage,read> b:array<f32>;
 @group(0)@binding(2) var<storage,read_write> output:array<f32>;
@@ -238,7 +238,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let idx=gid.x; if(idx>=size){return;} output[idx]=a[idx]+b[idx];
 }
-`),ot=S(`
+`),ot=D(`
 struct Conv1x1Params { batch:u32, in_channels:u32, out_channels:u32, height:u32, width:u32, }
 @group(0)@binding(0) var<storage,read> input:array<f32>;
 @group(0)@binding(1) var<storage,read> weight:array<f32>;
@@ -260,7 +260,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let out_idx=batch*params.out_channels*params.height*params.width+oc*params.height*params.width+out_y*params.width+out_x;
   output[out_idx]=sum;
 }
-`);function pt(u){return S(`
+`);function pt(u){return D(`
 struct OutputParams { batch:u32, in_channels:u32, out_channels:u32, }
 @group(0)@binding(0) var<storage,read> input:array<f32>;
 @group(0)@binding(1) var<storage,read> weight:array<f32>;
@@ -281,7 +281,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   ${u==="sigmoid"?"let r=1.0/(1.0+exp(-sum));":"let r=sum/256.0;"}
   output[batch*params.out_channels+oc]=r;
 }
-`)}var dt=pt("sigmoid"),_t=pt("div256"),lt=S(`
+`)}var dt=pt("sigmoid"),_t=pt("div256"),ct=D(`
 @group(0)@binding(0) var<storage,read> input:array<f32>;
 @group(0)@binding(1) var<storage,read> handflag_w:array<f32>;
 @group(0)@binding(2) var<storage,read> handflag_b:array<f32>;
@@ -314,7 +314,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
     sum+=landmarks_b[landmark_oc]; output[oc]=sum/256.0;
   }
 }
-`),ct=S(`
+`),lt=D(`
 struct FusedParams { batch:u32, channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, stride:u32, pad:u32, }
 @group(0)@binding(0) var<storage,read> input:array<f32>;
 @group(0)@binding(1) var<storage,read> dw_weight:array<f32>;
@@ -328,9 +328,8 @@ fn load_input_f(base:u32, y:i32, x:i32, in_h:i32, in_w:i32)->f32 {
   if(y>=0 && y<in_h && x>=0 && x<in_w){ return input[base+u32(y)*u32(in_w)+u32(x)]; }
   return 0.0;
 }
-@compute @workgroup_size(288,1,1)
+@compute @workgroup_size(256,1,1)
 fn main(@builtin(local_invocation_id) lid:vec3<u32>, @builtin(workgroup_id) wid:vec3<u32>){
-  let c=lid.x;
   let out_x=wid.x;
   let out_y=wid.y;
   let outH=params.out_height;
@@ -338,90 +337,63 @@ fn main(@builtin(local_invocation_id) lid:vec3<u32>, @builtin(workgroup_id) wid:
   if(out_x>=outW||out_y>=outH){return;}
   let inH=i32(params.in_height);
   let inW=i32(params.in_width);
-  // Step 1: DW 5x5 convolution
-  let in_base=c*params.in_height*params.in_width;
-  let w_base=c*25u;
-  let by=i32(out_y*params.stride)-i32(params.pad);
-  let bx=i32(out_x*params.stride)-i32(params.pad);
-  var dw_sum:f32=0.0;
-  let w00=dw_weight[w_base];let w01=dw_weight[w_base+1u];let w02=dw_weight[w_base+2u];let w03=dw_weight[w_base+3u];let w04=dw_weight[w_base+4u];
-  let w10=dw_weight[w_base+5u];let w11=dw_weight[w_base+6u];let w12=dw_weight[w_base+7u];let w13=dw_weight[w_base+8u];let w14=dw_weight[w_base+9u];
-  let w20=dw_weight[w_base+10u];let w21=dw_weight[w_base+11u];let w22=dw_weight[w_base+12u];let w23=dw_weight[w_base+13u];let w24=dw_weight[w_base+14u];
-  let w30=dw_weight[w_base+15u];let w31=dw_weight[w_base+16u];let w32=dw_weight[w_base+17u];let w33=dw_weight[w_base+18u];let w34=dw_weight[w_base+19u];
-  let w40=dw_weight[w_base+20u];let w41=dw_weight[w_base+21u];let w42=dw_weight[w_base+22u];let w43=dw_weight[w_base+23u];let w44=dw_weight[w_base+24u];
-  let i00=load_input_f(in_base,by,bx,inH,inW);
-  let i01=load_input_f(in_base,by,bx+1,inH,inW);
-  let i02=load_input_f(in_base,by,bx+2,inH,inW);
-  let i03=load_input_f(in_base,by,bx+3,inH,inW);
-  let i04=load_input_f(in_base,by,bx+4,inH,inW);
-  let i10=load_input_f(in_base,by+1,bx,inH,inW);
-  let i11=load_input_f(in_base,by+1,bx+1,inH,inW);
-  let i12=load_input_f(in_base,by+1,bx+2,inH,inW);
-  let i13=load_input_f(in_base,by+1,bx+3,inH,inW);
-  let i14=load_input_f(in_base,by+1,bx+4,inH,inW);
-  let i20=load_input_f(in_base,by+2,bx,inH,inW);
-  let i21=load_input_f(in_base,by+2,bx+1,inH,inW);
-  let i22=load_input_f(in_base,by+2,bx+2,inH,inW);
-  let i23=load_input_f(in_base,by+2,bx+3,inH,inW);
-  let i24=load_input_f(in_base,by+2,bx+4,inH,inW);
-  let i30=load_input_f(in_base,by+3,bx,inH,inW);
-  let i31=load_input_f(in_base,by+3,bx+1,inH,inW);
-  let i32_=load_input_f(in_base,by+3,bx+2,inH,inW);
-  let i33=load_input_f(in_base,by+3,bx+3,inH,inW);
-  let i34=load_input_f(in_base,by+3,bx+4,inH,inW);
-  let i40=load_input_f(in_base,by+4,bx,inH,inW);
-  let i41=load_input_f(in_base,by+4,bx+1,inH,inW);
-  let i42=load_input_f(in_base,by+4,bx+2,inH,inW);
-  let i43=load_input_f(in_base,by+4,bx+3,inH,inW);
-  let i44=load_input_f(in_base,by+4,bx+4,inH,inW);
-  dw_sum=i00*w00+i01*w01+i02*w02+i03*w03+i04*w04+i10*w10+i11*w11+i12*w12+i13*w13+i14*w14+i20*w20+i21*w21+i22*w22+i23*w23+i24*w24+i30*w30+i31*w31+i32_*w32+i33*w33+i34*w34+i40*w40+i41*w41+i42*w42+i43*w43+i44*w44+dw_bias[c];
-  shared_dw[c]=dw_sum;
+  // Step 1: DW 5x5 convolution \u2014 stride loop over 288 channels with 256 threads
+  for(var c:u32=lid.x;c<288u;c+=256u){
+    let in_base=c*params.in_height*params.in_width;
+    let w_base=c*25u;
+    let by=i32(out_y*params.stride)-i32(params.pad);
+    let bx=i32(out_x*params.stride)-i32(params.pad);
+    var dw_sum:f32=0.0;
+    let w00=dw_weight[w_base];let w01=dw_weight[w_base+1u];let w02=dw_weight[w_base+2u];let w03=dw_weight[w_base+3u];let w04=dw_weight[w_base+4u];
+    let w10=dw_weight[w_base+5u];let w11=dw_weight[w_base+6u];let w12=dw_weight[w_base+7u];let w13=dw_weight[w_base+8u];let w14=dw_weight[w_base+9u];
+    let w20=dw_weight[w_base+10u];let w21=dw_weight[w_base+11u];let w22=dw_weight[w_base+12u];let w23=dw_weight[w_base+13u];let w24=dw_weight[w_base+14u];
+    let w30=dw_weight[w_base+15u];let w31=dw_weight[w_base+16u];let w32=dw_weight[w_base+17u];let w33=dw_weight[w_base+18u];let w34=dw_weight[w_base+19u];
+    let w40=dw_weight[w_base+20u];let w41=dw_weight[w_base+21u];let w42=dw_weight[w_base+22u];let w43=dw_weight[w_base+23u];let w44=dw_weight[w_base+24u];
+    let i00=load_input_f(in_base,by,bx,inH,inW);
+    let i01=load_input_f(in_base,by,bx+1,inH,inW);
+    let i02=load_input_f(in_base,by,bx+2,inH,inW);
+    let i03=load_input_f(in_base,by,bx+3,inH,inW);
+    let i04=load_input_f(in_base,by,bx+4,inH,inW);
+    let i10=load_input_f(in_base,by+1,bx,inH,inW);
+    let i11=load_input_f(in_base,by+1,bx+1,inH,inW);
+    let i12=load_input_f(in_base,by+1,bx+2,inH,inW);
+    let i13=load_input_f(in_base,by+1,bx+3,inH,inW);
+    let i14=load_input_f(in_base,by+1,bx+4,inH,inW);
+    let i20=load_input_f(in_base,by+2,bx,inH,inW);
+    let i21=load_input_f(in_base,by+2,bx+1,inH,inW);
+    let i22=load_input_f(in_base,by+2,bx+2,inH,inW);
+    let i23=load_input_f(in_base,by+2,bx+3,inH,inW);
+    let i24=load_input_f(in_base,by+2,bx+4,inH,inW);
+    let i30=load_input_f(in_base,by+3,bx,inH,inW);
+    let i31=load_input_f(in_base,by+3,bx+1,inH,inW);
+    let i32_=load_input_f(in_base,by+3,bx+2,inH,inW);
+    let i33=load_input_f(in_base,by+3,bx+3,inH,inW);
+    let i34=load_input_f(in_base,by+3,bx+4,inH,inW);
+    let i40=load_input_f(in_base,by+4,bx,inH,inW);
+    let i41=load_input_f(in_base,by+4,bx+1,inH,inW);
+    let i42=load_input_f(in_base,by+4,bx+2,inH,inW);
+    let i43=load_input_f(in_base,by+4,bx+3,inH,inW);
+    let i44=load_input_f(in_base,by+4,bx+4,inH,inW);
+    dw_sum=i00*w00+i01*w01+i02*w02+i03*w03+i04*w04+i10*w10+i11*w11+i12*w12+i13*w13+i14*w14+i20*w20+i21*w21+i22*w22+i23*w23+i24*w24+i30*w30+i31*w31+i32_*w32+i33*w33+i34*w34+i40*w40+i41*w41+i42*w42+i43*w43+i44*w44+dw_bias[c];
+    shared_dw[c]=dw_sum;
+  }
   // Step 2: barrier
   workgroupBarrier();
-  // Step 3: PW 1x1 + skip + ReLU
-  let pw_base=c*288u;
-  var sum0:f32=0.0; var sum1:f32=0.0; var sum2:f32=0.0; var sum3:f32=0.0;
-  var ic:u32=0u;
-  while(ic<288u){
-    sum0+=shared_dw[ic]*pw_weight[pw_base+ic];
-    sum1+=shared_dw[ic+1u]*pw_weight[pw_base+ic+1u];
-    sum2+=shared_dw[ic+2u]*pw_weight[pw_base+ic+2u];
-    sum3+=shared_dw[ic+3u]*pw_weight[pw_base+ic+3u];
-    ic+=4u;
-  }
-  var pw_sum=sum0+sum1+sum2+sum3+pw_bias[c];
-  // Skip connection
-  var skip_val:f32=0.0;
-  if(params.stride==2u){
-    var max_val:f32=-1e38;
-    for(var py:u32=0u;py<2u;py++){
-      for(var px:u32=0u;px<2u;px++){
-        let skip_y=out_y*2u+py; let skip_x=out_x*2u+px;
-        if(skip_y<params.in_height && skip_x<params.in_width){
-          let skip_idx=c*params.in_height*params.in_width+skip_y*params.in_width+skip_x;
-          max_val=max(max_val,input[skip_idx]);
-        }
-      }
+  // Step 3: PW 1x1 + skip + ReLU \u2014 stride loop over 288 channels
+  for(var c:u32=lid.x;c<288u;c+=256u){
+    let pw_base=c*288u;
+    var sum0:f32=0.0; var sum1:f32=0.0; var sum2:f32=0.0; var sum3:f32=0.0;
+    var ic:u32=0u;
+    while(ic<288u){
+      sum0+=shared_dw[ic]*pw_weight[pw_base+ic];
+      sum1+=shared_dw[ic+1u]*pw_weight[pw_base+ic+1u];
+      sum2+=shared_dw[ic+2u]*pw_weight[pw_base+ic+2u];
+      sum3+=shared_dw[ic+3u]*pw_weight[pw_base+ic+3u];
+      ic+=4u;
     }
-    skip_val=max_val;
-  } else {
-    skip_val=input[c*outH*outW+out_y*outW+out_x];
-  }
-  let result=max(0.0,pw_sum+skip_val);
-  output[c*outH*outW+out_y*outW+out_x]=result;
-}
-`);function wt(u,d){let g=u%4===0?`var ic:u32=0u;
-  while(ic<${u}u){
-    sum0+=shared_dw[ic]*pw_weight[pw_base+ic];
-    sum1+=shared_dw[ic+1u]*pw_weight[pw_base+ic+1u];
-    sum2+=shared_dw[ic+2u]*pw_weight[pw_base+ic+2u];
-    sum3+=shared_dw[ic+3u]*pw_weight[pw_base+ic+3u];
-    ic+=4u;
-  }
-  var pw_sum=sum0+sum1+sum2+sum3+pw_bias[c];`:`var ic:u32=0u;
-  while(ic<${u}u){ sum0+=shared_dw[ic]*pw_weight[pw_base+ic]; ic+=1u; }
-  var pw_sum=sum0+pw_bias[c];`,t=`var skip_val:f32=0.0;
-  if(c<${u}u){
+    var pw_sum=sum0+sum1+sum2+sum3+pw_bias[c];
+    // Skip connection
+    var skip_val:f32=0.0;
     if(params.stride==2u){
       var max_val:f32=-1e38;
       for(var py:u32=0u;py<2u;py++){
@@ -437,7 +409,39 @@ fn main(@builtin(local_invocation_id) lid:vec3<u32>, @builtin(workgroup_id) wid:
     } else {
       skip_val=input[c*outH*outW+out_y*outW+out_x];
     }
-  }`,A=u===d?"":`if(c<${u}u){`;return S(`
+    let result=max(0.0,pw_sum+skip_val);
+    output[c*outH*outW+out_y*outW+out_x]=result;
+  }
+}
+`);function wt(u,p){let h=Math.min(p,256),t=p>h,M=u%4===0?`var ic:u32=0u;
+    while(ic<${u}u){
+      sum0+=shared_dw[ic]*pw_weight[pw_base+ic];
+      sum1+=shared_dw[ic+1u]*pw_weight[pw_base+ic+1u];
+      sum2+=shared_dw[ic+2u]*pw_weight[pw_base+ic+2u];
+      sum3+=shared_dw[ic+3u]*pw_weight[pw_base+ic+3u];
+      ic+=4u;
+    }
+    var pw_sum=sum0+sum1+sum2+sum3+pw_bias[c];`:`var ic:u32=0u;
+    while(ic<${u}u){ sum0+=shared_dw[ic]*pw_weight[pw_base+ic]; ic+=1u; }
+    var pw_sum=sum0+pw_bias[c];`,k=`var skip_val:f32=0.0;
+    if(c<${u}u){
+      if(params.stride==2u){
+        var max_val:f32=-1e38;
+        for(var py:u32=0u;py<2u;py++){
+          for(var px:u32=0u;px<2u;px++){
+            let skip_y=out_y*2u+py; let skip_x=out_x*2u+px;
+            if(skip_y<params.in_height && skip_x<params.in_width){
+              let skip_idx=c*params.in_height*params.in_width+skip_y*params.in_width+skip_x;
+              max_val=max(max_val,input[skip_idx]);
+            }
+          }
+        }
+        skip_val=max_val;
+      } else {
+        skip_val=input[c*outH*outW+out_y*outW+out_x];
+      }
+    }`,m=u===p?"":`if(c<${u}u){`,L=u===p?"":"}",v=t?`for(var c:u32=lid.x;c<${u}u;c+=${h}u){`:`let c=lid.x;
+  ${m}`,T=t?"}":L,l=t?`for(var c:u32=lid.x;c<${p}u;c+=${h}u){`:"{let c=lid.x;";return D(`
 struct FusedParams { batch:u32, in_channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, stride:u32, pad:u32, }
 @group(0)@binding(0) var<storage,read> input:array<f32>;
 @group(0)@binding(1) var<storage,read> dw_weight:array<f32>;
@@ -451,9 +455,8 @@ fn load_input_f(base:u32, y:i32, x:i32, in_h:i32, in_w:i32)->f32 {
   if(y>=0 && y<in_h && x>=0 && x<in_w){ return input[base+u32(y)*u32(in_w)+u32(x)]; }
   return 0.0;
 }
-@compute @workgroup_size(${d},1,1)
+@compute @workgroup_size(${h},1,1)
 fn main(@builtin(local_invocation_id) lid:vec3<u32>, @builtin(workgroup_id) wid:vec3<u32>){
-  let c=lid.x;
   let out_x=wid.x;
   let out_y=wid.y;
   let outH=params.out_height;
@@ -461,8 +464,8 @@ fn main(@builtin(local_invocation_id) lid:vec3<u32>, @builtin(workgroup_id) wid:
   if(out_x>=outW||out_y>=outH){return;}
   let inH=i32(params.in_height);
   let inW=i32(params.in_width);
-  // Step 1: DW 5x5 convolution (only threads 0..inCh-1)
-  ${A}
+  // Step 1: DW 5x5 convolution
+  ${v}
   let in_base=c*params.in_height*params.in_width;
   let w_base=c*25u;
   let by=i32(out_y*params.stride)-i32(params.pad);
@@ -500,24 +503,26 @@ fn main(@builtin(local_invocation_id) lid:vec3<u32>, @builtin(workgroup_id) wid:
   let i44=load_input_f(in_base,by+4,bx+4,inH,inW);
   dw_sum=i00*w00+i01*w01+i02*w02+i03*w03+i04*w04+i10*w10+i11*w11+i12*w12+i13*w13+i14*w14+i20*w20+i21*w21+i22*w22+i23*w23+i24*w24+i30*w30+i31*w31+i32_*w32+i33*w33+i34*w34+i40*w40+i41*w41+i42*w42+i43*w43+i44*w44+dw_bias[c];
   shared_dw[c]=dw_sum;
-  ${u===d?"":"}"}
+  ${T}
   // Step 2: barrier
   workgroupBarrier();
   // Step 3: PW 1x1 + skip + ReLU
-  let pw_base=c*${u}u;
-  var sum0:f32=0.0; var sum1:f32=0.0; var sum2:f32=0.0; var sum3:f32=0.0;
-  ${g}
-  // Skip connection (only for c < inCh)
-  ${t}
-  let result=max(0.0,pw_sum+skip_val);
-  output[c*outH*outW+out_y*outW+out_x]=result;
+  ${l}
+    let pw_base=c*${u}u;
+    var sum0:f32=0.0; var sum1:f32=0.0; var sum2:f32=0.0; var sum3:f32=0.0;
+    ${M}
+    // Skip connection (only for c < inCh)
+    ${k}
+    let result=max(0.0,pw_sum+skip_val);
+    output[c*outH*outW+out_y*outW+out_x]=result;
+  }
 }
-`)}var mt=S(`
+`)}var mt=D(`
 @vertex fn vs(@builtin(vertex_index) vid:u32)->@builtin(position) vec4<f32>{
   var pos=array<vec2<f32>,3>(vec2(-1,-1),vec2(3,-1),vec2(-1,3));
   return vec4(pos[vid],0,1);
 }
-`),ht=S(`
+`),ht=D(`
 @group(0)@binding(0) var<storage,read> data:array<f32>;
 @fragment fn fs(@builtin(position) pos:vec4<f32>)->@location(0) vec4<f32>{
   let x=u32(pos.x); let y=u32(pos.y);
@@ -530,7 +535,7 @@ fn main(@builtin(local_invocation_id) lid:vec3<u32>, @builtin(workgroup_id) wid:
   let a=f32(bits&0xFFu)/255.0;
   return vec4(r,g,b,a);
 }
-`),bt=S(`
+`),bt=D(`
 struct CanvasParams { in_size:u32, out_size:u32, }
 @group(0)@binding(0) var input_tex:texture_2d<f32>;
 @group(0)@binding(1) var<storage,read_write> output:array<f32>;
@@ -545,6 +550,6 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   output[1u*out_stride+y*params.out_size+x]=pixel.g;
   output[2u*out_stride+y*params.out_size+x]=pixel.b;
 }
-`);function gt(u,d){let b=new Map,g=u.dtype??"float32";for(let t=0;t<u.keys.length;t++){let A=u.keys[t],M=u.shapes[t],D=u.offsets[t],m=M.reduce((L,w)=>L*w,1),N,P;if(g==="float32")N=new Float32Array(d,D,m);else{let L=new DataView(d);N=new Float32Array(m);for(let w=0;w<m;w++)N[w]=si(L.getUint16(D+w*2,!0));P=d.slice(D,D+m*2)}b.set(A,{data:N,shape:M,rawF16:P})}return b}function si(u){let d=u>>15&1,b=u>>10&31,g=u&1023;if(b===0){if(g===0)return d?-0:0;let M=-14,D=g/1024;return(d?-1:1)*Math.pow(2,M)*D}if(b===31)return g===0?d?-1/0:1/0:NaN;let t=b-15,A=1+g/1024;return(d?-1:1)*Math.pow(2,t)*A}var ui=[[24,24,128,1,"backbone1.3.f.0."],[24,24,128,1,"backbone1.3.f.1."],[24,48,128,2,"backbone1.4."],[48,48,64,1,"backbone2.0.f.0."],[48,48,64,1,"backbone2.0.f.1."],[48,96,64,2,"backbone2.1."],[96,96,32,1,"backbone3.0.f.0."],[96,96,32,1,"backbone3.0.f.1."],[96,96,32,2,"backbone3.1."],[96,96,16,1,"backbone4.0.f.0."],[96,96,16,1,"backbone4.0.f.1."],[96,96,16,2,"backbone4.1."],[96,96,16,1,"backbone5.0."],[96,96,32,1,"backbone6.0."],[48,48,64,1,"ff.0.f.0."],[48,48,64,1,"ff.0.f.1."],[48,48,64,1,"ff.0.f.2."],[48,48,64,1,"ff.0.f.3."],[48,96,64,2,"ff.1."],[96,96,32,1,"ff.2.f.0."],[96,96,32,1,"ff.2.f.1."],[96,96,32,1,"ff.2.f.2."],[96,96,32,1,"ff.2.f.3."],[96,288,32,2,"ff.3."],[288,288,16,1,"ff.4.f.0."],[288,288,16,1,"ff.4.f.1."],[288,288,16,1,"ff.4.f.2."],[288,288,16,1,"ff.4.f.3."],[288,288,16,2,"ff.5."],[288,288,8,1,"ff.6.f.0."],[288,288,8,1,"ff.6.f.1."],[288,288,8,1,"ff.6.f.2."],[288,288,8,1,"ff.6.f.3."],[288,288,8,2,"ff.7."],[288,288,4,1,"ff.8.f.0."],[288,288,4,1,"ff.8.f.1."],[288,288,4,1,"ff.8.f.2."],[288,288,4,1,"ff.8.f.3."],[288,288,4,2,"ff.9."],[288,288,2,1,"ff.10.f.0."],[288,288,2,1,"ff.10.f.1."],[288,288,2,1,"ff.10.f.2."],[288,288,2,1,"ff.10.f.3."]],ft=ui.map(([u,d,b,g,t])=>({type:"resmodule",inCh:u,outCh:d,h:b,w:b,stride:g,prefix:t})),oi=2,pi=5,di=8,_i=11;async function yt(u){if(!navigator.gpu)throw new Error("WebGPU not supported");let d=await navigator.gpu.requestAdapter();if(!d)throw new Error("No GPU adapter found");let b=d.features.has("shader-f16"),g=b?["shader-f16"]:[],t=await d.requestDevice({requiredFeatures:g,requiredLimits:{maxStorageBuffersPerShaderStage:Math.min(d.limits.maxStorageBuffersPerShaderStage,8),maxComputeWorkgroupSizeX:Math.min(d.limits.maxComputeWorkgroupSizeX,288),maxComputeInvocationsPerWorkgroup:Math.min(d.limits.maxComputeInvocationsPerWorkgroup,288)}}),A=!1;if(b)try{A=!(await t.createShaderModule({code:`enable f16;
+`);function gt(u,p){let f=new Map,h=u.dtype??"float32";for(let t=0;t<u.keys.length;t++){let H=u.keys[t],M=u.shapes[t],k=u.offsets[t],m=M.reduce((T,l)=>T*l,1),L,v;if(h==="float32")L=new Float32Array(p,k,m);else{let T=new DataView(p);L=new Float32Array(m);for(let l=0;l<m;l++)L[l]=si(T.getUint16(k+l*2,!0));v=p.slice(k,k+m*2)}f.set(H,{data:L,shape:M,rawF16:v})}return f}function si(u){let p=u>>15&1,f=u>>10&31,h=u&1023;if(f===0){if(h===0)return p?-0:0;let M=-14,k=h/1024;return(p?-1:1)*Math.pow(2,M)*k}if(f===31)return h===0?p?-1/0:1/0:NaN;let t=f-15,H=1+h/1024;return(p?-1:1)*Math.pow(2,t)*H}var ui=[[24,24,128,1,"backbone1.3.f.0."],[24,24,128,1,"backbone1.3.f.1."],[24,48,128,2,"backbone1.4."],[48,48,64,1,"backbone2.0.f.0."],[48,48,64,1,"backbone2.0.f.1."],[48,96,64,2,"backbone2.1."],[96,96,32,1,"backbone3.0.f.0."],[96,96,32,1,"backbone3.0.f.1."],[96,96,32,2,"backbone3.1."],[96,96,16,1,"backbone4.0.f.0."],[96,96,16,1,"backbone4.0.f.1."],[96,96,16,2,"backbone4.1."],[96,96,16,1,"backbone5.0."],[96,96,32,1,"backbone6.0."],[48,48,64,1,"ff.0.f.0."],[48,48,64,1,"ff.0.f.1."],[48,48,64,1,"ff.0.f.2."],[48,48,64,1,"ff.0.f.3."],[48,96,64,2,"ff.1."],[96,96,32,1,"ff.2.f.0."],[96,96,32,1,"ff.2.f.1."],[96,96,32,1,"ff.2.f.2."],[96,96,32,1,"ff.2.f.3."],[96,288,32,2,"ff.3."],[288,288,16,1,"ff.4.f.0."],[288,288,16,1,"ff.4.f.1."],[288,288,16,1,"ff.4.f.2."],[288,288,16,1,"ff.4.f.3."],[288,288,16,2,"ff.5."],[288,288,8,1,"ff.6.f.0."],[288,288,8,1,"ff.6.f.1."],[288,288,8,1,"ff.6.f.2."],[288,288,8,1,"ff.6.f.3."],[288,288,8,2,"ff.7."],[288,288,4,1,"ff.8.f.0."],[288,288,4,1,"ff.8.f.1."],[288,288,4,1,"ff.8.f.2."],[288,288,4,1,"ff.8.f.3."],[288,288,4,2,"ff.9."],[288,288,2,1,"ff.10.f.0."],[288,288,2,1,"ff.10.f.1."],[288,288,2,1,"ff.10.f.2."],[288,288,2,1,"ff.10.f.3."]],ft=ui.map(([u,p,f,h,t])=>({type:"resmodule",inCh:u,outCh:p,h:f,w:f,stride:h,prefix:t})),oi=2,pi=5,di=8,_i=11;async function yt(u){if(!navigator.gpu)throw new Error("WebGPU not supported");let p=await navigator.gpu.requestAdapter();if(!p)throw new Error("No GPU adapter found");let f=p.features.has("shader-f16"),h=f?["shader-f16"]:[],t=await p.requestDevice({requiredFeatures:h,requiredLimits:{maxStorageBuffersPerShaderStage:Math.min(p.limits.maxStorageBuffersPerShaderStage,8),maxComputeWorkgroupSizeX:Math.min(p.limits.maxComputeWorkgroupSizeX,288),maxComputeInvocationsPerWorkgroup:Math.min(p.limits.maxComputeInvocationsPerWorkgroup,288)}}),H=!1;if(f)try{H=!(await t.createShaderModule({code:`enable f16;
 @compute @workgroup_size(1)
-fn main() { var x: f16 = f16(1.0); _ = x; }`}).getCompilationInfo()).messages.some(i=>i.type==="error")}catch{A=!1}let M=u.values().next().value,D=A&&!!M?.rawF16;console.log(D?"[micro-handpose] Using f16 weight storage (shader-f16 validated)":`[micro-handpose] Using f32 weights (shader-f16 feature: ${b}, f16 validated: ${A}, f16 data: ${!!M?.rawF16})`);function m(a){if(D&&a.rawF16){let r=new Uint16Array(a.rawF16);if(r.length%2!==0){let i=new Uint16Array(r.length+1);return i.set(r),i}return r}return a.data}function N(a){if(D&&a.rawF16){let r=a.rawF16.byteLength;return Math.ceil(r/4)*4}return a.data.byteLength}function P(a){return D?Ka(a):a}let L={r:"read-only-storage",s:"storage",u:"uniform"};function w(a){return t.createBindGroupLayout({entries:a.map((r,i)=>({binding:i,visibility:GPUShaderStage.COMPUTE,buffer:{type:L[r]}}))})}function j(a){return t.createBindGroupLayout({entries:a.map((r,i)=>r==="t"?{binding:i,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"float"}}:{binding:i,visibility:GPUShaderStage.COMPUTE,buffer:{type:L[r]}})})}let y=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST,ae=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC,$=GPUBufferUsage.STORAGE,ne=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC,C=GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST;function p(a,r){return t.createBuffer({size:a,usage:r})}function v(a,r){return t.createBindGroup({layout:a,entries:r.map((i,n)=>({binding:n,resource:"size"in i?{buffer:i}:i}))})}function W(a,r){return t.createComputePipeline({layout:t.createPipelineLayout({bindGroupLayouts:[a]}),compute:{module:r,entryPoint:"main"}})}let h=t.createShaderModule({code:tt}),G=t.createShaderModule({code:bt}),k=t.createShaderModule({code:P(lt)}),re=t.createShaderModule({code:P(Re)}),fe=t.createShaderModule({code:P(Le)}),se=t.createShaderModule({code:P(Oe)}),X=t.createShaderModule({code:P(Fe)}),xt=t.createShaderModule({code:P(it)}),vt=t.createShaderModule({code:rt}),Pt=t.createShaderModule({code:ut}),kt=t.createShaderModule({code:st}),Bt=t.createShaderModule({code:P(ot)}),Ut=t.createShaderModule({code:P(dt)}),St=t.createShaderModule({code:P(_t)}),Dt=t.createShaderModule({code:P(ct)}),Ie=new Map;function wi(a,r){let i=`${a}_${r}`,n=Ie.get(i);return n||(n=t.createShaderModule({code:P(wt(a,r))}),Ie.set(i,n)),n}let ge=w(["r","r","r","s","u"]),ye=w(["r","r","r","r","s","u"]),ze=w(["r","s","u"]),qe=w(["r","r","r","s","u"]),Gt=w(["r","s","u"]),Wt=w(["r","r","s","u"]),ue=w(["r","r","s","u"]),Ne=w(["r","r","r","s","u"]),te=w(["r","r","r","s","u"]),$e=j(["t","s","u"]),Xe=w(["r","r","r","r","r","r","r","s"]),xe=w(["r","r","r","r","r","s","u"]),At=t.createPipelineLayout({bindGroupLayouts:[ge]}),Ct=t.createPipelineLayout({bindGroupLayouts:[ye]}),oe=a=>t.createComputePipeline({layout:At,compute:{module:a,entryPoint:"main"}}),pe=a=>t.createComputePipeline({layout:Ct,compute:{module:a,entryPoint:"main"}}),Ht=oe(re),Et=oe(fe),Mt=pe(se),Tt=pe(X),Ye=new Map,Ve=new Map,Ze=new Map,Ke=new Map;Ye.set("8,8",Ht),Ve.set("8,8",Et),Ze.set("8,8",Mt),Ke.set("8,8",Tt);function de(a,r,i,n,e){let c=`${r},${i}`,l=a.get(c);return l||(l=e(t.createShaderModule({code:P(n(r,i))})),a.set(c,l)),l}let Lt=(a,r)=>de(Ye,a,r,ja,oe),Rt=(a,r)=>de(Ve,a,r,Ja,oe),Ot=(a,r)=>de(Ze,a,r,Qa,pe),Ft=(a,r)=>de(Ke,a,r,et,pe),Y=ft.map(a=>{let r=a.stride===2?a.h/2:a.h,i=a.stride===2?a.w/2:a.w,[n,e]=at(a.inCh,r),c=a.h>=64,l=r>=16&&a.inCh>=288&&a.outCh>=288&&a.outCh%2===0;return{dwPipeline:c?Rt(n,e):Lt(n,e),pwPipeline:l?Ft(n,e):Ot(n,e),dwDispatchX:Math.ceil(i/n),dwDispatchY:Math.ceil(r/e),dwDispatchZ:a.inCh,pwDispatchX:Math.ceil(i/n),pwDispatchY:Math.ceil(r/e),pwDispatchZ:l?a.outCh/2:a.outCh}}),je=W(ze,h),It=W(qe,xt);W(Gt,vt),W(Wt,Pt);let ve=W(ue,kt),zt=W(Ne,Bt);W(te,Ut),W(te,St);let V=W($e,G),qt=W(Xe,k),Nt=W(xe,Dt),Pe=1*288*128*128*4,Je=p(3*256*256*4,y),ke=p(3*257*257*4,$),Qe=p(12,C);t.queue.writeBuffer(Qe,0,new Uint32Array([3,256,257]));let B=p(Pe,ae),E=p(Pe,ne),_e=p(Pe,$),ea=p(3072*64*4,y),aa=p(3072*32*4,y),ta=p(1536*16*4,y),ia=p(6144*64*4,$),J=p(260,ne),x=p(260,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);p(260,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);let R=t.createTexture({size:[256,256],format:"rgba8unorm",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT}),na=p(8,C);t.queue.writeBuffer(na,0,new Uint32Array([256,257]));let ra=u.get("backbone1.1.weight"),sa=u.get("backbone1.1.bias");if(!ra||!sa)throw new Error("Missing input conv weights");let ua=m(ra),oa=m(sa),pa=p(ua.byteLength,y),da=p(oa.byteLength,y),_a=p(28,C);t.queue.writeBuffer(pa,0,ua),t.queue.writeBuffer(da,0,oa),t.queue.writeBuffer(_a,0,new Uint32Array([1,3,24,257,257,128,128]));let la=u.get("backbone6.1.weight"),ca=u.get("backbone6.1.bias");if(!la||!ca)throw new Error("Missing backbone6.1 conv1x1 weights");let wa=m(la),ma=m(ca),ha=p(wa.byteLength,y),ba=p(ma.byteLength,y),fa=p(20,C);t.queue.writeBuffer(ha,0,wa),t.queue.writeBuffer(ba,0,ma),t.queue.writeBuffer(fa,0,new Uint32Array([1,96,48,32,32]));let ga=u.get("handflag.weight"),ya=u.get("handflag.bias");if(!ga||!ya)throw new Error("Missing handflag weights");let xa=m(ga),va=m(ya),Be=p(xa.byteLength,y),Ue=p(va.byteLength,y),Pa=p(12,C);t.queue.writeBuffer(Be,0,xa),t.queue.writeBuffer(Ue,0,va),t.queue.writeBuffer(Pa,0,new Uint32Array([1,288,1]));let ka=u.get("handedness.weight"),Ba=u.get("handedness.bias");if(!ka||!Ba)throw new Error("Missing handedness weights");let Ua=m(ka),Sa=m(Ba),Se=p(Ua.byteLength,y),De=p(Sa.byteLength,y),Da=p(12,C);t.queue.writeBuffer(Se,0,Ua),t.queue.writeBuffer(De,0,Sa),t.queue.writeBuffer(Da,0,new Uint32Array([1,288,1]));let Ga=u.get("reg_3d.weight"),Wa=u.get("reg_3d.bias");if(!Ga||!Wa)throw new Error("Missing reg_3d weights");let Aa=m(Ga),Ca=m(Wa),Ge=p(Aa.byteLength,y),We=p(Ca.byteLength,y),Ha=p(12,C);t.queue.writeBuffer(Ge,0,Aa),t.queue.writeBuffer(We,0,Ca),t.queue.writeBuffer(Ha,0,new Uint32Array([1,288,63]));let ie=ft.map(a=>{let{inCh:r,outCh:i,h:n,w:e,stride:c,prefix:l}=a,f=c===2?n/2:n,_=c===2?e/2:e,o=c===1?2:1,s=u.get(`${l}convs.0.weight`),H=u.get(`${l}convs.0.bias`),U=u.get(`${l}convs.1.weight`),K=u.get(`${l}convs.1.bias`);if(!s||!H||!U||!K)throw new Error(`Missing weights for ${l}`);let Fa=m(s),Ia=m(H),za=m(U),qa=m(K),Na=p(Fa.byteLength,y),$a=p(Ia.byteLength,y),Xa=p(za.byteLength,y),Ya=p(qa.byteLength,y),Va=p(32,C),Za=p(36,C);return t.queue.writeBuffer(Na,0,Fa),t.queue.writeBuffer($a,0,Ia),t.queue.writeBuffer(Xa,0,za),t.queue.writeBuffer(Ya,0,qa),t.queue.writeBuffer(Va,0,new Uint32Array([1,r,n,e,f,_,c,o])),t.queue.writeBuffer(Za,0,new Uint32Array([1,r,i,f,_,Math.max(0,i-r),c,n,e])),{dwWeight:Na,dwBias:$a,pwWeight:Xa,pwBias:Ya,dwUniform:Va,pwUniform:Za,spec:a,outH:f,outW:_}});function Q(a){let r=p(a.length*4,C);return t.queue.writeBuffer(r,0,new Uint32Array(a)),r}let $t=Q([1,96,8,8,16,16]),Xt=Q([1,96,16,16,32,32]),Yt=Q([1,48,32,32,64,64]);Q([1536*16]),Q([3072*32]),Q([3072*64]);let Ea=v(ze,[Je,ke,Qe]),Vt=v(qe,[ke,pa,da,B,_a]),O=[],F=[],I=[],z=[];for(let a of ie)O.push(v(ge,[B,a.dwWeight,a.dwBias,_e,a.dwUniform])),F.push(v(ye,[_e,B,a.pwWeight,a.pwBias,E,a.pwUniform])),I.push(v(ge,[E,a.dwWeight,a.dwBias,_e,a.dwUniform])),z.push(v(ye,[_e,E,a.pwWeight,a.pwBias,B,a.pwUniform]));let Zt=v(ue,[B,ta,E,$t]),Kt=v(ue,[B,aa,E,Xt]),jt=v(Ne,[B,ha,ba,ia,fa]),Jt=v(ue,[ia,ea,E,Yt]);v(te,[B,Be,Ue,J,Pa]),v(te,[B,Se,De,J,Da]),v(te,[B,Ge,We,J,Ha]);let Z=v($e,[R.createView(),ke,na]),Qt=v(Xe,[B,Be,Ue,Se,De,Ge,We,J]),Ae=24,Ma=[],Ta=[];for(let a=Ae;a<ie.length;a++){let r=ie[a];Ma.push(v(xe,[B,r.dwWeight,r.dwBias,r.pwWeight,r.pwBias,E,r.dwUniform])),Ta.push(v(xe,[E,r.dwWeight,r.dwBias,r.pwWeight,r.pwBias,B,r.dwUniform]))}let Ce=new OffscreenCanvas(9,8).getContext("2d",{willReadFrequently:!0});Ce.globalCompositeOperation="copy";let La=new OffscreenCanvas(9,8),le=La.getContext("webgpu"),ce=null,He=null;if(le){le.configure({device:t,format:"rgba8unorm",alphaMode:"premultiplied"});let a=t.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.FRAGMENT,buffer:{type:"read-only-storage"}}]}),r=t.createShaderModule({code:mt}),i=t.createShaderModule({code:ht});ce=t.createRenderPipeline({layout:t.createPipelineLayout({bindGroupLayouts:[a]}),vertex:{module:r,entryPoint:"vs"},fragment:{module:i,entryPoint:"fs",targets:[{format:"rgba8unorm"}]}}),He=t.createBindGroup({layout:a,entries:[{binding:0,resource:{buffer:J}}]})}let we=new Float32Array(1),me=new Float32Array(1),he=new Float32Array(63);function T(a,r){let i=!0,n=0,e=a.beginComputePass();for(e.setPipeline(It),e.setBindGroup(0,Vt),e.dispatchWorkgroups(Math.ceil(128/8),Math.ceil(128/8),24);n<=oi;n++){let _=i?O[n]:I[n],o=i?F[n]:z[n],s=Y[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i}e.end();let c=i?B:E;for(a.copyBufferToBuffer(c,0,ea,0,3072*64*4),e=a.beginComputePass();n<=pi;n++){let _=i?O[n]:I[n],o=i?F[n]:z[n],s=Y[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i}e.end();let l=i?B:E;for(a.copyBufferToBuffer(l,0,aa,0,3072*32*4),e=a.beginComputePass();n<=di;n++){let _=i?O[n]:I[n],o=i?F[n]:z[n],s=Y[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i}e.end();let f=i?B:E;for(a.copyBufferToBuffer(f,0,ta,0,1536*16*4),e=a.beginComputePass();n<=_i;n++){let _=i?O[n]:I[n],o=i?F[n]:z[n],s=Y[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i}e.setPipeline(ve),e.setBindGroup(0,Zt),e.dispatchWorkgroups(Math.ceil(16/8),Math.ceil(16/8),96),e.end(),i=!1,e=a.beginComputePass();{let _=i?O[n]:I[n],o=i?F[n]:z[n],s=Y[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i,n++}e.setPipeline(ve),e.setBindGroup(0,Kt),e.dispatchWorkgroups(Math.ceil(32/8),Math.ceil(32/8),96),e.end(),i=!1,e=a.beginComputePass();{let _=i?O[n]:I[n],o=i?F[n]:z[n],s=Y[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i,n++}for(e.setPipeline(zt),e.setBindGroup(0,jt),e.dispatchWorkgroups(Math.ceil(32/8),Math.ceil(32/8),48),e.setPipeline(ve),e.setBindGroup(0,Jt),e.dispatchWorkgroups(Math.ceil(64/8),Math.ceil(64/8),48),e.end(),i=!1,e=a.beginComputePass();n<Ae;n++){let _=i?O[n]:I[n],o=i?F[n]:z[n],s=Y[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i}for(;n<ie.length;n++){let _=n-Ae,o=i?Ma[_]:Ta[_],s=ie[n];e.setPipeline(Nt),e.setBindGroup(0,o),e.dispatchWorkgroups(s.outW,s.outH,1),i=!i}e.setPipeline(qt),e.setBindGroup(0,Qt),e.dispatchWorkgroups(1),e.end(),r&&a.copyBufferToBuffer(J,0,r,0,260)}async function be(a){t.queue.writeBuffer(Je,0,a);let r=t.createCommandEncoder();{let e=r.beginComputePass();e.setPipeline(je),e.setBindGroup(0,Ea),e.dispatchWorkgroups(Math.ceil(256/16),Math.ceil(256/16),3),e.end()}T(r,x),t.queue.submit([r.finish()]);let i=x.mapAsync(GPUMapMode.READ);await t.queue.onSubmittedWorkDone(),await i;let n=new Float32Array(x.getMappedRange());return we[0]=n[0],me[0]=n[1],he.set(n.subarray(2,65)),x.unmap(),{handflag:new Float32Array(we),handedness:new Float32Array(me),landmarks:new Float32Array(he)}}async function Ee(a){t.queue.copyExternalImageToTexture({source:a},{texture:R},[256,256]);let r=t.createCommandEncoder();{let e=r.beginComputePass();e.setPipeline(V),e.setBindGroup(0,Z),e.dispatchWorkgroups(Math.ceil(256/16),Math.ceil(256/16),1),e.end()}T(r,x),t.queue.submit([r.finish()]);let i=x.mapAsync(GPUMapMode.READ);await t.queue.onSubmittedWorkDone(),await i;let n=new Float32Array(x.getMappedRange());return we[0]=n[0],me[0]=n[1],he.set(n.subarray(2,65)),x.unmap(),{handflag:new Float32Array(we),handedness:new Float32Array(me),landmarks:new Float32Array(he)}}async function Ra(a){if(!ce||!He||!le)throw new Error("Render-based readback not available (no WebGPU canvas context)");t.queue.copyExternalImageToTexture({source:a},{texture:R},[256,256]);let r=t.createCommandEncoder();{let _=r.beginComputePass();_.setPipeline(V),_.setBindGroup(0,Z),_.dispatchWorkgroups(16,16,1),_.end()}T(r,null);let i=le.getCurrentTexture(),n=r.beginRenderPass({colorAttachments:[{view:i.createView(),loadOp:"clear",storeOp:"store",clearValue:{r:0,g:0,b:0,a:1}}]});n.setPipeline(ce),n.setBindGroup(0,He),n.draw(3),n.end(),t.queue.submit([r.finish()]),await t.queue.onSubmittedWorkDone(),Ce.drawImage(La,0,0);let c=Ce.getImageData(0,0,9,8).data,l=new Float32Array(65),f=new DataView(new ArrayBuffer(4));for(let _=0;_<65;_++){let o=_*4;f.setUint8(0,c[o]),f.setUint8(1,c[o+1]),f.setUint8(2,c[o+2]),f.setUint8(3,c[o+3]),l[_]=f.getFloat32(0)}return{handflag:new Float32Array([l[0]]),handedness:new Float32Array([l[1]]),landmarks:new Float32Array(l.subarray(2,65))}}let ei=t.createBuffer({size:260,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}),Me=0,ai=[x,ei],ee=null,q=null;async function Te(a){let r=ai[Me];Me=1-Me,t.queue.copyExternalImageToTexture({source:a},{texture:R},[256,256]);let i=t.createCommandEncoder();{let e=i.beginComputePass();e.setPipeline(V),e.setBindGroup(0,Z),e.dispatchWorkgroups(Math.ceil(256/16),Math.ceil(256/16),1),e.end()}T(i,r),t.queue.submit([i.finish()]);let n=null;if(ee!==null&&q!==null){await ee;let e=new Float32Array(q.getMappedRange());n={handflag:new Float32Array([e[0]]),handedness:new Float32Array([e[1]]),landmarks:new Float32Array(e.subarray(2,65))},q.unmap()}return q=r,ee=r.mapAsync(GPUMapMode.READ),n}async function Oa(){if(!ee||!q)return null;await ee;let a=new Float32Array(q.getMappedRange()),r={handflag:new Float32Array([a[0]]),handedness:new Float32Array([a[1]]),landmarks:new Float32Array(a.subarray(2,65))};return q.unmap(),ee=null,q=null,r}async function ti(a=50){let r=new Float32Array(196608);for(let e=0;e<5;e++)await be(r);let i=[];for(let e=0;e<a;e++){let c=performance.now();await be(r),i.push(performance.now()-c)}let n=i.reduce((e,c)=>e+c,0)/i.length;return{avgMs:n,fps:1e3/n}}async function ii(a=50){let r=new Float32Array(196608);for(let l=0;l<5;l++)await be(r);let i=[];for(let l=0;l<a;l++){let f=t.createCommandEncoder();{let o=f.beginComputePass();o.setPipeline(je),o.setBindGroup(0,Ea),o.dispatchWorkgroups(Math.ceil(256/16),Math.ceil(256/16),3),o.end()}T(f,x);let _=performance.now();t.queue.submit([f.finish()]),await t.queue.onSubmittedWorkDone(),i.push(performance.now()-_)}i.sort((l,f)=>l-f);let n=i.reduce((l,f)=>l+f,0)/i.length,e=i[Math.floor(i.length/2)],c=i[0];return{avgMs:n,fps:1e3/n,medianMs:e,minMs:c}}function ni(a){t.queue.copyExternalImageToTexture({source:a},{texture:R},[256,256]);let r=t.createCommandEncoder();{let i=r.beginComputePass();i.setPipeline(V),i.setBindGroup(0,Z),i.dispatchWorkgroups(Math.ceil(256/16),Math.ceil(256/16),1),i.end()}T(r,x),t.queue.submit([r.finish()])}async function ri(a,r=50){function i(o){let s=[...o].sort((H,U)=>H-U);return{median:s[Math.floor(s.length/2)],min:s[0]}}for(let o=0;o<10;o++)await Ee(a);let n=[];for(let o=0;o<r;o++){t.queue.copyExternalImageToTexture({source:a},{texture:R},[256,256]);let s=t.createCommandEncoder();{let U=s.beginComputePass();U.setPipeline(V),U.setBindGroup(0,Z),U.dispatchWorkgroups(16,16,1),U.end()}T(s,x);let H=performance.now();t.queue.submit([s.finish()]),await t.queue.onSubmittedWorkDone(),n.push(performance.now()-H)}let e=[];for(let o=0;o<r;o++){t.queue.copyExternalImageToTexture({source:a},{texture:R},[256,256]);let s=t.createCommandEncoder();{let K=s.beginComputePass();K.setPipeline(V),K.setBindGroup(0,Z),K.dispatchWorkgroups(16,16,1),K.end()}T(s,x),t.queue.submit([s.finish()]);let H=x.mapAsync(GPUMapMode.READ),U=performance.now();await t.queue.onSubmittedWorkDone(),await H,x.getMappedRange(),x.unmap(),e.push(performance.now()-U)}let c=[];for(let o=0;o<r;o++){t.queue.copyExternalImageToTexture({source:a},{texture:R},[256,256]);let s=t.createCommandEncoder();{let U=s.beginComputePass();U.setPipeline(V),U.setBindGroup(0,Z),U.dispatchWorkgroups(16,16,1),U.end()}T(s,x),t.queue.submit([s.finish()]);let H=performance.now();await x.mapAsync(GPUMapMode.READ),x.getMappedRange(),x.unmap(),c.push(performance.now()-H)}let l=[];for(let o=0;o<r;o++){let s=performance.now();await Ee(a),l.push(performance.now()-s)}await Te(a);let f=[];for(let o=0;o<r;o++){let s=performance.now();await Te(a),f.push(performance.now()-s)}await Oa();let _=null;if(ce){let o=[];for(let s=0;s<r;s++){let H=performance.now();await Ra(a),o.push(performance.now()-H)}_=i(o)}return{gpuOnly:i(n),mapAsyncOnly:i(e),mapAsyncNoWait:i(c),total:i(l),pipelined:i(f),renderReadback:_}}return{device:t,run:be,runFromCanvas:Ee,runFromCanvasViaRender:Ra,runFromCanvasPipelined:Te,flushPipelined:Oa,benchmark:ti,benchmarkGPU:ii,benchmarkDiagnostic:ri,_device:t,_benchmarkSubmitOnly:ni}}var li="https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@latest/weights";async function ci(u={}){let{weightsUrl:d,scoreThreshold:b=.5}=u;if(typeof navigator>"u"||!navigator.gpu)throw new Error("micro-handpose requires WebGPU. Check browser support at https://webgpureport.org");let g=d??li,t=g.endsWith("/")?g:`${g}/`,A=`${t}weights_f16.json`,M=`${t}weights_f16.bin`,[D,m]=await Promise.all([fetch(A),fetch(M)]);if(!D.ok)throw new Error(`Failed to fetch weights metadata: ${D.status}`);if(!m.ok)throw new Error(`Failed to fetch weights binary: ${m.status}`);let N=await D.json(),P=await m.arrayBuffer(),L=gt(N,P),w=await yt(L),j=null;function y(){return j||(j=new OffscreenCanvas(256,256)),j}async function ae(h){if(h instanceof HTMLCanvasElement||h instanceof OffscreenCanvas||typeof ImageBitmap<"u"&&h instanceof ImageBitmap)return h;let G=y();G.width=256,G.height=256;let k=G.getContext("2d");return h instanceof ImageData?k.putImageData(h,0,0):k.drawImage(h,0,0,256,256),G}function $(h,G,k){let re=h[0];if(re<b)return null;let fe=G[0]>.5,se=[];for(let X=0;X<21;X++)se.push({x:k[X*3],y:k[X*3+1],z:k[X*3+2]});return{score:re,handedness:fe?"right":"left",landmarks:se}}async function ne(h){let G=await ae(h),k=await w.runFromCanvas(G);return $(k.handflag,k.handedness,k.landmarks)}async function C(h){let G=await ae(h),k=await w.runFromCanvasPipelined(G);return k?$(k.handflag,k.handedness,k.landmarks):null}async function p(){let h=await w.flushPipelined();return h?$(h.handflag,h.handedness,h.landmarks):null}function v(){w.device.destroy(),j=null}async function W(h){let G=await ae(h);return w.benchmarkDiagnostic(G)}return{detect:ne,detectPipelined:C,flushPipelined:p,dispose:v,benchmarkDiagnostic:W}}export{ci as createHandpose};
+fn main() { var x: f16 = f16(1.0); _ = x; }`}).getCompilationInfo()).messages.some(i=>i.type==="error")}catch{H=!1}let M=u.values().next().value,k=H&&!!M?.rawF16;console.log(k?"[micro-handpose] Using f16 weight storage (shader-f16 validated)":`[micro-handpose] Using f32 weights (shader-f16 feature: ${f}, f16 validated: ${H}, f16 data: ${!!M?.rawF16})`);function m(a){if(k&&a.rawF16){let r=new Uint16Array(a.rawF16);if(r.length%2!==0){let i=new Uint16Array(r.length+1);return i.set(r),i}return r}return a.data}function L(a){if(k&&a.rawF16){let r=a.rawF16.byteLength;return Math.ceil(r/4)*4}return a.data.byteLength}function v(a){return k?Ka(a):a}let T={r:"read-only-storage",s:"storage",u:"uniform"};function l(a){return t.createBindGroupLayout({entries:a.map((r,i)=>({binding:i,visibility:GPUShaderStage.COMPUTE,buffer:{type:T[r]}}))})}function $(a){return t.createBindGroupLayout({entries:a.map((r,i)=>r==="t"?{binding:i,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"float"}}:{binding:i,visibility:GPUShaderStage.COMPUTE,buffer:{type:T[r]}})})}let y=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST,ae=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC,X=GPUBufferUsage.STORAGE,ne=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC,A=GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST;function d(a,r){return t.createBuffer({size:a,usage:r})}function P(a,r){return t.createBindGroup({layout:a,entries:r.map((i,n)=>({binding:n,resource:"size"in i?{buffer:i}:i}))})}function W(a,r){return t.createComputePipeline({layout:t.createPipelineLayout({bindGroupLayouts:[a]}),compute:{module:r,entryPoint:"main"}})}let b=t.createShaderModule({code:tt}),G=t.createShaderModule({code:bt}),B=t.createShaderModule({code:v(ct)}),re=t.createShaderModule({code:v(Re)}),fe=t.createShaderModule({code:v(Le)}),se=t.createShaderModule({code:v(Oe)}),Y=t.createShaderModule({code:v(Fe)}),xt=t.createShaderModule({code:v(it)}),vt=t.createShaderModule({code:rt}),Pt=t.createShaderModule({code:ut}),kt=t.createShaderModule({code:st}),Bt=t.createShaderModule({code:v(ot)}),Ut=t.createShaderModule({code:v(dt)}),St=t.createShaderModule({code:v(_t)}),Dt=t.createShaderModule({code:v(lt)}),Ie=new Map;function wi(a,r){let i=`${a}_${r}`,n=Ie.get(i);return n||(n=t.createShaderModule({code:v(wt(a,r))}),Ie.set(i,n)),n}let ge=l(["r","r","r","s","u"]),ye=l(["r","r","r","r","s","u"]),ze=l(["r","s","u"]),qe=l(["r","r","r","s","u"]),Gt=l(["r","s","u"]),Wt=l(["r","r","s","u"]),ue=l(["r","r","s","u"]),Ne=l(["r","r","r","s","u"]),te=l(["r","r","r","s","u"]),$e=$(["t","s","u"]),Xe=l(["r","r","r","r","r","r","r","s"]),xe=l(["r","r","r","r","r","s","u"]),At=t.createPipelineLayout({bindGroupLayouts:[ge]}),Ct=t.createPipelineLayout({bindGroupLayouts:[ye]}),oe=a=>t.createComputePipeline({layout:At,compute:{module:a,entryPoint:"main"}}),pe=a=>t.createComputePipeline({layout:Ct,compute:{module:a,entryPoint:"main"}}),Ht=oe(re),Mt=oe(fe),Et=pe(se),Tt=pe(Y),Ye=new Map,Ve=new Map,Ze=new Map,Ke=new Map;Ye.set("8,8",Ht),Ve.set("8,8",Mt),Ze.set("8,8",Et),Ke.set("8,8",Tt);function de(a,r,i,n,e){let w=`${r},${i}`,c=a.get(w);return c||(c=e(t.createShaderModule({code:v(n(r,i))})),a.set(w,c)),c}let Lt=(a,r)=>de(Ye,a,r,ja,oe),Rt=(a,r)=>de(Ve,a,r,Ja,oe),Ot=(a,r)=>de(Ze,a,r,Qa,pe),Ft=(a,r)=>de(Ke,a,r,et,pe),V=ft.map(a=>{let r=a.stride===2?a.h/2:a.h,i=a.stride===2?a.w/2:a.w,[n,e]=at(a.inCh,r),w=a.h>=64,c=r>=16&&a.inCh>=288&&a.outCh>=288&&a.outCh%2===0;return{dwPipeline:w?Rt(n,e):Lt(n,e),pwPipeline:c?Ft(n,e):Ot(n,e),dwDispatchX:Math.ceil(i/n),dwDispatchY:Math.ceil(r/e),dwDispatchZ:a.inCh,pwDispatchX:Math.ceil(i/n),pwDispatchY:Math.ceil(r/e),pwDispatchZ:c?a.outCh/2:a.outCh}}),je=W(ze,b),It=W(qe,xt);W(Gt,vt),W(Wt,Pt);let ve=W(ue,kt),zt=W(Ne,Bt);W(te,Ut),W(te,St);let Z=W($e,G),qt=W(Xe,B),Nt=W(xe,Dt),Pe=1*288*128*128*4,Je=d(3*256*256*4,y),ke=d(3*257*257*4,X),Qe=d(12,A);t.queue.writeBuffer(Qe,0,new Uint32Array([3,256,257]));let U=d(Pe,ae),E=d(Pe,ne),_e=d(Pe,X),ea=d(3072*64*4,y),aa=d(3072*32*4,y),ta=d(1536*16*4,y),ia=d(6144*64*4,X),J=d(260,ne),x=d(260,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);d(260,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);let O=t.createTexture({size:[256,256],format:"rgba8unorm",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT}),na=d(8,A);t.queue.writeBuffer(na,0,new Uint32Array([256,257]));let ra=u.get("backbone1.1.weight"),sa=u.get("backbone1.1.bias");if(!ra||!sa)throw new Error("Missing input conv weights");let ua=m(ra),oa=m(sa),pa=d(ua.byteLength,y),da=d(oa.byteLength,y),_a=d(28,A);t.queue.writeBuffer(pa,0,ua),t.queue.writeBuffer(da,0,oa),t.queue.writeBuffer(_a,0,new Uint32Array([1,3,24,257,257,128,128]));let ca=u.get("backbone6.1.weight"),la=u.get("backbone6.1.bias");if(!ca||!la)throw new Error("Missing backbone6.1 conv1x1 weights");let wa=m(ca),ma=m(la),ha=d(wa.byteLength,y),ba=d(ma.byteLength,y),fa=d(20,A);t.queue.writeBuffer(ha,0,wa),t.queue.writeBuffer(ba,0,ma),t.queue.writeBuffer(fa,0,new Uint32Array([1,96,48,32,32]));let ga=u.get("handflag.weight"),ya=u.get("handflag.bias");if(!ga||!ya)throw new Error("Missing handflag weights");let xa=m(ga),va=m(ya),Be=d(xa.byteLength,y),Ue=d(va.byteLength,y),Pa=d(12,A);t.queue.writeBuffer(Be,0,xa),t.queue.writeBuffer(Ue,0,va),t.queue.writeBuffer(Pa,0,new Uint32Array([1,288,1]));let ka=u.get("handedness.weight"),Ba=u.get("handedness.bias");if(!ka||!Ba)throw new Error("Missing handedness weights");let Ua=m(ka),Sa=m(Ba),Se=d(Ua.byteLength,y),De=d(Sa.byteLength,y),Da=d(12,A);t.queue.writeBuffer(Se,0,Ua),t.queue.writeBuffer(De,0,Sa),t.queue.writeBuffer(Da,0,new Uint32Array([1,288,1]));let Ga=u.get("reg_3d.weight"),Wa=u.get("reg_3d.bias");if(!Ga||!Wa)throw new Error("Missing reg_3d weights");let Aa=m(Ga),Ca=m(Wa),Ge=d(Aa.byteLength,y),We=d(Ca.byteLength,y),Ha=d(12,A);t.queue.writeBuffer(Ge,0,Aa),t.queue.writeBuffer(We,0,Ca),t.queue.writeBuffer(Ha,0,new Uint32Array([1,288,63]));let ie=ft.map(a=>{let{inCh:r,outCh:i,h:n,w:e,stride:w,prefix:c}=a,g=w===2?n/2:n,_=w===2?e/2:e,o=w===1?2:1,s=u.get(`${c}convs.0.weight`),C=u.get(`${c}convs.0.bias`),S=u.get(`${c}convs.1.weight`),j=u.get(`${c}convs.1.bias`);if(!s||!C||!S||!j)throw new Error(`Missing weights for ${c}`);let Fa=m(s),Ia=m(C),za=m(S),qa=m(j),Na=d(Fa.byteLength,y),$a=d(Ia.byteLength,y),Xa=d(za.byteLength,y),Ya=d(qa.byteLength,y),Va=d(32,A),Za=d(36,A);return t.queue.writeBuffer(Na,0,Fa),t.queue.writeBuffer($a,0,Ia),t.queue.writeBuffer(Xa,0,za),t.queue.writeBuffer(Ya,0,qa),t.queue.writeBuffer(Va,0,new Uint32Array([1,r,n,e,g,_,w,o])),t.queue.writeBuffer(Za,0,new Uint32Array([1,r,i,g,_,Math.max(0,i-r),w,n,e])),{dwWeight:Na,dwBias:$a,pwWeight:Xa,pwBias:Ya,dwUniform:Va,pwUniform:Za,spec:a,outH:g,outW:_}});function Q(a){let r=d(a.length*4,A);return t.queue.writeBuffer(r,0,new Uint32Array(a)),r}let $t=Q([1,96,8,8,16,16]),Xt=Q([1,96,16,16,32,32]),Yt=Q([1,48,32,32,64,64]);Q([1536*16]),Q([3072*32]),Q([3072*64]);let Ma=P(ze,[Je,ke,Qe]),Vt=P(qe,[ke,pa,da,U,_a]),F=[],I=[],z=[],q=[];for(let a of ie)F.push(P(ge,[U,a.dwWeight,a.dwBias,_e,a.dwUniform])),I.push(P(ye,[_e,U,a.pwWeight,a.pwBias,E,a.pwUniform])),z.push(P(ge,[E,a.dwWeight,a.dwBias,_e,a.dwUniform])),q.push(P(ye,[_e,E,a.pwWeight,a.pwBias,U,a.pwUniform]));let Zt=P(ue,[U,ta,E,$t]),Kt=P(ue,[U,aa,E,Xt]),jt=P(Ne,[U,ha,ba,ia,fa]),Jt=P(ue,[ia,ea,E,Yt]);P(te,[U,Be,Ue,J,Pa]),P(te,[U,Se,De,J,Da]),P(te,[U,Ge,We,J,Ha]);let K=P($e,[O.createView(),ke,na]),Qt=P(Xe,[U,Be,Ue,Se,De,Ge,We,J]),Ae=24,Ea=[],Ta=[];for(let a=Ae;a<ie.length;a++){let r=ie[a];Ea.push(P(xe,[U,r.dwWeight,r.dwBias,r.pwWeight,r.pwBias,E,r.dwUniform])),Ta.push(P(xe,[E,r.dwWeight,r.dwBias,r.pwWeight,r.pwBias,U,r.dwUniform]))}let Ce=new OffscreenCanvas(9,8).getContext("2d",{willReadFrequently:!0});Ce.globalCompositeOperation="copy";let La=new OffscreenCanvas(9,8),ce=La.getContext("webgpu"),le=null,He=null;if(ce){ce.configure({device:t,format:"rgba8unorm",alphaMode:"premultiplied"});let a=t.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.FRAGMENT,buffer:{type:"read-only-storage"}}]}),r=t.createShaderModule({code:mt}),i=t.createShaderModule({code:ht});le=t.createRenderPipeline({layout:t.createPipelineLayout({bindGroupLayouts:[a]}),vertex:{module:r,entryPoint:"vs"},fragment:{module:i,entryPoint:"fs",targets:[{format:"rgba8unorm"}]}}),He=t.createBindGroup({layout:a,entries:[{binding:0,resource:{buffer:J}}]})}let we=new Float32Array(1),me=new Float32Array(1),he=new Float32Array(63);function R(a,r){let i=!0,n=0,e=a.beginComputePass();for(e.setPipeline(It),e.setBindGroup(0,Vt),e.dispatchWorkgroups(Math.ceil(128/8),Math.ceil(128/8),24);n<=oi;n++){let _=i?F[n]:z[n],o=i?I[n]:q[n],s=V[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i}e.end();let w=i?U:E;for(a.copyBufferToBuffer(w,0,ea,0,3072*64*4),e=a.beginComputePass();n<=pi;n++){let _=i?F[n]:z[n],o=i?I[n]:q[n],s=V[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i}e.end();let c=i?U:E;for(a.copyBufferToBuffer(c,0,aa,0,3072*32*4),e=a.beginComputePass();n<=di;n++){let _=i?F[n]:z[n],o=i?I[n]:q[n],s=V[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i}e.end();let g=i?U:E;for(a.copyBufferToBuffer(g,0,ta,0,1536*16*4),e=a.beginComputePass();n<=_i;n++){let _=i?F[n]:z[n],o=i?I[n]:q[n],s=V[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i}e.setPipeline(ve),e.setBindGroup(0,Zt),e.dispatchWorkgroups(Math.ceil(16/8),Math.ceil(16/8),96),e.end(),i=!1,e=a.beginComputePass();{let _=i?F[n]:z[n],o=i?I[n]:q[n],s=V[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i,n++}e.setPipeline(ve),e.setBindGroup(0,Kt),e.dispatchWorkgroups(Math.ceil(32/8),Math.ceil(32/8),96),e.end(),i=!1,e=a.beginComputePass();{let _=i?F[n]:z[n],o=i?I[n]:q[n],s=V[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i,n++}for(e.setPipeline(zt),e.setBindGroup(0,jt),e.dispatchWorkgroups(Math.ceil(32/8),Math.ceil(32/8),48),e.setPipeline(ve),e.setBindGroup(0,Jt),e.dispatchWorkgroups(Math.ceil(64/8),Math.ceil(64/8),48),e.end(),i=!1,e=a.beginComputePass();n<Ae;n++){let _=i?F[n]:z[n],o=i?I[n]:q[n],s=V[n];e.setPipeline(s.dwPipeline),e.setBindGroup(0,_),e.dispatchWorkgroups(s.dwDispatchX,s.dwDispatchY,s.dwDispatchZ),e.setPipeline(s.pwPipeline),e.setBindGroup(0,o),e.dispatchWorkgroups(s.pwDispatchX,s.pwDispatchY,s.pwDispatchZ),i=!i}for(;n<ie.length;n++){let _=n-Ae,o=i?Ea[_]:Ta[_],s=ie[n];e.setPipeline(Nt),e.setBindGroup(0,o),e.dispatchWorkgroups(s.outW,s.outH,1),i=!i}e.setPipeline(qt),e.setBindGroup(0,Qt),e.dispatchWorkgroups(1),e.end(),r&&a.copyBufferToBuffer(J,0,r,0,260)}async function be(a){t.queue.writeBuffer(Je,0,a);let r=t.createCommandEncoder();{let e=r.beginComputePass();e.setPipeline(je),e.setBindGroup(0,Ma),e.dispatchWorkgroups(Math.ceil(256/16),Math.ceil(256/16),3),e.end()}R(r,x),t.queue.submit([r.finish()]);let i=x.mapAsync(GPUMapMode.READ);await t.queue.onSubmittedWorkDone(),await i;let n=new Float32Array(x.getMappedRange());return we[0]=n[0],me[0]=n[1],he.set(n.subarray(2,65)),x.unmap(),{handflag:new Float32Array(we),handedness:new Float32Array(me),landmarks:new Float32Array(he)}}async function Me(a){t.queue.copyExternalImageToTexture({source:a},{texture:O},[256,256]);let r=t.createCommandEncoder();{let e=r.beginComputePass();e.setPipeline(Z),e.setBindGroup(0,K),e.dispatchWorkgroups(Math.ceil(256/16),Math.ceil(256/16),1),e.end()}R(r,x),t.queue.submit([r.finish()]);let i=x.mapAsync(GPUMapMode.READ);await t.queue.onSubmittedWorkDone(),await i;let n=new Float32Array(x.getMappedRange());return we[0]=n[0],me[0]=n[1],he.set(n.subarray(2,65)),x.unmap(),{handflag:new Float32Array(we),handedness:new Float32Array(me),landmarks:new Float32Array(he)}}async function Ra(a){if(!le||!He||!ce)throw new Error("Render-based readback not available (no WebGPU canvas context)");t.queue.copyExternalImageToTexture({source:a},{texture:O},[256,256]);let r=t.createCommandEncoder();{let _=r.beginComputePass();_.setPipeline(Z),_.setBindGroup(0,K),_.dispatchWorkgroups(16,16,1),_.end()}R(r,null);let i=ce.getCurrentTexture(),n=r.beginRenderPass({colorAttachments:[{view:i.createView(),loadOp:"clear",storeOp:"store",clearValue:{r:0,g:0,b:0,a:1}}]});n.setPipeline(le),n.setBindGroup(0,He),n.draw(3),n.end(),t.queue.submit([r.finish()]),await t.queue.onSubmittedWorkDone(),Ce.drawImage(La,0,0);let w=Ce.getImageData(0,0,9,8).data,c=new Float32Array(65),g=new DataView(new ArrayBuffer(4));for(let _=0;_<65;_++){let o=_*4;g.setUint8(0,w[o]),g.setUint8(1,w[o+1]),g.setUint8(2,w[o+2]),g.setUint8(3,w[o+3]),c[_]=g.getFloat32(0)}return{handflag:new Float32Array([c[0]]),handedness:new Float32Array([c[1]]),landmarks:new Float32Array(c.subarray(2,65))}}let ei=t.createBuffer({size:260,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}),Ee=0,ai=[x,ei],ee=null,N=null;async function Te(a){let r=ai[Ee];Ee=1-Ee,t.queue.copyExternalImageToTexture({source:a},{texture:O},[256,256]);let i=t.createCommandEncoder();{let e=i.beginComputePass();e.setPipeline(Z),e.setBindGroup(0,K),e.dispatchWorkgroups(Math.ceil(256/16),Math.ceil(256/16),1),e.end()}R(i,r),t.queue.submit([i.finish()]);let n=null;if(ee!==null&&N!==null){await ee;let e=new Float32Array(N.getMappedRange());n={handflag:new Float32Array([e[0]]),handedness:new Float32Array([e[1]]),landmarks:new Float32Array(e.subarray(2,65))},N.unmap()}return N=r,ee=r.mapAsync(GPUMapMode.READ),n}async function Oa(){if(!ee||!N)return null;await ee;let a=new Float32Array(N.getMappedRange()),r={handflag:new Float32Array([a[0]]),handedness:new Float32Array([a[1]]),landmarks:new Float32Array(a.subarray(2,65))};return N.unmap(),ee=null,N=null,r}async function ti(a=50){let r=new Float32Array(196608);for(let e=0;e<5;e++)await be(r);let i=[];for(let e=0;e<a;e++){let w=performance.now();await be(r),i.push(performance.now()-w)}let n=i.reduce((e,w)=>e+w,0)/i.length;return{avgMs:n,fps:1e3/n}}async function ii(a=50){let r=new Float32Array(196608);for(let c=0;c<5;c++)await be(r);let i=[];for(let c=0;c<a;c++){let g=t.createCommandEncoder();{let o=g.beginComputePass();o.setPipeline(je),o.setBindGroup(0,Ma),o.dispatchWorkgroups(Math.ceil(256/16),Math.ceil(256/16),3),o.end()}R(g,x);let _=performance.now();t.queue.submit([g.finish()]),await t.queue.onSubmittedWorkDone(),i.push(performance.now()-_)}i.sort((c,g)=>c-g);let n=i.reduce((c,g)=>c+g,0)/i.length,e=i[Math.floor(i.length/2)],w=i[0];return{avgMs:n,fps:1e3/n,medianMs:e,minMs:w}}function ni(a){t.queue.copyExternalImageToTexture({source:a},{texture:O},[256,256]);let r=t.createCommandEncoder();{let i=r.beginComputePass();i.setPipeline(Z),i.setBindGroup(0,K),i.dispatchWorkgroups(Math.ceil(256/16),Math.ceil(256/16),1),i.end()}R(r,x),t.queue.submit([r.finish()])}async function ri(a,r=50){function i(o){let s=[...o].sort((C,S)=>C-S);return{median:s[Math.floor(s.length/2)],min:s[0]}}for(let o=0;o<10;o++)await Me(a);let n=[];for(let o=0;o<r;o++){t.queue.copyExternalImageToTexture({source:a},{texture:O},[256,256]);let s=t.createCommandEncoder();{let S=s.beginComputePass();S.setPipeline(Z),S.setBindGroup(0,K),S.dispatchWorkgroups(16,16,1),S.end()}R(s,x);let C=performance.now();t.queue.submit([s.finish()]),await t.queue.onSubmittedWorkDone(),n.push(performance.now()-C)}let e=[];for(let o=0;o<r;o++){t.queue.copyExternalImageToTexture({source:a},{texture:O},[256,256]);let s=t.createCommandEncoder();{let j=s.beginComputePass();j.setPipeline(Z),j.setBindGroup(0,K),j.dispatchWorkgroups(16,16,1),j.end()}R(s,x),t.queue.submit([s.finish()]);let C=x.mapAsync(GPUMapMode.READ),S=performance.now();await t.queue.onSubmittedWorkDone(),await C,x.getMappedRange(),x.unmap(),e.push(performance.now()-S)}let w=[];for(let o=0;o<r;o++){t.queue.copyExternalImageToTexture({source:a},{texture:O},[256,256]);let s=t.createCommandEncoder();{let S=s.beginComputePass();S.setPipeline(Z),S.setBindGroup(0,K),S.dispatchWorkgroups(16,16,1),S.end()}R(s,x),t.queue.submit([s.finish()]);let C=performance.now();await x.mapAsync(GPUMapMode.READ),x.getMappedRange(),x.unmap(),w.push(performance.now()-C)}let c=[];for(let o=0;o<r;o++){let s=performance.now();await Me(a),c.push(performance.now()-s)}await Te(a);let g=[];for(let o=0;o<r;o++){let s=performance.now();await Te(a),g.push(performance.now()-s)}await Oa();let _=null;if(le){let o=[];for(let s=0;s<r;s++){let C=performance.now();await Ra(a),o.push(performance.now()-C)}_=i(o)}return{gpuOnly:i(n),mapAsyncOnly:i(e),mapAsyncNoWait:i(w),total:i(c),pipelined:i(g),renderReadback:_}}return{device:t,run:be,runFromCanvas:Me,runFromCanvasViaRender:Ra,runFromCanvasPipelined:Te,flushPipelined:Oa,benchmark:ti,benchmarkGPU:ii,benchmarkDiagnostic:ri,_device:t,_benchmarkSubmitOnly:ni}}var ci="https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@latest/weights";async function li(u={}){let{weightsUrl:p,scoreThreshold:f=.5}=u;if(typeof navigator>"u"||!navigator.gpu)throw new Error("micro-handpose requires WebGPU. Check browser support at https://webgpureport.org");let h=p??ci,t=h.endsWith("/")?h:`${h}/`,H=`${t}weights_f16.json`,M=`${t}weights_f16.bin`,[k,m]=await Promise.all([fetch(H),fetch(M)]);if(!k.ok)throw new Error(`Failed to fetch weights metadata: ${k.status}`);if(!m.ok)throw new Error(`Failed to fetch weights binary: ${m.status}`);let L=await k.json(),v=await m.arrayBuffer(),T=gt(L,v),l=await yt(T),$=null;function y(){return $||($=new OffscreenCanvas(256,256)),$}async function ae(b){if(b instanceof HTMLCanvasElement||b instanceof OffscreenCanvas||typeof ImageBitmap<"u"&&b instanceof ImageBitmap)return b;let G=y();G.width=256,G.height=256;let B=G.getContext("2d");return b instanceof ImageData?B.putImageData(b,0,0):B.drawImage(b,0,0,256,256),G}function X(b,G,B){let re=b[0];if(re<f)return null;let fe=G[0]>.5,se=[];for(let Y=0;Y<21;Y++)se.push({x:B[Y*3],y:B[Y*3+1],z:B[Y*3+2]});return{score:re,handedness:fe?"right":"left",landmarks:se}}async function ne(b){let G=await ae(b),B=await l.runFromCanvas(G);return X(B.handflag,B.handedness,B.landmarks)}async function A(b){let G=await ae(b),B=await l.runFromCanvasPipelined(G);return B?X(B.handflag,B.handedness,B.landmarks):null}async function d(){let b=await l.flushPipelined();return b?X(b.handflag,b.handedness,b.landmarks):null}function P(){l.device.destroy(),$=null}async function W(b){let G=await ae(b);return l.benchmarkDiagnostic(G)}return{detect:ne,detectPipelined:A,flushPipelined:d,dispose:P,benchmarkDiagnostic:W}}export{li as createHandpose};
