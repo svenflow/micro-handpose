@@ -217,11 +217,20 @@ try {
   const hp = await createHandpose({ weightsUrl: './weights/', scoreThreshold: 0 });
   L('   Model created OK!');
 
-  L('7. Running inference on gray canvas...');
+  L('7. Running inference on patterned canvas...');
   const canvas = new OffscreenCanvas(256, 256);
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#888';
-  ctx.fillRect(0, 0, 256, 256);
+  // Use a gradient/noise pattern instead of solid gray — solid gray can produce all-zero
+  // output through ReLU activations, making it impossible to distinguish working from broken
+  for (let y = 0; y < 256; y += 16) {
+    for (let x = 0; x < 256; x += 16) {
+      const r = Math.floor(128 + 64 * Math.sin(x * 0.1) * Math.cos(y * 0.1));
+      const g = Math.floor(128 + 64 * Math.sin(y * 0.15));
+      const b = Math.floor(128 + 64 * Math.cos(x * 0.12));
+      ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+      ctx.fillRect(x, y, 16, 16);
+    }
+  }
   const result = await hp.detect(canvas);
   if (result) {
     L('   score: ' + result.score.toFixed(6));
@@ -230,7 +239,7 @@ try {
     L('   landmarks[10]: x=' + result.landmarks[10].x.toFixed(4) + ' y=' + result.landmarks[10].y.toFixed(4) + ' z=' + result.landmarks[10].z.toFixed(4));
     L('   landmarks[20]: x=' + result.landmarks[20].x.toFixed(4) + ' y=' + result.landmarks[20].y.toFixed(4) + ' z=' + result.landmarks[20].z.toFixed(4));
     const allZero = result.landmarks.every(l => l.x === 0 && l.y === 0 && l.z === 0);
-    L('   ' + (allZero ? '⚠️ ALL ZEROS (readback broken)' : '✅ non-zero values (readback works!)'));
+    L('   ' + (allZero ? '⚠️ ALL ZEROS — GPU pipeline not producing output' : '✅ non-zero values — GPU pipeline WORKS!'));
   } else {
     L('   ❌ result is null (should not happen with threshold=0)');
   }
