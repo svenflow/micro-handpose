@@ -718,12 +718,11 @@
 <span class="kw">const</span> handpose = <span class="kw">await</span> <span class="fn">createHandpose</span>()
 
 <span class="cm">// Detect from any image source: canvas, video, image, ImageData</span>
-<span class="kw">const</span> result = <span class="kw">await</span> handpose.<span class="fn">detect</span>(videoElement)
+<span class="kw">const</span> hands = <span class="kw">await</span> handpose.<span class="fn">detect</span>(videoElement)
 
-<span class="kw">if</span> (result) {
-  console.<span class="fn">log</span>(result.score)      <span class="cm">// 0.99</span>
-  console.<span class="fn">log</span>(result.handedness) <span class="cm">// 'left' | 'right'</span>
-  console.<span class="fn">log</span>(result.landmarks)  <span class="cm">// 21 { x, y, z } points</span>
+<span class="kw">for</span> (<span class="kw">const</span> hand <span class="kw">of</span> hands) {
+  console.<span class="fn">log</span>(hand.keypoints.index_tip) <span class="cm">// {x, y, z}</span>
+  console.<span class="fn">log</span>(hand.handedness)          <span class="cm">// 'left' | 'right'</span>
 }
 
 <span class="cm">// Clean up GPU resources when done</span>
@@ -1070,7 +1069,7 @@ handpose.<span class="fn">dispose</span>()</pre>
 
     async function detectMicro() {
       const t0 = performance.now();
-      const result = await microHandpose.detect(video);
+      const hands = await microHandpose.detect(video);
       const inferTime = performance.now() - t0;
 
       updateInferDisplay(inferTime);
@@ -1078,10 +1077,12 @@ handpose.<span class="fn">dispose</span>()</pre>
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      if (result) {
-        handVal.textContent = result.handedness;
+      if (hands.length > 0) {
+        handVal.textContent = hands.map(h => h.handedness).join(', ');
         handVal.classList.add('active');
-        drawHand(result.landmarks, canvas.width, canvas.height);
+        for (const hand of hands) {
+          drawHand(hand.landmarks, canvas.width, canvas.height);
+        }
       } else {
         handVal.textContent = '\u2014';
         handVal.classList.remove('active');
@@ -1177,32 +1178,6 @@ handpose.<span class="fn">dispose</span>()</pre>
         results.micro = { error: e.message };
       }
 
-      // Profile micro-handpose PIPELINED
-      try {
-        btn.textContent = 'Profiling micro pipelined (0/' + N + ')...';
-        await ensureMicroHandpose();
-        // warmup pipelined mode
-        for (let i = 0; i < 5; i++) await microHandpose.detectPipelined(source);
-        const pipeTimes = [];
-        for (let i = 0; i < N; i++) {
-          const t0 = performance.now();
-          await microHandpose.detectPipelined(source);
-          pipeTimes.push(performance.now() - t0);
-          btn.textContent = 'Profiling micro pipelined (' + (i+1) + '/' + N + ')...';
-        }
-        await microHandpose.flushPipelined();
-        pipeTimes.sort((a, b) => a - b);
-        results.microPipelined = {
-          median: pipeTimes[Math.floor(N/2)],
-          min: pipeTimes[0],
-          p90: pipeTimes[Math.floor(N*0.9)],
-          mean: pipeTimes.reduce((a,b) => a+b, 0) / N,
-          all: pipeTimes
-        };
-      } catch (e) {
-        results.microPipelined = { error: e.message };
-      }
-
       // Profile MediaPipe GPU
       try {
         btn.textContent = 'Loading MediaPipe GPU...';
@@ -1279,9 +1254,6 @@ handpose.<span class="fn">dispose</span>()</pre>
       } else {
         summaryHtml += 'micro-handpose: median=<span class="metric">' + fmt(results.micro.median) + '</span> min=<span class="metric">' + fmt(results.micro.min) + '</span> p90=<span class="metric">' + fmt(results.micro.p90) + '</span><br>';
       }
-      if (results.microPipelined && !results.microPipelined.error) {
-        summaryHtml += 'micro (pipelined): median=<span class="metric">' + fmt(results.microPipelined.median) + '</span> min=<span class="metric">' + fmt(results.microPipelined.min) + '</span> p90=<span class="metric">' + fmt(results.microPipelined.p90) + '</span><br>';
-      }
       if (results.mediapipeGpu.error) {
         summaryHtml += 'MediaPipe GPU: <span class="bad">' + results.mediapipeGpu.error + '</span><br>';
       } else {
@@ -1309,13 +1281,12 @@ handpose.<span class="fn">dispose</span>()</pre>
       summary.innerHTML = summaryHtml;
 
       // Build per-run table
-      let html = '<tr><th>Run</th><th>micro</th><th>piped</th><th>MP GPU</th><th>MP WASM</th></tr>';
+      let html = '<tr><th>Run</th><th>micro</th><th>MP GPU</th><th>MP WASM</th></tr>';
       for (let i = 0; i < N; i++) {
         const mt = results.micro.all ? results.micro.all[i] : null;
-        const pt = results.microPipelined?.all ? results.microPipelined.all[i] : null;
         const mgt = results.mediapipeGpu?.all ? results.mediapipeGpu.all[i] : null;
         const mpt = results.mediapipeWasm?.all ? results.mediapipeWasm.all[i] : null;
-        html += '<tr><td>' + (i+1) + '</td><td>' + (mt ? mt.toFixed(1) + 'ms' : 'err') + '</td><td>' + (pt ? pt.toFixed(1) + 'ms' : 'err') + '</td><td>' + (mgt ? mgt.toFixed(1) + 'ms' : 'err') + '</td><td>' + (mpt ? mpt.toFixed(1) + 'ms' : 'err') + '</td></tr>';
+        html += '<tr><td>' + (i+1) + '</td><td>' + (mt ? mt.toFixed(1) + 'ms' : 'err') + '</td><td>' + (mgt ? mgt.toFixed(1) + 'ms' : 'err') + '</td><td>' + (mpt ? mpt.toFixed(1) + 'ms' : 'err') + '</td></tr>';
       }
       table.innerHTML = html;
       panel.classList.add('visible');
@@ -1375,7 +1346,8 @@ handpose.<span class="fn">dispose</span>()</pre>
         running = false;
 
         // Run micro-handpose on current video frame
-        const microResult = await microHandpose.detect(video);
+        const microHands = await microHandpose.detect(video);
+        const microResult = microHands.length > 0 ? microHands[0] : null;
 
         // Run MediaPipe on current video frame
         mpWasmTimestamp += 33;

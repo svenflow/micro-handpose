@@ -35,7 +35,7 @@ export interface HandposeResult {
   score: number;
   /** Whether this is a left or right hand */
   handedness: 'left' | 'right';
-  /** 21 hand landmarks in order (wrist, thumb_cmc, ..., pinky_tip) */
+  /** 21 hand landmarks in original image coordinates [0,1] */
   landmarks: Landmark[];
   /** Named landmarks for ergonomic access: result.keypoints.thumb_tip */
   keypoints: Keypoints;
@@ -43,73 +43,29 @@ export interface HandposeResult {
 
 /** Options for creating a handpose detector */
 export interface HandposeOptions {
-  /** URL to fetch weights from. Defaults to bundled weights or CDN. */
+  /** URL to fetch weights from. Defaults to CDN. All weight files must be in this directory. */
   weightsUrl?: string;
-  /** Minimum confidence score to return a detection (0-1). Default: 0.5 */
+  /** Minimum landmark confidence score (0-1). Default: 0.5 */
   scoreThreshold?: number;
-  /** Force f32 weights even when shader-f16 is available. Default: false */
-  forceF32?: boolean;
-  /** URL to fetch palm detection weights from. Required for full-frame detection. */
-  palmWeightsUrl?: string;
   /** Minimum palm detection score (0-1). Default: 0.5 */
   palmScoreThreshold?: number;
-  /** Maximum number of hands to detect. Default: 2 */
+  /** Maximum number of hands to detect. Default: 3 */
   maxHands?: number;
+  /** Force f32 weights even when shader-f16 is available. Default: false */
+  forceF32?: boolean;
 }
 
 /** A handpose detector instance */
 export interface Handpose {
   /**
-   * Detect hand landmarks from an image source.
+   * Detect hands from a camera frame or image.
    *
    * Accepts: HTMLCanvasElement, OffscreenCanvas, ImageBitmap, HTMLImageElement,
    * HTMLVideoElement, or ImageData.
    *
-   * Returns null if no hand is detected (below score threshold).
-   */
-  detect: (source: HandposeInput) => Promise<HandposeResult | null>;
-
-  /** Pipelined detection: returns previous frame's result, one frame latency, lower overhead */
-  detectPipelined: (source: HandposeInput) => Promise<HandposeResult | null>;
-
-  /** Flush pipelined readback to get last frame's result */
-  flushPipelined: () => Promise<HandposeResult | null>;
-
-  /** Run diagnostic benchmark measuring GPU time, mapAsync time, pipelining separately */
-  benchmarkDiagnostic: (source: HandposeInput, iterations?: number) => Promise<any>;
-
-  /** Debug: read intermediate layer outputs to find where activations die */
-  debugLayerOutputs: (source: HandposeInput) => Promise<any>;
-
-  /** Dispose GPU resources */
-  dispose: () => void;
-}
-
-/** Detection result for a single hand with full-frame coordinates */
-export interface FullHandposeResult {
-  /** Confidence score (0-1) that a hand is present */
-  score: number;
-  /** Whether this is a left or right hand */
-  handedness: 'left' | 'right';
-  /** 21 hand landmarks in original image coordinates [0,1] */
-  landmarks: Landmark[];
-  /** Named landmarks for ergonomic access: result.keypoints.index_tip */
-  keypoints: Keypoints;
-  /** Palm detection score */
-  palmScore: number;
-}
-
-/** A full-frame handpose detector instance (palm detection + landmarks) */
-export interface FullHandpose {
-  /**
-   * Detect hand landmarks from a full camera frame.
-   *
-   * Runs palm detection to find hands, crops each detected hand,
-   * runs landmark detection, and projects landmarks back to original coordinates.
-   *
    * Returns array of detected hands (empty if none found).
    */
-  detect: (source: HandposeInput) => Promise<FullHandposeResult[]>;
+  detect: (source: HandposeInput) => Promise<HandposeResult[]>;
 
   /** Dispose GPU resources */
   dispose: () => void;

@@ -3,7 +3,7 @@ import type { CompiledModel, WeightsMetadata } from './model.js';
 import { compilePalmModel } from './palm_model.js';
 import { createPalmDetector, computeCropTransform, projectLandmarksToOriginal } from './palm_detection.js';
 import type { HandROI } from './palm_detection.js';
-import type { Handpose, HandposeInput, HandposeOptions, HandposeResult, FullHandpose, FullHandposeResult, Landmark } from './types.js';
+import type { Handpose, HandposeInput, HandposeOptions, HandposeResult, Landmark } from './types.js';
 import { toKeypoints } from './types.js';
 import { createLandmarkSmoother } from './filter.js';
 import type { LandmarkSmoother } from './filter.js';
@@ -12,7 +12,7 @@ import type { LandmarkSmoother } from './filter.js';
 const DEFAULT_WEIGHTS_BASE = 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@latest/weights';
 
 /**
- * Create a handpose detector.
+ * Create a hand detector.
  *
  * Downloads model weights and compiles the WebGPU pipeline.
  * Call this once, then use `detect()` repeatedly.
@@ -20,226 +20,15 @@ const DEFAULT_WEIGHTS_BASE = 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handp
  * @example
  * ```typescript
  * const handpose = await createHandpose()
- * const result = await handpose.detect(canvas)
+ * const hands = await handpose.detect(videoElement)
+ * for (const hand of hands) {
+ *   console.log(hand.keypoints.index_tip) // {x, y, z}
+ * }
  * ```
  */
 export async function createHandpose(options: HandposeOptions = {}): Promise<Handpose> {
   const {
     weightsUrl,
-    scoreThreshold = 0.5,
-    forceF32 = false,
-  } = options;
-
-  // Check WebGPU support
-  if (typeof navigator === 'undefined' || !navigator.gpu) {
-    throw new Error('micro-handpose requires WebGPU. Check browser support at https://webgpureport.org');
-  }
-
-  // Load weights (prefer f16 — smaller download + enables GPU f16 path)
-  const baseUrl = weightsUrl ?? DEFAULT_WEIGHTS_BASE;
-  const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
-  const metaUrl = `${base}weights_f16.json`;
-  const binUrl = `${base}weights_f16.bin`;
-
-  const [metaRes, binRes] = await Promise.all([
-    fetch(metaUrl),
-    fetch(binUrl),
-  ]);
-
-  if (!metaRes.ok) throw new Error(`Failed to fetch weights metadata: ${metaRes.status}`);
-  if (!binRes.ok) throw new Error(`Failed to fetch weights binary: ${binRes.status}`);
-
-  const metadata: WeightsMetadata = await metaRes.json();
-  const buffer = await binRes.arrayBuffer();
-  const weights = loadWeightsFromBuffer(metadata, buffer);
-
-  // Compile model (with f16 auto-detection unless forceF32)
-  let model: CompiledModel = await compileModel(weights, { forceF32 });
-
-  // Self-test: run inference on a patterned canvas and verify non-zero output.
-  // Some platforms (macOS Chrome) pass f16 validation but silently produce zeros
-  // with the actual model shaders. This catches those cases.
-  if (!forceF32) {
-    const testCanvas = new OffscreenCanvas(256, 256);
-    const testCtx = testCanvas.getContext('2d')!;
-    testCtx.fillStyle = '#886644';
-    testCtx.fillRect(0, 0, 256, 256);
-    testCtx.fillStyle = '#cc9966';
-    testCtx.fillRect(50, 50, 156, 156);
-    const testOutput = await model.runFromCanvas(testCanvas);
-    const allZero = testOutput.landmarks.every(v => v === 0) &&
-                    testOutput.handflag.every(v => v === 0);
-    if (allZero) {
-      console.warn('[micro-handpose] f16 model produced all-zero output — recompiling with f32');
-      model.device.destroy();
-      model = await compileModel(weights, { forceF32: true });
-    }
-  }
-
-  // One euro filter for temporal smoothing (reduces jitter between frames)
-  const smoother = createLandmarkSmoother();
-  let hadHand = false;
-
-  // Scratch canvas for converting various input types to ImageBitmap
-  let scratchCanvas: OffscreenCanvas | null = null;
-
-  function getScratchCanvas(): OffscreenCanvas {
-    if (!scratchCanvas) {
-      scratchCanvas = new OffscreenCanvas(256, 256);
-    }
-    return scratchCanvas;
-  }
-
-  /**
-   * Convert any supported input type to something the model can consume.
-   * The model's runFromCanvas accepts: HTMLCanvasElement, OffscreenCanvas, ImageBitmap.
-   * For other types, we draw to a scratch canvas first.
-   */
-  async function toModelInput(source: HandposeInput): Promise<HTMLCanvasElement | OffscreenCanvas | ImageBitmap> {
-    // These types work directly with copyExternalImageToTexture
-    if (source instanceof HTMLCanvasElement || source instanceof OffscreenCanvas) {
-      return source;
-    }
-
-    if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) {
-      return source;
-    }
-
-    // HTMLImageElement, HTMLVideoElement, ImageData — draw to scratch canvas
-    const canvas = getScratchCanvas();
-    canvas.width = 256;
-    canvas.height = 256;
-    const ctx = canvas.getContext('2d')!;
-
-    if (source instanceof ImageData) {
-      ctx.putImageData(source, 0, 0);
-    } else {
-      // HTMLImageElement or HTMLVideoElement
-      ctx.drawImage(source, 0, 0, 256, 256);
-    }
-
-    return canvas;
-  }
-
-  /** Parse raw model output into clean result */
-  function parseOutput(
-    handflag: Float32Array,
-    handedness: Float32Array,
-    landmarks: Float32Array,
-  ): HandposeResult | null {
-    const score = handflag[0]!;
-
-    if (score < scoreThreshold) {
-      return null;
-    }
-
-    // handedness: 0 = left, 1 = right (sigmoid output)
-    const isRight = handedness[0]! > 0.5;
-
-    // landmarks: 63 values = 21 points × 3 (x, y, z)
-    const points: Landmark[] = [];
-    for (let i = 0; i < 21; i++) {
-      points.push({
-        x: landmarks[i * 3]!,
-        y: landmarks[i * 3 + 1]!,
-        z: landmarks[i * 3 + 2]!,
-      });
-    }
-
-    return {
-      score,
-      handedness: isRight ? 'right' : 'left',
-      landmarks: points,
-      keypoints: toKeypoints(points),
-    };
-  }
-
-  async function detect(source: HandposeInput): Promise<HandposeResult | null> {
-    const input = await toModelInput(source);
-    const output = await model.runFromCanvas(input);
-    const result = parseOutput(output.handflag, output.handedness, output.landmarks);
-    if (!result) {
-      if (hadHand) { smoother.reset(); hadHand = false; }
-      return null;
-    }
-    hadHand = true;
-    result.landmarks = smoother.apply(result.landmarks);
-    result.keypoints = toKeypoints(result.landmarks);
-    return result;
-  }
-
-  async function detectPipelined(source: HandposeInput): Promise<HandposeResult | null> {
-    const input = await toModelInput(source);
-    const output = await model.runFromCanvasPipelined(input);
-    if (!output) return null;
-    const result = parseOutput(output.handflag, output.handedness, output.landmarks);
-    if (!result) {
-      if (hadHand) { smoother.reset(); hadHand = false; }
-      return null;
-    }
-    hadHand = true;
-    result.landmarks = smoother.apply(result.landmarks);
-    result.keypoints = toKeypoints(result.landmarks);
-    return result;
-  }
-
-  async function flushPipelined(): Promise<HandposeResult | null> {
-    const output = await model.flushPipelined();
-    if (!output) return null;
-    const result = parseOutput(output.handflag, output.handedness, output.landmarks);
-    if (!result) {
-      if (hadHand) { smoother.reset(); hadHand = false; }
-      return null;
-    }
-    hadHand = true;
-    result.landmarks = smoother.apply(result.landmarks);
-    result.keypoints = toKeypoints(result.landmarks);
-    return result;
-  }
-
-  function dispose(): void {
-    model.device.destroy();
-    scratchCanvas = null;
-  }
-
-  async function benchmarkDiagnostic(source: HandposeInput) {
-    const input = await toModelInput(source);
-    return model.benchmarkDiagnostic(input);
-  }
-
-  async function debugLayerOutputs(source: HandposeInput) {
-    const input = await toModelInput(source);
-    return model.debugLayerOutputs(input);
-  }
-
-  return { detect, detectPipelined, flushPipelined, dispose, benchmarkDiagnostic, debugLayerOutputs };
-}
-
-/**
- * Create a full-frame handpose detector with palm detection + landmarks.
- *
- * Pipeline:
- * 1. Run palm detection on the full camera frame (192x192)
- * 2. For each detected palm, compute crop ROI
- * 3. Crop + rotate + resize to 256x256
- * 4. Run hand landmark model on the cropped image
- * 5. Project landmarks back to original image coordinates
- *
- * @example
- * ```typescript
- * const detector = await createFullHandpose({
- *   palmWeightsUrl: '/palm_detection_weights',
- * })
- * const hands = await detector.detect(videoElement)
- * for (const hand of hands) {
- *   console.log(hand.landmarks) // in original image coords
- * }
- * ```
- */
-export async function createFullHandpose(options: HandposeOptions = {}): Promise<FullHandpose> {
-  const {
-    weightsUrl,
-    palmWeightsUrl,
     scoreThreshold = 0.5,
     palmScoreThreshold = 0.5,
     maxHands = 3,
@@ -250,26 +39,20 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
     throw new Error('micro-handpose requires WebGPU. Check browser support at https://webgpureport.org');
   }
 
-  // Load both weight sets in parallel
-  const baseUrl = weightsUrl ?? DEFAULT_WEIGHTS_BASE;
-  const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
-
-  if (!palmWeightsUrl) {
-    throw new Error('palmWeightsUrl is required for createFullHandpose');
-  }
-  const palmBase = palmWeightsUrl.endsWith('/') ? palmWeightsUrl : `${palmWeightsUrl}/`;
+  // Load all weights in parallel from CDN (or custom URL)
+  const base = (weightsUrl ?? DEFAULT_WEIGHTS_BASE).replace(/\/$/, '') + '/';
 
   const [landmarkMetaRes, landmarkBinRes, palmMetaRes, palmBinRes] = await Promise.all([
     fetch(`${base}weights_f16.json`),
     fetch(`${base}weights_f16.bin`),
-    fetch(`${palmBase}palm_detection_weights.json`),
-    fetch(`${palmBase}palm_detection_weights.bin`),
+    fetch(`${base}palm_detection_weights.json`),
+    fetch(`${base}palm_detection_weights.bin`),
   ]);
 
-  if (!landmarkMetaRes.ok) throw new Error(`Failed to fetch landmark weights metadata: ${landmarkMetaRes.status}`);
-  if (!landmarkBinRes.ok) throw new Error(`Failed to fetch landmark weights binary: ${landmarkBinRes.status}`);
-  if (!palmMetaRes.ok) throw new Error(`Failed to fetch palm weights metadata: ${palmMetaRes.status}`);
-  if (!palmBinRes.ok) throw new Error(`Failed to fetch palm weights binary: ${palmBinRes.status}`);
+  if (!landmarkMetaRes.ok) throw new Error(`Failed to fetch landmark weights: ${landmarkMetaRes.status}`);
+  if (!landmarkBinRes.ok) throw new Error(`Failed to fetch landmark weights: ${landmarkBinRes.status}`);
+  if (!palmMetaRes.ok) throw new Error(`Failed to fetch palm detection weights: ${palmMetaRes.status}`);
+  if (!palmBinRes.ok) throw new Error(`Failed to fetch palm detection weights: ${palmBinRes.status}`);
 
   const [landmarkMeta, landmarkBuf, palmMeta, palmBuf] = await Promise.all([
     landmarkMetaRes.json() as Promise<WeightsMetadata>,
@@ -281,10 +64,9 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
   const landmarkWeights = loadWeightsFromBuffer(landmarkMeta, landmarkBuf);
   const palmWeights = loadWeightsFromBuffer(palmMeta, palmBuf);
 
-  // Compile both models (with f16 self-test for landmark model)
+  // Compile landmark model (with f16 self-test)
   let landmarkModel = await compileModel(landmarkWeights, { forceF32 });
 
-  // Self-test: some platforms (macOS Chrome) pass f16 validation but produce zeros.
   if (!forceF32) {
     const testCanvas = new OffscreenCanvas(256, 256);
     const testCtx = testCanvas.getContext('2d')!;
@@ -302,21 +84,21 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
     }
   }
 
-  // Compile palm model (uses its own device for now; could share in future)
+  // Compile palm detection model
   const palmModel = await compilePalmModel(palmWeights);
   const palmDetector = createPalmDetector(palmModel, {
     scoreThreshold: palmScoreThreshold,
     maxHands,
   });
 
-  // Per-hand smoothers (indexed by detection order, reset when hands are lost)
+  // Per-hand one euro filters for temporal smoothing
   const smoothers: LandmarkSmoother[] = [];
   for (let i = 0; i < maxHands; i++) {
     smoothers.push(createLandmarkSmoother());
   }
   let prevHandCount = 0;
 
-  // Scratch canvases for input conversion and cropping
+  // Scratch canvases
   let palmScratchCanvas: OffscreenCanvas | null = null;
   let cropScratchCanvas: OffscreenCanvas | null = null;
 
@@ -330,10 +112,9 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
     return cropScratchCanvas;
   }
 
-  /** Convert input to a form suitable for palm detection (192x192) */
+  /** Convert input to 192x192 for palm detection */
   async function toPalmInput(source: HandposeInput): Promise<HTMLCanvasElement | OffscreenCanvas | ImageBitmap> {
     if (source instanceof HTMLCanvasElement || source instanceof OffscreenCanvas) {
-      // Resize to 192x192 if needed
       if (source.width === 192 && source.height === 192) return source;
       const canvas = getPalmScratchCanvas();
       canvas.width = 192;
@@ -356,7 +137,6 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
     canvas.height = 192;
     const ctx = canvas.getContext('2d')!;
     if (source instanceof ImageData) {
-      // Create temp canvas at source size, then resize
       const tmp = new OffscreenCanvas(source.width, source.height);
       const tmpCtx = tmp.getContext('2d')!;
       tmpCtx.putImageData(source, 0, 0);
@@ -379,53 +159,23 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
     canvas.height = 256;
     const ctx = canvas.getContext('2d')!;
 
-    // Apply the inverse affine transform:
-    // We want to sample from the source at positions determined by the ROI
-    const cos = Math.cos(-roi.rotation);
-    const sin = Math.sin(-roi.rotation);
-
     ctx.clearRect(0, 0, 256, 256);
     ctx.save();
-
-    // Map from 256x256 crop space to source space
-    // 1. Translate crop center to origin
     ctx.translate(128, 128);
-    // 2. Scale from crop pixels to source pixels
     ctx.scale(roi.width * sourceWidth / 256, roi.height * sourceHeight / 256);
-    // 3. Rotate
     ctx.rotate(-roi.rotation);
-    // 4. Translate back to crop origin, then translate to source ROI center
     ctx.translate(-128, -128);
 
-    // Now draw the source image centered at the ROI
-    // The transform above maps crop space to a window in source space
-    // We need to draw the source such that the ROI center maps to crop center
     const srcCenterX = roi.centerX * sourceWidth;
     const srcCenterY = roi.centerY * sourceHeight;
-
-    // Undo the transform to figure out source drawing position
-    // Actually, let's use setTransform directly for precision
     ctx.restore();
 
-    // Direct approach: set transform matrix, then draw source
-    // Canvas 2D transform: [a, b, c, d, e, f]
-    // Maps (srcX, srcY) → (a*srcX + c*srcY + e, b*srcX + d*srcY + f)
-    //
-    // The ROI dimensions are in normalized [0,1] space from palm detection (192x192 square).
-    // For non-square source images, we need uniform scaling to avoid distortion.
-    // Use the smaller source dimension as reference to ensure the ROI maps to a square crop.
     const refDim = Math.min(sourceWidth, sourceHeight);
     const scaleX = 256 / (roi.width * refDim);
     const scaleY = 256 / (roi.height * refDim);
 
     const cosR = Math.cos(roi.rotation);
     const sinR = Math.sin(roi.rotation);
-
-    // Transform from source pixels to crop pixels:
-    // 1. Translate so ROI center is at origin: x' = x - srcCenterX
-    // 2. Rotate by -rotation: x'' = x'*cos + y'*sin
-    // 3. Scale to crop size: x''' = x'' * scaleX
-    // 4. Translate to crop center: x'''' = x''' + 128
 
     const a = cosR * scaleX;
     const b = sinR * scaleX;
@@ -468,22 +218,28 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
     return [256, 256];
   }
 
-  async function detect(source: HandposeInput): Promise<FullHandposeResult[]> {
-    // Step 1: Palm detection
+  async function detect(source: HandposeInput): Promise<HandposeResult[]> {
+    // Step 1: Palm detection on full frame
     const palmInput = await toPalmInput(source);
     const rois = await palmDetector.detect(palmInput);
 
-    if (rois.length === 0) return [];
+    if (rois.length === 0) {
+      // Reset all smoothers when no hands detected
+      if (prevHandCount > 0) {
+        for (let i = 0; i < prevHandCount && i < smoothers.length; i++) {
+          smoothers[i]!.reset();
+        }
+      }
+      prevHandCount = 0;
+      return [];
+    }
 
     const [srcWidth, srcHeight] = getSourceDimensions(source);
-    const results: FullHandposeResult[] = [];
+    const results: HandposeResult[] = [];
 
     // Step 2: For each detected palm, crop and run landmark model
     for (const roi of rois) {
-      // Crop hand region to 256x256
       const croppedCanvas = cropHandRegion(source, roi, srcWidth, srcHeight);
-
-      // Run landmark model
       const output = await landmarkModel.runFromCanvas(croppedCanvas);
       const handScore = output.handflag[0]!;
 
@@ -501,21 +257,17 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
         });
       }
 
-      // Project landmarks back to original image coordinates.
-      // The crop is square in pixel space (using refDim = min(srcW, srcH)),
-      // but the ROI coords are in squashed [0,1] space from palm detection.
-      // For non-square sources, we need to adjust the ROI extents to reflect
-      // the actual normalized span of the square pixel crop.
+      // Project back to original image coordinates
       const refDim = Math.min(srcWidth, srcHeight);
-      const cropPixelSize = roi.width * refDim; // square crop side in pixels
+      const cropPixelSize = roi.width * refDim;
       const projROI = {
         ...roi,
-        width: cropPixelSize / srcWidth,   // actual X span in normalized coords
-        height: cropPixelSize / srcHeight,  // actual Y span in normalized coords
+        width: cropPixelSize / srcWidth,
+        height: cropPixelSize / srcHeight,
       };
       const originalLandmarks = projectLandmarksToOriginal(cropLandmarks, projROI);
 
-      // Apply one euro filter for temporal smoothing (reduces jitter)
+      // Apply one euro filter for temporal smoothing
       const handIdx = results.length;
       const smoothedLandmarks = handIdx < smoothers.length
         ? smoothers[handIdx]!.apply(originalLandmarks)
@@ -526,7 +278,6 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
         handedness: isRight ? 'right' : 'left',
         landmarks: smoothedLandmarks,
         keypoints: toKeypoints(smoothedLandmarks),
-        palmScore: 0,
       });
     }
 

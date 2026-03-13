@@ -3,8 +3,8 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.1.4",
-  "description": "Tiny, fast hand landmark detection. WebGPU-powered, ~2x faster than MediaPipe, zero dependencies.",
+  "version": "0.2.0",
+  "description": "WebGPU-powered hand tracking. Faster than MediaPipe, zero dependencies.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
