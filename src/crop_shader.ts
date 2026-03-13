@@ -57,7 +57,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 
   let sw=i32(params.src_width); let sh=i32(params.src_height);
 
-  // Clamp to bounds (or return 0 for out-of-bounds)
+  // Zero for out-of-bounds (matches MediaPipe's kZero border mode)
   var p00=vec4<f32>(0.0); var p01=vec4<f32>(0.0);
   var p10=vec4<f32>(0.0); var p11=vec4<f32>(0.0);
 

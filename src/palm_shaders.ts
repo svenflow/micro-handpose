@@ -240,7 +240,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 
 /**
  * Canvas input shader for palm detection (192x192).
- * Reads from texture, writes CHW float32 buffer normalized to [0,1].
+ * Reads from a pre-resized 192x192 texture, writes CHW float32 buffer normalized to [0,1].
  */
 export const PALM_CANVAS_INPUT_SHADER = S(`
 struct CanvasParams { in_width:u32, in_height:u32, out_size:u32, }
@@ -256,5 +256,87 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   output[0u*out_stride+y*params.out_size+x]=pixel.r;
   output[1u*out_stride+y*params.out_size+x]=pixel.g;
   output[2u*out_stride+y*params.out_size+x]=pixel.b;
+}
+`);
+
+/**
+ * Letterbox resize shader matching MediaPipe's ImageToTensorCalculator exactly.
+ *
+ * Takes a full-resolution source texture and produces a 192x192 CHW float buffer
+ * with aspect-ratio-preserving letterboxing (zero-padded).
+ *
+ * Uses MediaPipe's exact coordinate mapping:
+ *   normalized = (dst_pixel + 0.5) / dst_size
+ *   src_coord = normalized * src_size_in_letterbox - offset
+ *   Then bilinear interpolation with half-pixel centers.
+ *
+ * Params uniform (8 x u32, but some treated as f32):
+ *   src_w, src_h: source texture dimensions
+ *   dst_size: output size (192)
+ *   _pad: unused
+ *   scale_x (f32): 1.0 / (scaled_w / src_w) = src_w / scaled_w
+ *   scale_y (f32): 1.0 / (scaled_h / src_h) = src_h / scaled_h
+ *   offset_x (f32): letterbox offset in dst pixels
+ *   offset_y (f32): letterbox offset in dst pixels
+ */
+export const PALM_LETTERBOX_RESIZE_SHADER = S(`
+struct LBParams {
+  src_w:u32, src_h:u32, dst_size:u32, _pad:u32,
+  scale_x:f32, scale_y:f32, offset_x:f32, offset_y:f32,
+}
+@group(0)@binding(0) var input_tex:texture_2d<f32>;
+@group(0)@binding(1) var<storage,read_write> output:array<f32>;
+@group(0)@binding(2) var<uniform> params:LBParams;
+@compute @workgroup_size(16,16,1)
+fn main(@builtin(global_invocation_id) gid:vec3<u32>){
+  let dx=gid.x; let dy=gid.y;
+  if(dx>=params.dst_size||dy>=params.dst_size){return;}
+
+  let out_stride=params.dst_size*params.dst_size;
+
+  // Map dst pixel to src pixel using MediaPipe's convention:
+  // dst pixel center at (dx + 0.5), offset by letterbox padding, then scale to src
+  let src_x = (f32(dx) - params.offset_x + 0.5) * params.scale_x - 0.5;
+  let src_y = (f32(dy) - params.offset_y + 0.5) * params.scale_y - 0.5;
+
+  // Check if we're in the letterbox padding region
+  let in_region = src_x >= -0.5 && src_x < f32(params.src_w) - 0.5
+               && src_y >= -0.5 && src_y < f32(params.src_h) - 0.5;
+
+  if(!in_region){
+    // Zero padding (letterbox)
+    output[0u*out_stride+dy*params.dst_size+dx]=0.0;
+    output[1u*out_stride+dy*params.dst_size+dx]=0.0;
+    output[2u*out_stride+dy*params.dst_size+dx]=0.0;
+    return;
+  }
+
+  // Bilinear interpolation matching GL_LINEAR
+  let x0=i32(floor(src_x));
+  let y0=i32(floor(src_y));
+  let x1=x0+1;
+  let y1=y0+1;
+  let fx=src_x-f32(x0);
+  let fy=src_y-f32(y0);
+
+  let sw=i32(params.src_w);
+  let sh=i32(params.src_h);
+
+  // Clamp coordinates to valid range
+  let cx0=clamp(x0,0,sw-1);
+  let cx1=clamp(x1,0,sw-1);
+  let cy0=clamp(y0,0,sh-1);
+  let cy1=clamp(y1,0,sh-1);
+
+  let p00=textureLoad(input_tex,vec2<u32>(u32(cx0),u32(cy0)),0);
+  let p10=textureLoad(input_tex,vec2<u32>(u32(cx1),u32(cy0)),0);
+  let p01=textureLoad(input_tex,vec2<u32>(u32(cx0),u32(cy1)),0);
+  let p11=textureLoad(input_tex,vec2<u32>(u32(cx1),u32(cy1)),0);
+
+  let pixel=p00*(1.0-fx)*(1.0-fy) + p10*fx*(1.0-fy) + p01*(1.0-fx)*fy + p11*fx*fy;
+
+  output[0u*out_stride+dy*params.dst_size+dx]=pixel.r;
+  output[1u*out_stride+dy*params.dst_size+dx]=pixel.g;
+  output[2u*out_stride+dy*params.dst_size+dx]=pixel.b;
 }
 `);

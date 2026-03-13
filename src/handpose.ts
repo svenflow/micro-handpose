@@ -291,9 +291,12 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   async function detect(source: HandposeInput): Promise<HandposeResult[]> {
     const [srcWidth, srcHeight] = getSourceDimensions(source);
 
-    // Step 1: Palm detection on letterboxed input
-    const palmInput = toPalmInputLetterbox(source, srcWidth, srcHeight);
-    const rawDetections = await palmDetector.detectRaw(palmInput);
+    // Step 1: Palm detection with GPU letterbox resize (matches MediaPipe's bilinear exactly)
+    const { detections: rawDetections, lbPadX: gpuLbPadX, lbPadY: gpuLbPadY } =
+      await palmDetector.detectRawWithResize(source, srcWidth, srcHeight);
+    // Update letterbox padding for removeLetterbox
+    lbPadX = gpuLbPadX;
+    lbPadY = gpuLbPadY;
 
     if (rawDetections.length === 0) {
       if (prevHandCount > 0) {

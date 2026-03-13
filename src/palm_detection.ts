@@ -255,6 +255,8 @@ export interface PalmDetector {
   detect: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<HandROI[]>;
   /** Run palm detection and return raw detections (before ROI conversion) */
   detectRaw: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<PalmDetection[]>;
+  /** Run palm detection with GPU letterbox resize (matches MediaPipe's bilinear exactly) */
+  detectRawWithResize: (source: any, srcW: number, srcH: number) => Promise<{ detections: PalmDetection[]; lbPadX: number; lbPadY: number }>;
   /** Get the compiled palm model (for resource sharing) */
   model: CompiledPalmModel;
 }
@@ -295,7 +297,13 @@ export function createPalmDetector(
     return nms(detections, nmsThreshold).slice(0, maxHands);
   }
 
-  return { detect, detectRaw, model };
+  async function detectRawWithResize(source: any, srcW: number, srcH: number): Promise<{ detections: PalmDetection[]; lbPadX: number; lbPadY: number }> {
+    const { output, lbPadX, lbPadY } = await model.runWithResize(source, srcW, srcH);
+    const detections = decodeDetections(output, scoreThreshold);
+    return { detections: nms(detections, nmsThreshold).slice(0, maxHands), lbPadX, lbPadY };
+  }
+
+  return { detect, detectRaw, detectRawWithResize, model };
 }
 
 /**

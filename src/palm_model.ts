@@ -28,6 +28,7 @@ import {
   PALM_UPSAMPLE_2X_ADD_SHADER,
   PALM_CONV1X1_PRELU_SHADER,
   PALM_CANVAS_INPUT_SHADER,
+  PALM_LETTERBOX_RESIZE_SHADER,
 } from './palm_shaders.js';
 import type { Tensor, WeightsMetadata } from './model.js';
 
@@ -39,6 +40,8 @@ export interface PalmDetectionOutput {
 export interface CompiledPalmModel {
   device: GPUDevice;
   run: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<PalmDetectionOutput>;
+  /** Run with GPU-based letterbox resize matching MediaPipe's bilinear interpolation exactly */
+  runWithResize: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap | HTMLVideoElement | HTMLImageElement, srcW: number, srcH: number) => Promise<{ output: PalmDetectionOutput; lbPadX: number; lbPadY: number }>;
   debugRun: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<any>;
 }
 
@@ -196,6 +199,7 @@ export async function compilePalmModel(
   const conv1x1PreluMod = device.createShaderModule({ code: PALM_CONV1X1_PRELU_SHADER });
   const upsampleAddMod = device.createShaderModule({ code: PALM_UPSAMPLE_2X_ADD_SHADER });
   const canvasInputMod = device.createShaderModule({ code: PALM_CANVAS_INPUT_SHADER });
+  const letterboxResizeMod = device.createShaderModule({ code: PALM_LETTERBOX_RESIZE_SHADER });
 
   // ============ Create Layouts ============
   const inputConvLayout = makeLayout(['r', 'r', 'r', 'r', 's', 'u']);  // input, weight, bias, alpha, output, params
@@ -205,6 +209,7 @@ export async function compilePalmModel(
   const conv1x1PreluLayout = makeLayout(['r', 'r', 'r', 'r', 's', 'u']); // input, weight, bias, alpha, output, params
   const upsampleAddLayout = makeLayout(['r', 'r', 's', 'u']);          // input, skip, output, params
   const canvasInputLayout = makeLayout(['t', 's', 'u']);
+  const letterboxResizeLayout = makeLayout(['t', 's', 'u']);
 
   // ============ Create Pipelines ============
   function makePipe(layout: GPUBindGroupLayout, mod: GPUShaderModule): GPUComputePipeline {
@@ -221,6 +226,7 @@ export async function compilePalmModel(
   const conv1x1PreluPipe = makePipe(conv1x1PreluLayout, conv1x1PreluMod);
   const upsampleAddPipe = makePipe(upsampleAddLayout, upsampleAddMod);
   const canvasInputPipe = makePipe(canvasInputLayout, canvasInputMod);
+  const letterboxResizePipe = makePipe(letterboxResizeLayout, letterboxResizeMod);
 
   // ============ Load and upload weights ============
 
@@ -577,6 +583,28 @@ export async function compilePalmModel(
     ],
   });
 
+  // Letterbox resize: dynamic texture + uniform for full-res → 192x192
+  // These are re-created when source dimensions change
+  let lbSrcTexture: GPUTexture | null = null;
+  let lbSrcW = 0;
+  let lbSrcH = 0;
+  const lbParamsUniform = makeBuf(32, UC); // 8 x u32/f32
+
+  function ensureLetterboxTexture(srcW: number, srcH: number): GPUTexture {
+    if (lbSrcTexture && lbSrcW === srcW && lbSrcH === srcH) {
+      return lbSrcTexture;
+    }
+    if (lbSrcTexture) lbSrcTexture.destroy();
+    lbSrcTexture = device.createTexture({
+      size: [srcW, srcH, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    lbSrcW = srcW;
+    lbSrcH = srcH;
+    return lbSrcTexture;
+  }
+
   // Pre-create initial conv bind group
   const initConvBG = device.createBindGroup({
     layout: inputConvLayout,
@@ -694,25 +722,8 @@ export async function compilePalmModel(
     pass.end();
   }
 
-  async function run(source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap): Promise<PalmDetectionOutput> {
-    // Upload canvas to texture
-    device.queue.copyExternalImageToTexture(
-      { source },
-      { texture: canvasInputTexture },
-      [192, 192],
-    );
-
-    const encoder = device.createCommandEncoder();
-
-    // Canvas → CHW (using pre-created bind group)
-    {
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(canvasInputPipe);
-      pass.setBindGroup(0, canvasInputBG);
-      pass.dispatchWorkgroups(ceil(192, 16), ceil(192, 16), 1);
-      pass.end();
-    }
-
+  /** Encode backbone + FPN + SSD heads + readback. Assumes inputBuf already has 192x192 CHW data. */
+  async function encodeAndReadback(encoder: GPUCommandEncoder): Promise<PalmDetectionOutput> {
     // Initial conv 5x5 stride 2 + PReLU: 192x192x3 → 96x96x32 (pre-created bind group)
     {
       const pass = encoder.beginComputePass();
@@ -933,6 +944,99 @@ export async function compilePalmModel(
     }
 
     return { scores, regressors };
+  }
+
+  /** Legacy: accepts pre-resized 192x192 canvas (uses browser's canvas interpolation) */
+  async function run(source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap): Promise<PalmDetectionOutput> {
+    device.queue.copyExternalImageToTexture(
+      { source },
+      { texture: canvasInputTexture },
+      [192, 192],
+    );
+    const encoder = device.createCommandEncoder();
+    // Canvas texture → CHW buffer
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(canvasInputPipe);
+      pass.setBindGroup(0, canvasInputBG);
+      pass.dispatchWorkgroups(ceil(192, 16), ceil(192, 16), 1);
+      pass.end();
+    }
+    return encodeAndReadback(encoder);
+  }
+
+  /** GPU letterbox resize matching MediaPipe's exact bilinear interpolation */
+  async function runWithResize(
+    source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap | HTMLVideoElement | HTMLImageElement,
+    srcW: number, srcH: number,
+  ): Promise<{ output: PalmDetectionOutput; lbPadX: number; lbPadY: number }> {
+    // Compute letterbox parameters matching MediaPipe
+    const scale = Math.min(192 / srcW, 192 / srcH);
+    const scaledW = Math.round(srcW * scale);
+    const scaledH = Math.round(srcH * scale);
+    const offsetX = (192 - scaledW) / 2;
+    const offsetY = (192 - scaledH) / 2;
+
+    const lbPadX = offsetX / 192;
+    const lbPadY = offsetY / 192;
+
+    // Ensure GPU texture matches source dimensions
+    const tex = ensureLetterboxTexture(srcW, srcH);
+
+    // Upload full-res source to GPU texture
+    // For HTMLVideoElement/HTMLImageElement, we need a canvas intermediary
+    let uploadSource: HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
+    if (source instanceof HTMLVideoElement || source instanceof HTMLImageElement) {
+      const tmpCanvas = new OffscreenCanvas(srcW, srcH);
+      const tmpCtx = tmpCanvas.getContext('2d')!;
+      tmpCtx.drawImage(source, 0, 0);
+      uploadSource = tmpCanvas;
+    } else {
+      uploadSource = source;
+    }
+    device.queue.copyExternalImageToTexture(
+      { source: uploadSource },
+      { texture: tex },
+      [srcW, srcH],
+    );
+
+    // Write letterbox params uniform
+    // scale_x = srcW / scaledW (maps dst pixel in letterbox region → src pixel)
+    // scale_y = srcH / scaledH
+    const paramsData = new ArrayBuffer(32);
+    const u32View = new Uint32Array(paramsData);
+    const f32View = new Float32Array(paramsData);
+    u32View[0] = srcW;
+    u32View[1] = srcH;
+    u32View[2] = 192;
+    u32View[3] = 0;
+    f32View[4] = srcW / scaledW;
+    f32View[5] = srcH / scaledH;
+    f32View[6] = offsetX;
+    f32View[7] = offsetY;
+    device.queue.writeBuffer(lbParamsUniform, 0, paramsData);
+
+    // Create bind group for letterbox resize (texture changes when src dims change)
+    const lbBG = device.createBindGroup({
+      layout: letterboxResizeLayout,
+      entries: [
+        { binding: 0, resource: tex.createView() },
+        { binding: 1, resource: { buffer: inputBuf } },
+        { binding: 2, resource: { buffer: lbParamsUniform } },
+      ],
+    });
+
+    const encoder = device.createCommandEncoder();
+    // GPU letterbox resize → 192x192 CHW buffer
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(letterboxResizePipe);
+      pass.setBindGroup(0, lbBG);
+      pass.dispatchWorkgroups(ceil(192, 16), ceil(192, 16), 1);
+      pass.end();
+    }
+    const output = await encodeAndReadback(encoder);
+    return { output, lbPadX, lbPadY };
   }
 
   async function debugReadBuffer(buf: GPUBuffer, numFloats: number): Promise<Float32Array> {
@@ -1223,5 +1327,5 @@ export async function compilePalmModel(
     return result;
   }
 
-  return { device, run, debugRun };
+  return { device, run, runWithResize, debugRun };
 }
