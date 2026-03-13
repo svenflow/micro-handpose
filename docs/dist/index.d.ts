@@ -178,6 +178,7 @@ interface PalmDetectionOutput {
 interface CompiledPalmModel {
     device: GPUDevice;
     run: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<PalmDetectionOutput>;
+    debugRun: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<any>;
 }
 declare function compilePalmModel(weights: Map<string, Tensor>, existingDevice?: GPUDevice): Promise<CompiledPalmModel>;
 

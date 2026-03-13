@@ -175,6 +175,17 @@
         const pCtx = palmCanvas.getContext('2d');
         pCtx.drawImage(img, 0, 0, 192, 192);
 
+        // Debug: check intermediate values
+        addLog('Running debug check...');
+        const debugInfo = await palmModel.debugRun(palmCanvas);
+        addLog(`Input buffer: min=${debugInfo.input.min.toFixed(4)}, max=${debugInfo.input.max.toFixed(4)}, mean=${debugInfo.input.mean.toFixed(4)}, nonZero=${debugInfo.input.nonZero}/1000`);
+        addLog(`Input sample: [${debugInfo.inputSample.map(v=>v.toFixed(4)).join(', ')}]`);
+        addLog(`Init conv output: min=${debugInfo.initConv.min.toFixed(4)}, max=${debugInfo.initConv.max.toFixed(4)}, mean=${debugInfo.initConv.mean.toFixed(4)}, nonZero=${debugInfo.initConv.nonZero}/1000`);
+        addLog(`Conv sample: [${debugInfo.convSample.map(v=>v.toFixed(4)).join(', ')}]`);
+        addLog(`Weight sample: [${debugInfo.weightSample.map(v=>v.toFixed(6)).join(', ')}]`);
+        addLog(`Bias sample: [${debugInfo.biasSample.map(v=>v.toFixed(6)).join(', ')}]`);
+        addLog(`Alpha sample: [${debugInfo.alphaSample.map(v=>v.toFixed(6)).join(', ')}]`);
+
         // Run palm detection
         addLog('Running palm detection...');
         const t0 = performance.now();

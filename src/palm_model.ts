@@ -37,6 +37,7 @@ export interface PalmDetectionOutput {
 export interface CompiledPalmModel {
   device: GPUDevice;
   run: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<PalmDetectionOutput>;
+  debugRun: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<any>;
 }
 
 // Weight key helper: find key by substring
@@ -120,8 +121,8 @@ export async function compilePalmModel(
       }),
     });
   }
-  const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
-  const SO = GPUBufferUsage.STORAGE;
+  const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const SO = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC;
   const SOC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC;
   const UC = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
@@ -1131,5 +1132,99 @@ export async function compilePalmModel(
     return { scores, regressors };
   }
 
-  return { device, run };
+  async function debugReadBuffer(buf: GPUBuffer, numFloats: number): Promise<Float32Array> {
+    const readBuf = device.createBuffer({
+      size: numFloats * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(buf, 0, readBuf, 0, numFloats * 4);
+    device.queue.submit([enc.finish()]);
+    await readBuf.mapAsync(GPUMapMode.READ);
+    const data = new Float32Array(readBuf.getMappedRange()).slice();
+    readBuf.unmap();
+    readBuf.destroy();
+    return data;
+  }
+
+  async function debugRun(source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap): Promise<any> {
+    // Run the model but also read back intermediate values for debugging
+    device.queue.copyExternalImageToTexture(
+      { source },
+      { texture: canvasInputTexture },
+      [192, 192],
+    );
+
+    // Step 1: Canvas → CHW
+    const canvasUniform = makeUniform(new Uint32Array([192, 192, 192]));
+    const canvasBG = device.createBindGroup({
+      layout: canvasInputLayout,
+      entries: [
+        { binding: 0, resource: canvasInputTexture.createView() },
+        { binding: 1, resource: { buffer: inputBuf } },
+        { binding: 2, resource: { buffer: canvasUniform } },
+      ],
+    });
+
+    const enc1 = device.createCommandEncoder();
+    const p1 = enc1.beginComputePass();
+    p1.setPipeline(canvasInputPipe);
+    p1.setBindGroup(0, canvasBG);
+    p1.dispatchWorkgroups(ceil(192, 16), ceil(192, 16), 1);
+    p1.end();
+    device.queue.submit([enc1.finish()]);
+
+    const inputData = await debugReadBuffer(inputBuf, 192 * 192 * 3);
+    const inputStats = {
+      min: Math.min(...inputData.slice(0, 1000)),
+      max: Math.max(...inputData.slice(0, 1000)),
+      mean: inputData.slice(0, 1000).reduce((a, b) => a + b, 0) / 1000,
+      nonZero: inputData.slice(0, 1000).filter(v => v !== 0).length,
+    };
+
+    // Step 2: Initial conv
+    const enc2 = device.createCommandEncoder();
+    const bg2 = device.createBindGroup({
+      layout: inputConvLayout,
+      entries: [
+        { binding: 0, resource: { buffer: inputBuf } },
+        { binding: 1, resource: { buffer: initConvWeightBuf } },
+        { binding: 2, resource: { buffer: initConvBiasBuf } },
+        { binding: 3, resource: { buffer: initConvAlphaBuf } },
+        { binding: 4, resource: { buffer: actBufA } },
+        { binding: 5, resource: { buffer: inputConvUniform } },
+      ],
+    });
+    const p2 = enc2.beginComputePass();
+    p2.setPipeline(inputConvPipe);
+    p2.setBindGroup(0, bg2);
+    p2.dispatchWorkgroups(ceil(96, 8), ceil(96, 8), 32);
+    p2.end();
+    device.queue.submit([enc2.finish()]);
+
+    const convData = await debugReadBuffer(actBufA, 96 * 96 * 32);
+    const convStats = {
+      min: Math.min(...convData.slice(0, 1000)),
+      max: Math.max(...convData.slice(0, 1000)),
+      mean: convData.slice(0, 1000).reduce((a, b) => a + b, 0) / 1000,
+      nonZero: convData.slice(0, 1000).filter(v => v !== 0).length,
+    };
+
+    // Also check weights
+    const weightData = await debugReadBuffer(initConvWeightBuf, 100);
+    const biasData = await debugReadBuffer(initConvBiasBuf, 32);
+    const alphaData = await debugReadBuffer(initConvAlphaBuf, 32);
+
+    return {
+      input: inputStats,
+      inputSample: Array.from(inputData.slice(0, 20)),
+      initConv: convStats,
+      convSample: Array.from(convData.slice(0, 20)),
+      weightSample: Array.from(weightData.slice(0, 20)),
+      biasSample: Array.from(biasData.slice(0, 10)),
+      alphaSample: Array.from(alphaData.slice(0, 10)),
+    };
+  }
+
+  return { device, run, debugRun };
 }
