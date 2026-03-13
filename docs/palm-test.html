@@ -134,7 +134,7 @@
         setStatus('palm-status', 'Loading model...', 'working');
         addLog('Loading palm detection model...');
 
-        const module = await import('./dist/index.js?v=5');
+        const module = await import('./dist/index.js?v=6');
         const { compilePalmModel } = module;
 
         // Inline weight loader (same logic as loadWeightsFromBuffer in model.ts)
@@ -176,15 +176,12 @@
         pCtx.drawImage(img, 0, 0, 192, 192);
 
         // Debug: check intermediate values
-        addLog('Running debug check...');
+        addLog('Running layer-by-layer debug...');
         const debugInfo = await palmModel.debugRun(palmCanvas);
-        addLog(`Input buffer: min=${debugInfo.input.min.toFixed(4)}, max=${debugInfo.input.max.toFixed(4)}, mean=${debugInfo.input.mean.toFixed(4)}, nonZero=${debugInfo.input.nonZero}/1000`);
-        addLog(`Input sample: [${debugInfo.inputSample.map(v=>v.toFixed(4)).join(', ')}]`);
-        addLog(`Init conv output: min=${debugInfo.initConv.min.toFixed(4)}, max=${debugInfo.initConv.max.toFixed(4)}, mean=${debugInfo.initConv.mean.toFixed(4)}, nonZero=${debugInfo.initConv.nonZero}/1000`);
-        addLog(`Conv sample: [${debugInfo.convSample.map(v=>v.toFixed(4)).join(', ')}]`);
-        addLog(`Weight sample: [${debugInfo.weightSample.map(v=>v.toFixed(6)).join(', ')}]`);
-        addLog(`Bias sample: [${debugInfo.biasSample.map(v=>v.toFixed(6)).join(', ')}]`);
-        addLog(`Alpha sample: [${debugInfo.alphaSample.map(v=>v.toFixed(6)).join(', ')}]`);
+        for (const [key, val] of Object.entries(debugInfo)) {
+          const v = val;
+          addLog(`${key}: min=${v.min.toFixed(4)}, max=${v.max.toFixed(4)}, mean=${v.mean.toFixed(4)}, nz=${v.nonZero}`);
+        }
 
         // Run palm detection
         addLog('Running palm detection...');
@@ -198,7 +195,7 @@
         addLog(`Regressors: ${output.regressors.length} values`);
 
         // Find top detections
-        const { createPalmDetector } = await import('./dist/index.js?v=5');
+        const { createPalmDetector } = await import('./dist/index.js?v=6');
         const detector = createPalmDetector(palmModel, { scoreThreshold: 0.3 });
         const rois = await detector.detect(palmCanvas);
         const rawDetections = await detector.detectRaw(palmCanvas);
@@ -295,7 +292,7 @@
         setStatus('full-status', 'Loading...', 'working');
         addLog('Testing full pipeline...');
 
-        const { createFullHandpose } = await import('./dist/index.js?v=5');
+        const { createFullHandpose } = await import('./dist/index.js?v=6');
 
         addLog('Creating full handpose detector...');
         const detector = await createFullHandpose({

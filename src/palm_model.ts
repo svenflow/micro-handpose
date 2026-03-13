@@ -1148,14 +1148,27 @@ export async function compilePalmModel(
   }
 
   async function debugRun(source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap): Promise<any> {
-    // Run the model but also read back intermediate values for debugging
+    // Run the full model step by step, reading back after key layers
     device.queue.copyExternalImageToTexture(
       { source },
       { texture: canvasInputTexture },
       [192, 192],
     );
 
-    // Step 1: Canvas → CHW
+    function stats(data: Float32Array, n: number = 1000) {
+      const d = data.slice(0, n);
+      return {
+        min: Math.min(...d),
+        max: Math.max(...d),
+        mean: d.reduce((a, b) => a + b, 0) / d.length,
+        nonZero: d.filter(v => v !== 0).length,
+        sample: Array.from(d.slice(0, 10)),
+      };
+    }
+
+    const result: any = {};
+
+    // Canvas → CHW
     const canvasUniform = makeUniform(new Uint32Array([192, 192, 192]));
     const canvasBG = device.createBindGroup({
       layout: canvasInputLayout,
@@ -1165,25 +1178,17 @@ export async function compilePalmModel(
         { binding: 2, resource: { buffer: canvasUniform } },
       ],
     });
+    let enc = device.createCommandEncoder();
+    let p = enc.beginComputePass();
+    p.setPipeline(canvasInputPipe);
+    p.setBindGroup(0, canvasBG);
+    p.dispatchWorkgroups(ceil(192, 16), ceil(192, 16), 1);
+    p.end();
+    device.queue.submit([enc.finish()]);
+    result.input = stats(await debugReadBuffer(inputBuf, 192 * 192 * 3));
 
-    const enc1 = device.createCommandEncoder();
-    const p1 = enc1.beginComputePass();
-    p1.setPipeline(canvasInputPipe);
-    p1.setBindGroup(0, canvasBG);
-    p1.dispatchWorkgroups(ceil(192, 16), ceil(192, 16), 1);
-    p1.end();
-    device.queue.submit([enc1.finish()]);
-
-    const inputData = await debugReadBuffer(inputBuf, 192 * 192 * 3);
-    const inputStats = {
-      min: Math.min(...inputData.slice(0, 1000)),
-      max: Math.max(...inputData.slice(0, 1000)),
-      mean: inputData.slice(0, 1000).reduce((a, b) => a + b, 0) / 1000,
-      nonZero: inputData.slice(0, 1000).filter(v => v !== 0).length,
-    };
-
-    // Step 2: Initial conv
-    const enc2 = device.createCommandEncoder();
+    // Initial conv
+    enc = device.createCommandEncoder();
     const bg2 = device.createBindGroup({
       layout: inputConvLayout,
       entries: [
@@ -1195,35 +1200,73 @@ export async function compilePalmModel(
         { binding: 5, resource: { buffer: inputConvUniform } },
       ],
     });
-    const p2 = enc2.beginComputePass();
-    p2.setPipeline(inputConvPipe);
-    p2.setBindGroup(0, bg2);
-    p2.dispatchWorkgroups(ceil(96, 8), ceil(96, 8), 32);
-    p2.end();
-    device.queue.submit([enc2.finish()]);
+    p = enc.beginComputePass();
+    p.setPipeline(inputConvPipe);
+    p.setBindGroup(0, bg2);
+    p.dispatchWorkgroups(ceil(96, 8), ceil(96, 8), 32);
+    p.end();
+    device.queue.submit([enc.finish()]);
+    result.initConv = stats(await debugReadBuffer(actBufA, 96 * 96 * 32));
 
-    const convData = await debugReadBuffer(actBufA, 96 * 96 * 32);
-    const convStats = {
-      min: Math.min(...convData.slice(0, 1000)),
-      max: Math.max(...convData.slice(0, 1000)),
-      mean: convData.slice(0, 1000).reduce((a, b) => a + b, 0) / 1000,
-      nonZero: convData.slice(0, 1000).filter(v => v !== 0).length,
-    };
+    // Run backbone blocks one at a time
+    let curBuf = actBufA;
+    let altBuf = actBufB;
 
-    // Also check weights
-    const weightData = await debugReadBuffer(initConvWeightBuf, 100);
-    const biasData = await debugReadBuffer(initConvBiasBuf, 32);
-    const alphaData = await debugReadBuffer(initConvAlphaBuf, 32);
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
+      enc = device.createCommandEncoder();
+      encodeDwPwBlock(enc, block, curBuf, altBuf, curBuf);
+      device.queue.submit([enc.finish()]);
 
-    return {
-      input: inputStats,
-      inputSample: Array.from(inputData.slice(0, 20)),
-      initConv: convStats,
-      convSample: Array.from(convData.slice(0, 20)),
-      weightSample: Array.from(weightData.slice(0, 20)),
-      biasSample: Array.from(biasData.slice(0, 10)),
-      alphaSample: Array.from(alphaData.slice(0, 10)),
-    };
+      const tmp = curBuf;
+      curBuf = altBuf;
+      altBuf = tmp;
+
+      // Read back after key blocks
+      if (i === 0 || i === 3 || i === 7 || i === 11 || i === 17) {
+        const outH = block.stride === 2 ? block.inH / 2 : block.inH;
+        const size = outH * outH * block.outCh;
+        result[`block${i}`] = stats(await debugReadBuffer(curBuf, size));
+      }
+
+      if (i === 10) {
+        enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(curBuf, 0, backbone2SkipBuf, 0, 24 * 24 * 128 * 4);
+        device.queue.submit([enc.finish()]);
+      }
+    }
+
+    // Extra blocks
+    enc = device.createCommandEncoder();
+    encodeDwPwBlock(enc, extraBlockA, curBuf, altBuf, curBuf);
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.extraBlockA = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+
+    enc = device.createCommandEncoder();
+    encodeDwPwBlock(enc, extraBlockB, curBuf, altBuf, curBuf);
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.extraBlockB = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+
+    // SSD head
+    enc = device.createCommandEncoder();
+    encodeConv1x1(enc, curBuf, cls16WBuf, cls16BBuf, cls16Buf, 256, 6, 12, 12);
+    device.queue.submit([enc.finish()]);
+    result.cls16 = stats(await debugReadBuffer(cls16Buf, 864));
+
+    enc = device.createCommandEncoder();
+    encodeConv1x1(enc, curBuf, reg16WBuf, reg16BBuf, reg16Buf, 256, 108, 12, 12);
+    device.queue.submit([enc.finish()]);
+    result.reg16 = stats(await debugReadBuffer(reg16Buf, 15552), 500);
+
+    // Weight checks
+    result.initWeights = stats(await debugReadBuffer(initConvWeightBuf, 100), 100);
+    result.initBias = stats(await debugReadBuffer(initConvBiasBuf, 32), 32);
+    result.cls16Weights = stats(await debugReadBuffer(cls16WBuf, 100), 100);
+    result.cls16Bias = stats(await debugReadBuffer(cls16BBuf, 6), 6);
+
+    return result;
   }
 
   return { device, run, debugRun };
