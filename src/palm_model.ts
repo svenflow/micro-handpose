@@ -1057,13 +1057,16 @@ export async function compilePalmModel(
     encodeConv1x1(encoder, curBuf, cls8WBuf, cls8BBuf, cls8Buf, 128, 2, 24, 24);
     encodeConv1x1(encoder, curBuf, reg8WBuf, reg8BBuf, reg8Buf, 128, 36, 24, 24);
 
-    // Copy outputs to readback buffers
-    encoder.copyBufferToBuffer(cls16Buf, 0, cls16ReadBuf, 0, 12 * 12 * 6 * 4);
-    encoder.copyBufferToBuffer(reg16Buf, 0, reg16ReadBuf, 0, 12 * 12 * 108 * 4);
-    encoder.copyBufferToBuffer(cls8Buf, 0, cls8ReadBuf, 0, 24 * 24 * 2 * 4);
-    encoder.copyBufferToBuffer(reg8Buf, 0, reg8ReadBuf, 0, 24 * 24 * 36 * 4);
-
+    // Submit compute passes first
     device.queue.submit([encoder.finish()]);
+
+    // Copy outputs to readback buffers (separate encoder to ensure compute is complete)
+    const copyEncoder = device.createCommandEncoder();
+    copyEncoder.copyBufferToBuffer(cls16Buf, 0, cls16ReadBuf, 0, 12 * 12 * 6 * 4);
+    copyEncoder.copyBufferToBuffer(reg16Buf, 0, reg16ReadBuf, 0, 12 * 12 * 108 * 4);
+    copyEncoder.copyBufferToBuffer(cls8Buf, 0, cls8ReadBuf, 0, 24 * 24 * 2 * 4);
+    copyEncoder.copyBufferToBuffer(reg8Buf, 0, reg8ReadBuf, 0, 24 * 24 * 36 * 4);
+    device.queue.submit([copyEncoder.finish()]);
 
     // Wait and read back
     await Promise.all([
