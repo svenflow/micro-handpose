@@ -266,16 +266,72 @@ export async function compileModel(
     },
   });
 
-  // Validate f16 actually works by compiling a test shader
-  // Some browsers report shader-f16 as available but fail during compilation
+  // Validate f16 actually works by running a compute shader with array<f16> storage
+  // Some browsers (iOS Safari) report shader-f16 and compile simple f16 shaders,
+  // but silently produce zeros when using array<f16> in storage buffers
   let f16Works = false;
   if (hasF16) {
     try {
-      const testModule = device.createShaderModule({
-        code: 'enable f16;\n@compute @workgroup_size(1)\nfn main() { var x: f16 = f16(1.0); _ = x; }',
-      });
+      const testCode = `enable f16;
+@group(0) @binding(0) var<storage, read> inp: array<f16>;
+@group(0) @binding(1) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(4)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  out[gid.x] = f32(inp[gid.x]) * 2.0;
+}`;
+      const testModule = device.createShaderModule({ code: testCode });
       const info = await testModule.getCompilationInfo();
-      f16Works = !info.messages.some((m: GPUCompilationMessage) => m.type === 'error');
+      if (info.messages.some((m: GPUCompilationMessage) => m.type === 'error')) {
+        f16Works = false;
+      } else {
+        // Actually run the shader to verify f16 storage works end-to-end
+        const f16Input = new Uint16Array([0x3C00, 0x4000, 0x4200, 0x4400]); // 1.0, 2.0, 3.0, 4.0
+        const inBuf = device.createBuffer({ size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const outBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+        const readBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(inBuf, 0, f16Input);
+
+        const layout = device.createBindGroupLayout({
+          entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' as GPUBufferBindingType } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' as GPUBufferBindingType } },
+          ],
+        });
+        const pipeline = device.createComputePipeline({
+          layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+          compute: { module: testModule, entryPoint: 'main' },
+        });
+        const bg = device.createBindGroup({
+          layout,
+          entries: [
+            { binding: 0, resource: { buffer: inBuf } },
+            { binding: 1, resource: { buffer: outBuf } },
+          ],
+        });
+
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(1);
+        pass.end();
+        enc.copyBufferToBuffer(outBuf, 0, readBuf, 0, 16);
+        device.queue.submit([enc.finish()]);
+
+        await device.queue.onSubmittedWorkDone();
+        await readBuf.mapAsync(GPUMapMode.READ);
+        const result = new Float32Array(readBuf.getMappedRange());
+        // Expected: [2.0, 4.0, 6.0, 8.0]
+        f16Works = Math.abs(result[0]! - 2.0) < 0.01 && Math.abs(result[3]! - 8.0) < 0.01;
+        readBuf.unmap();
+        inBuf.destroy();
+        outBuf.destroy();
+        readBuf.destroy();
+
+        if (!f16Works) {
+          console.warn('[micro-handpose] f16 storage validation FAILED — falling back to f32');
+        }
+      }
     } catch {
       f16Works = false;
     }

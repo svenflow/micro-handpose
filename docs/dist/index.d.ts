@@ -19,6 +19,8 @@ interface HandposeOptions {
     weightsUrl?: string;
     /** Minimum confidence score to return a detection (0-1). Default: 0.5 */
     scoreThreshold?: number;
+    /** Force f32 weights even when shader-f16 is available. Default: false */
+    forceF32?: boolean;
 }
 /** A handpose detector instance */
 interface Handpose {
@@ -37,6 +39,8 @@ interface Handpose {
     flushPipelined: () => Promise<HandposeResult | null>;
     /** Run diagnostic benchmark measuring GPU time, mapAsync time, pipelining separately */
     benchmarkDiagnostic: (source: HandposeInput, iterations?: number) => Promise<any>;
+    /** Debug: read intermediate layer outputs to find where activations die */
+    debugLayerOutputs: (source: HandposeInput) => Promise<any>;
     /** Dispose GPU resources */
     dispose: () => void;
 }
