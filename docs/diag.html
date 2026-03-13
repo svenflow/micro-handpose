@@ -6,7 +6,7 @@
 <div id="log">Starting diagnostic...\n</div>
 <script type="module">
 const log = document.getElementById('log');
-function L(msg) { log.textContent += msg + '\n'; console.log(msg); }
+function L(msg) { log.textContent += msg + '\n'; window.scrollTo(0, document.body.scrollHeight); }
 
 try {
   L('1. Checking WebGPU...');
@@ -45,18 +45,30 @@ try {
 
   L('6. Creating handpose model...');
   const { createHandpose } = await import('./dist/index.js');
-  const hp = await createHandpose({ weightsUrl: './weights/' });
+  // Use threshold 0 so detect() always returns a result (even for gray canvas)
+  const hp = await createHandpose({ weightsUrl: './weights/', scoreThreshold: 0 });
   L('   Model created OK!');
 
-  L('7. Running inference...');
+  L('7. Running inference on gray canvas...');
   const canvas = new OffscreenCanvas(256, 256);
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#888';
   ctx.fillRect(0, 0, 256, 256);
   const result = await hp.detect(canvas);
-  L('   result: ' + (result ? 'hand detected (score=' + result.score.toFixed(3) + ')' : 'null (no hand — expected for gray canvas)'));
+  if (result) {
+    L('   ✅ READBACK WORKS!');
+    L('   score: ' + result.score.toFixed(6));
+    L('   handedness: ' + result.handedness + ' (raw ~' + (result.handedness === 'right' ? '>0.5' : '<0.5') + ')');
+    L('   landmarks[0]: x=' + result.landmarks[0].x.toFixed(4) + ' y=' + result.landmarks[0].y.toFixed(4) + ' z=' + result.landmarks[0].z.toFixed(4));
+    L('   landmarks[10]: x=' + result.landmarks[10].x.toFixed(4) + ' y=' + result.landmarks[10].y.toFixed(4) + ' z=' + result.landmarks[10].z.toFixed(4));
+    L('   landmarks[20]: x=' + result.landmarks[20].x.toFixed(4) + ' y=' + result.landmarks[20].y.toFixed(4) + ' z=' + result.landmarks[20].z.toFixed(4));
+    const allZero = result.landmarks.every(l => l.x === 0 && l.y === 0 && l.z === 0);
+    L('   all-zero check: ' + (allZero ? '⚠️ ALL ZEROS (readback broken)' : '✅ non-zero values'));
+  } else {
+    L('   ❌ result is null (should not happen with threshold=0)');
+  }
 
-  // Quick sanity check: 5 runs
+  // Quick benchmark: 5 runs
   L('8. Quick benchmark (5 runs)...');
   const qtimes = [];
   for (let i = 0; i < 5; i++) {
@@ -66,17 +78,16 @@ try {
   }
   L('   times: ' + qtimes.join(', ') + ' ms');
 
-  // Detailed benchmark with more iterations to overcome Safari 1ms timer precision
-  L('9. Detailed benchmark (100 runs, batched timing)...');
+  // Batched timing to overcome Safari 1ms precision
+  L('9. Batched benchmark (for sub-ms precision)...');
 
   // Warmup
   for (let i = 0; i < 10; i++) await hp.detect(canvas);
 
-  // Measure total time for batches of 10 to get sub-ms precision
   const batchSizes = [1, 10, 50];
   for (const batchSize of batchSizes) {
     const batchTimes = [];
-    const numBatches = Math.ceil(100 / batchSize);
+    const numBatches = Math.min(Math.ceil(50 / batchSize), 10);
     for (let b = 0; b < numBatches; b++) {
       const t0 = performance.now();
       for (let i = 0; i < batchSize; i++) {
@@ -92,15 +103,15 @@ try {
     L('   batch=' + batchSize + ': avg=' + avgMs.toFixed(2) + 'ms/run, median_batch=' + (medianBatch / batchSize).toFixed(2) + 'ms/run, total=' + totalMs.toFixed(0) + 'ms/' + totalRuns + 'runs');
   }
 
-  // 10. Diagnostic benchmark (if available)
+  // Diagnostic benchmark
   L('10. Diagnostic benchmark (GPU vs readback breakdown)...');
   try {
     const diag = await hp.benchmarkDiagnostic(canvas);
-    L('    GPU only:       median=' + diag.gpuOnly.median.toFixed(2) + 'ms, min=' + diag.gpuOnly.min.toFixed(2) + 'ms');
-    L('    mapAsync:       median=' + diag.mapAsyncOnly.median.toFixed(2) + 'ms, min=' + diag.mapAsyncOnly.min.toFixed(2) + 'ms');
+    L('    GPU only:        median=' + diag.gpuOnly.median.toFixed(2) + 'ms, min=' + diag.gpuOnly.min.toFixed(2) + 'ms');
+    L('    mapAsync:        median=' + diag.mapAsyncOnly.median.toFixed(2) + 'ms, min=' + diag.mapAsyncOnly.min.toFixed(2) + 'ms');
     L('    mapAsync(noWait): median=' + diag.mapAsyncNoWait.median.toFixed(2) + 'ms, min=' + diag.mapAsyncNoWait.min.toFixed(2) + 'ms');
-    L('    Total (e2e):    median=' + diag.total.median.toFixed(2) + 'ms, min=' + diag.total.min.toFixed(2) + 'ms');
-    L('    Pipelined:      median=' + diag.pipelined.median.toFixed(2) + 'ms, min=' + diag.pipelined.min.toFixed(2) + 'ms');
+    L('    Total (e2e):     median=' + diag.total.median.toFixed(2) + 'ms, min=' + diag.total.min.toFixed(2) + 'ms');
+    L('    Pipelined:       median=' + diag.pipelined.median.toFixed(2) + 'ms, min=' + diag.pipelined.min.toFixed(2) + 'ms');
     if (diag.renderReadback) {
       L('    Render readback: median=' + diag.renderReadback.median.toFixed(2) + 'ms, min=' + diag.renderReadback.min.toFixed(2) + 'ms');
     }
@@ -108,8 +119,9 @@ try {
     L('    benchmarkDiagnostic error: ' + e.message);
   }
 
-  L('\n=== ALL OK ===');
+  L('\n=== ALL DONE ===');
   L('Timer precision: ' + performance.now().toString().split('.')[1]?.length + ' decimal places');
+  L('User agent: ' + navigator.userAgent);
 } catch (e) {
   L('\nFATAL: ' + e.message);
   L('Stack: ' + (e.stack || 'no stack'));
