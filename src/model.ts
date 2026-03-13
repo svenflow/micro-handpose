@@ -83,6 +83,7 @@ export interface CompiledModel {
     pipelined: { median: number; min: number };
     renderReadback: { median: number; min: number } | null;
   }>;
+  debugLayerOutputs: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<any>;
 }
 
 /**
@@ -1322,9 +1323,100 @@ export async function compileModel(
     };
   }
 
+  // ============ Debug: Read intermediate buffer stats ============
+  async function debugLayerOutputs(
+    source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap,
+  ): Promise<{layer: string, stats: {min: number, max: number, nonZero: number, total: number}}[]> {
+    const results: {layer: string, stats: {min: number, max: number, nonZero: number, total: number}}[] = [];
+
+    async function readBufStats(buf: GPUBuffer, size: number, label: string) {
+      const rb = device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(buf, 0, rb, 0, size);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await rb.mapAsync(GPUMapMode.READ);
+      const data = new Float32Array(rb.getMappedRange());
+      let min = Infinity, max = -Infinity, nonZero = 0;
+      for (let i = 0; i < data.length; i++) {
+        if (data[i] < min) min = data[i];
+        if (data[i] > max) max = data[i];
+        if (data[i] !== 0) nonZero++;
+      }
+      rb.unmap();
+      rb.destroy();
+      results.push({ layer: label, stats: { min, max, nonZero, total: data.length } });
+    }
+
+    // Step 0: Canvas input
+    device.queue.copyExternalImageToTexture(
+      { source }, { texture: canvasTexture }, [256, 256],
+    );
+    {
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(canvasInputPipeline);
+      pass.setBindGroup(0, canvasInputBG);
+      pass.dispatchWorkgroups(Math.ceil(256/16), Math.ceil(256/16), 1);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+    }
+    await readBufStats(bufInput, Math.min(bufInput.size, 1*3*257*257*4), 'canvas→bufInput');
+
+    // Step 1: Input conv
+    {
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(inputConvPipeline);
+      pass.setBindGroup(0, inputConvBG);
+      pass.dispatchWorkgroups(Math.ceil(128/8), Math.ceil(128/8), 24);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+    }
+    await readBufStats(bufA, Math.min(bufA.size, 1*24*128*128*4), 'inputConv→bufA');
+
+    // Step 2: First few resmodule layers
+    let useAtoB = true;
+    for (let layerIdx = 0; layerIdx < Math.min(resmoduleData.length, 6); layerIdx++) {
+      const dwBG = useAtoB ? dwBindGroupsAtoB[layerIdx] : dwBindGroupsBtoA[layerIdx];
+      const pwBG = useAtoB ? pwBindGroupsAtoB[layerIdx] : pwBindGroupsBtoA[layerIdx];
+      const di = layerDispatchInfos[layerIdx]!;
+      const ld = resmoduleData[layerIdx]!;
+
+      // Run DW
+      {
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(di.dwPipeline);
+        pass.setBindGroup(0, dwBG);
+        pass.dispatchWorkgroups(di.dwDispatchX, di.dwDispatchY, di.dwDispatchZ);
+        pass.end();
+        device.queue.submit([enc.finish()]);
+      }
+      await readBufStats(bufDW, Math.min(bufDW.size, ld.spec.inCh * ld.outH * ld.outW * 4), `layer${layerIdx}.DW→bufDW (${ld.spec.prefix})`);
+
+      // Run PW
+      {
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(di.pwPipeline);
+        pass.setBindGroup(0, pwBG);
+        pass.dispatchWorkgroups(di.pwDispatchX, di.pwDispatchY, di.pwDispatchZ);
+        pass.end();
+        device.queue.submit([enc.finish()]);
+      }
+      const outBuf = useAtoB ? bufB : bufA;
+      await readBufStats(outBuf, Math.min(outBuf.size, ld.spec.outCh * ld.outH * ld.outW * 4), `layer${layerIdx}.PW→buf${useAtoB?'B':'A'} (${ld.spec.prefix})`);
+
+      useAtoB = !useAtoB;
+    }
+
+    return results;
+  }
+
   return {
     device, run, runFromCanvas, runFromCanvasViaRender, runFromCanvasPipelined, flushPipelined,
-    benchmark, benchmarkGPU, benchmarkDiagnostic,
+    benchmark, benchmarkGPU, benchmarkDiagnostic, debugLayerOutputs,
     _device: device,
     _benchmarkSubmitOnly: submitOnly,
   };

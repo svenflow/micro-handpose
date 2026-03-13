@@ -129,6 +129,22 @@ try {
     hp.dispose();
   }
 
+  // Debug: layer-by-layer intermediate outputs
+  L('\n=== LAYER-BY-LAYER DEBUG ===');
+  const dbg = await createHandpose({ weightsUrl: './weights/', scoreThreshold: 0, forceF32: true });
+  try {
+    const layerResults = await dbg.debugLayerOutputs(inputCanvas);
+    for (const lr of layerResults) {
+      const s = lr.stats;
+      const ok = s.nonZero > 0;
+      L('  ' + lr.layer.padEnd(50) + ' min=' + s.min.toFixed(4) + ' max=' + s.max.toFixed(4) + ' nonZero=' + s.nonZero + '/' + s.total, ok ? 'ok' : 'fail');
+    }
+  } catch (e) {
+    L('debugLayerOutputs error: ' + e.message, 'fail');
+    L(e.stack || '');
+  }
+  dbg.dispose();
+
   L('\n=== ALL DONE ===', 'ok');
   L('UA: ' + navigator.userAgent);
 } catch (e) {

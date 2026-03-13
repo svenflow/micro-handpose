@@ -56,6 +56,9 @@ export interface Handpose {
   /** Run diagnostic benchmark measuring GPU time, mapAsync time, pipelining separately */
   benchmarkDiagnostic: (source: HandposeInput, iterations?: number) => Promise<any>;
 
+  /** Debug: read intermediate layer outputs to find where activations die */
+  debugLayerOutputs: (source: HandposeInput) => Promise<any>;
+
   /** Dispose GPU resources */
   dispose: () => void;
 }

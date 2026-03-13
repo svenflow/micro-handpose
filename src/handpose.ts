@@ -152,5 +152,10 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     return model.benchmarkDiagnostic(input);
   }
 
-  return { detect, detectPipelined, flushPipelined, dispose, benchmarkDiagnostic };
+  async function debugLayerOutputs(source: HandposeInput) {
+    const input = await toModelInput(source);
+    return model.debugLayerOutputs(input);
+  }
+
+  return { detect, detectPipelined, flushPipelined, dispose, benchmarkDiagnostic, debugLayerOutputs };
 }
