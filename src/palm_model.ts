@@ -499,21 +499,108 @@ export async function compilePalmModel(
   // Input conv: 192x192x3 → 96x96x32
   const inputConvUniform = makeUniform(new Uint32Array([1, 3, 32, 192, 192, 96, 96]));
 
+  // Pre-create uniform buffers for backbone blocks (creating per-frame leaks GPU memory!)
+  const blockUniforms = blocks.map(block => {
+    const outH = block.stride === 2 ? block.inH / 2 : block.inH;
+    const outW = outH;
+    const pad = block.stride === 2 ? 1 : 2;
+    const channelPad = block.inCh;
+    return {
+      dw: makeUniform(new Uint32Array([1, block.inCh, block.inH, block.inH, outH, outW, block.stride, pad])),
+      pw: makeUniform(new Uint32Array([1, block.inCh, block.outCh, outH, outW, channelPad, block.stride, block.inH, block.inH])),
+      outH, outW,
+    };
+  });
+
+  // Pre-create uniform buffers for FPN blocks
+  const fpn12Block1Uniforms = (() => {
+    const b = fpn12Block1;
+    const outH = b.stride === 2 ? b.inH / 2 : b.inH;
+    const pad = b.stride === 2 ? 1 : 2;
+    return {
+      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, outH, outH, b.stride, pad])),
+      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, outH, outH, b.inCh, b.stride, b.inH, b.inH])),
+      outH,
+    };
+  })();
+  const fpn12Block2Uniforms = (() => {
+    const b = fpn12Block2;
+    const outH = b.stride === 2 ? b.inH / 2 : b.inH;
+    const pad = b.stride === 2 ? 1 : 2;
+    return {
+      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, outH, outH, b.stride, pad])),
+      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, outH, outH, b.inCh, b.stride, b.inH, b.inH])),
+      outH,
+    };
+  })();
+  const fpn24Block1Uniforms = (() => {
+    const b = fpn24Block1;
+    const outH = b.stride === 2 ? b.inH / 2 : b.inH;
+    const pad = b.stride === 2 ? 1 : 2;
+    return {
+      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, outH, outH, b.stride, pad])),
+      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, outH, outH, b.inCh, b.stride, b.inH, b.inH])),
+      outH,
+    };
+  })();
+  const fpn24Block2Uniforms = (() => {
+    const b = fpn24Block2;
+    const outH = b.stride === 2 ? b.inH / 2 : b.inH;
+    const pad = b.stride === 2 ? 1 : 2;
+    return {
+      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, outH, outH, b.stride, pad])),
+      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, outH, outH, b.inCh, b.stride, b.inH, b.inH])),
+      outH,
+    };
+  })();
+
+  // Pre-create uniform buffers for FPN upsample/add steps and SSD heads
+  const fpnUpsample6to12Uniform = makeUniform(new Uint32Array([1, 256, 6, 6, 12, 12]));
+  const fpnAdd12Uniform = makeUniform(new Uint32Array([1, 256, 12, 12, 12, 12]));
+  const fpnUpsample12to24Uniform = makeUniform(new Uint32Array([1, 256, 12, 12, 24, 24]));
+  const fpnAdd24Uniform = makeUniform(new Uint32Array([1, 128, 24, 24, 24, 24]));
+  const fpnConv6to12Uniform = makeUniform(new Uint32Array([1, 256, 256, 12, 12]));
+  const fpnConv12to24Uniform = makeUniform(new Uint32Array([1, 256, 128, 24, 24]));
+  const ssdCls16Uniform = makeUniform(new Uint32Array([1, 256, 6, 12, 12]));
+  const ssdReg16Uniform = makeUniform(new Uint32Array([1, 256, 108, 12, 12]));
+  const ssdCls8Uniform = makeUniform(new Uint32Array([1, 128, 2, 24, 24]));
+  const ssdReg8Uniform = makeUniform(new Uint32Array([1, 128, 36, 24, 24]));
+
+  // Pre-create canvas input bind group (texture view is stable)
+  const canvasInputUniform = makeUniform(new Uint32Array([192, 192, 192]));
+  const canvasInputBG = device.createBindGroup({
+    layout: canvasInputLayout,
+    entries: [
+      { binding: 0, resource: canvasInputTexture.createView() },
+      { binding: 1, resource: { buffer: inputBuf } },
+      { binding: 2, resource: { buffer: canvasInputUniform } },
+    ],
+  });
+
+  // Pre-create initial conv bind group
+  const initConvBG = device.createBindGroup({
+    layout: inputConvLayout,
+    entries: [
+      { binding: 0, resource: { buffer: inputBuf } },
+      { binding: 1, resource: { buffer: initConvWeightBuf } },
+      { binding: 2, resource: { buffer: initConvBiasBuf } },
+      { binding: 3, resource: { buffer: initConvAlphaBuf } },
+      { binding: 4, resource: { buffer: actBufA } },
+      { binding: 5, resource: { buffer: inputConvUniform } },
+    ],
+  });
+
   // Helper to encode a DW+PW block into the command encoder
-  // Returns which buffer has the output (A or B toggled)
   function encodeDwPwBlock(
     encoder: GPUCommandEncoder,
     block: BackboneBlock,
     inputBuffer: GPUBuffer,
     outputBuffer: GPUBuffer,
-    skipBuffer: GPUBuffer, // for residual skip connection
+    skipBuffer: GPUBuffer,
+    uniforms: { dw: GPUBuffer; pw: GPUBuffer; outH: number },
   ): void {
-    const outH = block.stride === 2 ? block.inH / 2 : block.inH;
-    const outW = outH;
-    const pad = block.stride === 2 ? 1 : 2;
+    const outW = uniforms.outH;
 
-    // DW conv
-    const dwUniform = makeUniform(new Uint32Array([1, block.inCh, block.inH, block.inH, outH, outW, block.stride, pad]));
     const dwBG = device.createBindGroup({
       layout: dwLayout,
       entries: [
@@ -521,21 +608,16 @@ export async function compilePalmModel(
         { binding: 1, resource: { buffer: block.dwWeightBuf } },
         { binding: 2, resource: { buffer: block.dwBiasBuf } },
         { binding: 3, resource: { buffer: dwOutBuf } },
-        { binding: 4, resource: { buffer: dwUniform } },
+        { binding: 4, resource: { buffer: uniforms.dw } },
       ],
     });
 
     const pass1 = encoder.beginComputePass();
     pass1.setPipeline(dwPipe);
     pass1.setBindGroup(0, dwBG);
-    pass1.dispatchWorkgroups(ceil(outW, 8), ceil(outH, 8), block.inCh);
+    pass1.dispatchWorkgroups(ceil(outW, 8), ceil(uniforms.outH, 8), block.inCh);
     pass1.end();
 
-    // PW conv + skip + PReLU
-    // channel_pad = number of channels in the skip input (for zero-padding)
-    // When inCh != outCh, we zero-pad: channels 0..inCh-1 use skip, inCh..outCh-1 get 0
-    const channelPad = block.inCh; // skip has inCh channels
-    const pwUniform = makeUniform(new Uint32Array([1, block.inCh, block.outCh, outH, outW, channelPad, block.stride, block.inH, block.inH]));
     const pwBG = device.createBindGroup({
       layout: pwPreluLayout,
       entries: [
@@ -545,14 +627,14 @@ export async function compilePalmModel(
         { binding: 3, resource: { buffer: block.pwBiasBuf } },
         { binding: 4, resource: { buffer: block.alphaBuf } },
         { binding: 5, resource: { buffer: outputBuffer } },
-        { binding: 6, resource: { buffer: pwUniform } },
+        { binding: 6, resource: { buffer: uniforms.pw } },
       ],
     });
 
     const pass2 = encoder.beginComputePass();
     pass2.setPipeline(pwPreluPipe);
     pass2.setBindGroup(0, pwBG);
-    pass2.dispatchWorkgroups(ceil(outW, 8), ceil(outH, 8), block.outCh);
+    pass2.dispatchWorkgroups(ceil(outW, 8), ceil(uniforms.outH, 8), block.outCh);
     pass2.end();
   }
 
@@ -563,9 +645,9 @@ export async function compilePalmModel(
     weightBuf: GPUBuffer,
     biasBuf: GPUBuffer,
     outputBuffer: GPUBuffer,
-    inCh: number, outCh: number, h: number, w: number,
+    uniform: GPUBuffer,
+    outCh: number, h: number, w: number,
   ): void {
-    const uniform = makeUniform(new Uint32Array([1, inCh, outCh, h, w]));
     const bg = device.createBindGroup({
       layout: conv1x1Layout,
       entries: [
@@ -591,9 +673,9 @@ export async function compilePalmModel(
     biasBuf: GPUBuffer,
     alphaBuf: GPUBuffer,
     outputBuffer: GPUBuffer,
-    inCh: number, outCh: number, h: number, w: number,
+    uniform: GPUBuffer,
+    outCh: number, h: number, w: number,
   ): void {
-    const uniform = makeUniform(new Uint32Array([1, inCh, outCh, h, w]));
     const bg = device.createBindGroup({
       layout: conv1x1PreluLayout,
       entries: [
@@ -620,44 +702,22 @@ export async function compilePalmModel(
       [192, 192],
     );
 
-    // Canvas input → CHW buffer
-    const canvasUniform = makeUniform(new Uint32Array([192, 192, 192]));
-    const canvasBG = device.createBindGroup({
-      layout: canvasInputLayout,
-      entries: [
-        { binding: 0, resource: canvasInputTexture.createView() },
-        { binding: 1, resource: { buffer: inputBuf } },
-        { binding: 2, resource: { buffer: canvasUniform } },
-      ],
-    });
-
     const encoder = device.createCommandEncoder();
 
-    // Canvas → CHW
+    // Canvas → CHW (using pre-created bind group)
     {
       const pass = encoder.beginComputePass();
       pass.setPipeline(canvasInputPipe);
-      pass.setBindGroup(0, canvasBG);
+      pass.setBindGroup(0, canvasInputBG);
       pass.dispatchWorkgroups(ceil(192, 16), ceil(192, 16), 1);
       pass.end();
     }
 
-    // Initial conv 5x5 stride 2 + PReLU: 192x192x3 → 96x96x32
+    // Initial conv 5x5 stride 2 + PReLU: 192x192x3 → 96x96x32 (pre-created bind group)
     {
-      const bg = device.createBindGroup({
-        layout: inputConvLayout,
-        entries: [
-          { binding: 0, resource: { buffer: inputBuf } },
-          { binding: 1, resource: { buffer: initConvWeightBuf } },
-          { binding: 2, resource: { buffer: initConvBiasBuf } },
-          { binding: 3, resource: { buffer: initConvAlphaBuf } },
-          { binding: 4, resource: { buffer: actBufA } },
-          { binding: 5, resource: { buffer: inputConvUniform } },
-        ],
-      });
       const pass = encoder.beginComputePass();
       pass.setPipeline(inputConvPipe);
-      pass.setBindGroup(0, bg);
+      pass.setBindGroup(0, initConvBG);
       pass.dispatchWorkgroups(ceil(96, 8), ceil(96, 8), 32);
       pass.end();
     }
@@ -669,7 +729,7 @@ export async function compilePalmModel(
 
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
-      encodeDwPwBlock(encoder, block, curBuf, altBuf, curBuf);
+      encodeDwPwBlock(encoder, block, curBuf, altBuf, curBuf, blockUniforms[i]);
 
       // Swap buffers
       const tmp = curBuf;
@@ -692,14 +752,13 @@ export async function compilePalmModel(
     // ============ FPN Level 1: 6→12 ============
     // Step 1: Upsample 6→12 (no add — use zeroBuf as skip)
     {
-      const uniform = makeUniform(new Uint32Array([1, 256, 6, 6, 12, 12]));
       const bg = device.createBindGroup({
         layout: upsampleAddLayout,
         entries: [
           { binding: 0, resource: { buffer: curBuf } },
           { binding: 1, resource: { buffer: zeroBuf } },
           { binding: 2, resource: { buffer: altBuf } },
-          { binding: 3, resource: { buffer: uniform } },
+          { binding: 3, resource: { buffer: fpnUpsample6to12Uniform } },
         ],
       });
       const pass = encoder.beginComputePass();
@@ -711,19 +770,18 @@ export async function compilePalmModel(
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
     // Step 2: conv1x1+PReLU (conv2d_20) on upsampled 12x12x256
-    encodeConv1x1PReLU(encoder, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, 256, 256, 12, 12);
+    encodeConv1x1PReLU(encoder, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, fpnConv6to12Uniform, 256, 12, 12);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
     // Step 3: Element-wise add backbone12Skip (identity upsample: 12→12)
     {
-      const uniform = makeUniform(new Uint32Array([1, 256, 12, 12, 12, 12]));
       const bg = device.createBindGroup({
         layout: upsampleAddLayout,
         entries: [
           { binding: 0, resource: { buffer: curBuf } },
           { binding: 1, resource: { buffer: backbone12SkipBuf } },
           { binding: 2, resource: { buffer: altBuf } },
-          { binding: 3, resource: { buffer: uniform } },
+          { binding: 3, resource: { buffer: fpnAdd12Uniform } },
         ],
       });
       const pass = encoder.beginComputePass();
@@ -735,27 +793,26 @@ export async function compilePalmModel(
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
     // Step 4: FPN 12x12 refinement blocks
-    encodeDwPwBlock(encoder, fpn12Block1, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(encoder, fpn12Block1, curBuf, altBuf, curBuf, fpn12Block1Uniforms);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    encodeDwPwBlock(encoder, fpn12Block2, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(encoder, fpn12Block2, curBuf, altBuf, curBuf, fpn12Block2Uniforms);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
     // Step 5: 12x12 SSD heads (on curBuf = 12x12x256)
-    encodeConv1x1(encoder, curBuf, cls16WBuf, cls16BBuf, cls16Buf, 256, 6, 12, 12);
-    encodeConv1x1(encoder, curBuf, reg16WBuf, reg16BBuf, reg16Buf, 256, 108, 12, 12);
+    encodeConv1x1(encoder, curBuf, cls16WBuf, cls16BBuf, cls16Buf, ssdCls16Uniform, 6, 12, 12);
+    encodeConv1x1(encoder, curBuf, reg16WBuf, reg16BBuf, reg16Buf, ssdReg16Uniform, 108, 12, 12);
 
     // ============ FPN Level 2: 12→24 ============
     // Step 6: Upsample 12→24 (no add — use zeroBuf as skip)
     {
-      const uniform = makeUniform(new Uint32Array([1, 256, 12, 12, 24, 24]));
       const bg = device.createBindGroup({
         layout: upsampleAddLayout,
         entries: [
           { binding: 0, resource: { buffer: curBuf } },
           { binding: 1, resource: { buffer: zeroBuf } },
           { binding: 2, resource: { buffer: altBuf } },
-          { binding: 3, resource: { buffer: uniform } },
+          { binding: 3, resource: { buffer: fpnUpsample12to24Uniform } },
         ],
       });
       const pass = encoder.beginComputePass();
@@ -767,19 +824,18 @@ export async function compilePalmModel(
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
     // Step 7: conv1x1+PReLU (conv2d_23) on upsampled 24x24: 256→128
-    encodeConv1x1PReLU(encoder, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, 256, 128, 24, 24);
+    encodeConv1x1PReLU(encoder, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, fpnConv12to24Uniform, 128, 24, 24);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
     // Step 8: Element-wise add backbone24Skip (identity upsample: 24→24)
     {
-      const uniform = makeUniform(new Uint32Array([1, 128, 24, 24, 24, 24]));
       const bg = device.createBindGroup({
         layout: upsampleAddLayout,
         entries: [
           { binding: 0, resource: { buffer: curBuf } },
           { binding: 1, resource: { buffer: backbone24SkipBuf } },
           { binding: 2, resource: { buffer: altBuf } },
-          { binding: 3, resource: { buffer: uniform } },
+          { binding: 3, resource: { buffer: fpnAdd24Uniform } },
         ],
       });
       const pass = encoder.beginComputePass();
@@ -791,15 +847,15 @@ export async function compilePalmModel(
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
     // Step 9: FPN 24x24 refinement blocks
-    encodeDwPwBlock(encoder, fpn24Block1, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(encoder, fpn24Block1, curBuf, altBuf, curBuf, fpn24Block1Uniforms);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    encodeDwPwBlock(encoder, fpn24Block2, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(encoder, fpn24Block2, curBuf, altBuf, curBuf, fpn24Block2Uniforms);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
     // Step 10: 24x24 SSD heads (on curBuf = 24x24x128)
-    encodeConv1x1(encoder, curBuf, cls8WBuf, cls8BBuf, cls8Buf, 128, 2, 24, 24);
-    encodeConv1x1(encoder, curBuf, reg8WBuf, reg8BBuf, reg8Buf, 128, 36, 24, 24);
+    encodeConv1x1(encoder, curBuf, cls8WBuf, cls8BBuf, cls8Buf, ssdCls8Uniform, 2, 24, 24);
+    encodeConv1x1(encoder, curBuf, reg8WBuf, reg8BBuf, reg8Buf, ssdReg8Uniform, 36, 24, 24);
 
     // Submit compute passes first
     device.queue.submit([encoder.finish()]);
@@ -962,7 +1018,7 @@ export async function compilePalmModel(
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       enc = device.createCommandEncoder();
-      encodeDwPwBlock(enc, block, curBuf, altBuf, curBuf);
+      encodeDwPwBlock(enc, block, curBuf, altBuf, curBuf, blockUniforms[i]);
       device.queue.submit([enc.finish()]);
 
       const tmp = curBuf;
@@ -1016,7 +1072,7 @@ export async function compilePalmModel(
 
     // conv1x1+PReLU (conv2d_20) on upsampled 12x12x256
     enc = device.createCommandEncoder();
-    encodeConv1x1PReLU(enc, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, 256, 256, 12, 12);
+    encodeConv1x1PReLU(enc, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, fpnConv6to12Uniform, 256, 12, 12);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpn6to12Conv = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
@@ -1049,26 +1105,26 @@ export async function compilePalmModel(
 
     // FPN 12x12 block 1 (dw_19 + conv2d_21)
     enc = device.createCommandEncoder();
-    encodeDwPwBlock(enc, fpn12Block1, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(enc, fpn12Block1, curBuf, altBuf, curBuf, fpn12Block1Uniforms);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpn12Block1 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
 
     // FPN 12x12 block 2 (dw_20 + conv2d_22)
     enc = device.createCommandEncoder();
-    encodeDwPwBlock(enc, fpn12Block2, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(enc, fpn12Block2, curBuf, altBuf, curBuf, fpn12Block2Uniforms);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpn12Block2 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
 
     // 12x12 SSD heads
     enc = device.createCommandEncoder();
-    encodeConv1x1(enc, curBuf, cls16WBuf, cls16BBuf, cls16Buf, 256, 6, 12, 12);
+    encodeConv1x1(enc, curBuf, cls16WBuf, cls16BBuf, cls16Buf, ssdCls16Uniform, 6, 12, 12);
     device.queue.submit([enc.finish()]);
     result.cls16 = stats(await debugReadBuffer(cls16Buf, 864));
 
     enc = device.createCommandEncoder();
-    encodeConv1x1(enc, curBuf, reg16WBuf, reg16BBuf, reg16Buf, 256, 108, 12, 12);
+    encodeConv1x1(enc, curBuf, reg16WBuf, reg16BBuf, reg16Buf, ssdReg16Uniform, 108, 12, 12);
     device.queue.submit([enc.finish()]);
     result.reg16 = stats(await debugReadBuffer(reg16Buf, 15552), 500);
 
@@ -1132,14 +1188,14 @@ export async function compilePalmModel(
 
     // FPN 24x24 block 1 (dw_21 + conv2d_24)
     enc = device.createCommandEncoder();
-    encodeDwPwBlock(enc, fpn24Block1, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(enc, fpn24Block1, curBuf, altBuf, curBuf, fpn24Block1Uniforms);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpn24Block1 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
 
     // FPN 24x24 block 2 (dw_22 + conv2d_25)
     enc = device.createCommandEncoder();
-    encodeDwPwBlock(enc, fpn24Block2, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(enc, fpn24Block2, curBuf, altBuf, curBuf, fpn24Block2Uniforms);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpn24Block2 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));

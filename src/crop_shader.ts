@@ -109,6 +109,17 @@ export function createCropPipeline(device: GPUDevice): CropPipeline {
     compute: { module: shaderModule, entryPoint: 'main' },
   });
 
+  // Pre-create reusable uniform buffers (avoid per-frame GPU buffer allocation leak)
+  const paramsBuf = device.createBuffer({
+    size: 16, // 4 x uint32
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const transformBuf = device.createBuffer({
+    size: 32, // 8 x float32 (6 values + 2 padding)
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const transformPadded = new Float32Array(8);
+
   function crop(
     encoder: GPUCommandEncoder,
     sourceTexture: GPUTexture,
@@ -118,21 +129,9 @@ export function createCropPipeline(device: GPUDevice): CropPipeline {
     srcHeight: number,
     dstSize: number,
   ): void {
-    const paramsData = new Uint32Array([srcWidth, srcHeight, dstSize, 0]);
-    const paramsBuf = device.createBuffer({
-      size: paramsData.byteLength,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(paramsBuf, 0, paramsData);
+    device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([srcWidth, srcHeight, dstSize, 0]));
 
-    const transformData = new Float32Array(transform);
-    // Pad to 32 bytes (8 floats) for uniform alignment
-    const transformPadded = new Float32Array(8);
-    transformPadded.set(transformData);
-    const transformBuf = device.createBuffer({
-      size: transformPadded.byteLength,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    transformPadded.set(transform);
     device.queue.writeBuffer(transformBuf, 0, transformPadded);
 
     const bindGroup = device.createBindGroup({
