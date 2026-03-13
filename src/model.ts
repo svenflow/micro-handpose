@@ -749,7 +749,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     const { inCh, outCh, h, w, stride, prefix } = spec;
     const outH = stride === 2 ? h / 2 : h;
     const outW = stride === 2 ? w / 2 : w;
-    const pad = 2; // Always pad=2 for 5x5 kernel (matches PyTorch nn.Conv2d(kernel_size=5, padding=2))
+    // Original PyTorch model uses asymmetric padding for stride=2:
+    // F.pad(x, (1, 2, 1, 2)) then conv with padding=0
+    // This is equivalent to pad=1 in our shader (1 left/top, kernel extends 2 more right/bottom)
+    // For stride=1: standard symmetric padding=2
+    const pad = stride === 2 ? 1 : 2;
 
     const dwWT = weights.get(`${prefix}convs.0.weight`);
     const dwBT = weights.get(`${prefix}convs.0.bias`);

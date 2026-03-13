@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Input Normalization Test</title>
+<style>
+body { background: #1a1a2e; color: #e0e0e0; font-family: monospace; padding: 20px; }
+#log { white-space: pre-wrap; font-size: 12px; background: #111; padding: 10px; }
+</style>
+</head>
+<body>
+<h2>Testing Input Normalization</h2>
+<p>Status: <span id="status">Loading...</span></p>
+<div id="log"></div>
+
+<script type="module">
+const status = document.getElementById('status');
+const log = document.getElementById('log');
+function logMsg(msg) { log.textContent += msg + '\n'; console.log(msg); }
+
+async function run() {
+  // Load test image
+  status.textContent = 'Loading image...';
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = reject;
+    img.src = 'hand_nikhil.jpg';
+  });
+  logMsg(`Image: ${img.naturalWidth}x${img.naturalHeight}`);
+
+  // Load MediaPipe first for ground truth
+  status.textContent = 'Loading MediaPipe...';
+  const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs');
+  const wasmFiles = await vision.FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm'
+  );
+  const mpLandmarker = await vision.HandLandmarker.createFromOptions(wasmFiles, {
+    baseOptions: {
+      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+      delegate: 'CPU',
+    },
+    runningMode: 'IMAGE',
+    numHands: 1,
+  });
+
+  // Run MediaPipe on 256x256
+  const inputCanvas = document.createElement('canvas');
+  inputCanvas.width = 256;
+  inputCanvas.height = 256;
+  inputCanvas.getContext('2d').drawImage(img, 0, 0, 256, 256);
+  const mpResult = mpLandmarker.detect(inputCanvas);
+  const mpLandmarks = mpResult?.landmarks?.[0];
+  if (!mpLandmarks) { logMsg('MediaPipe: no detection!'); return; }
+  logMsg('MediaPipe landmarks loaded (ground truth)\n');
+
+  // Load micro-handpose
+  status.textContent = 'Loading micro-handpose...';
+  const { createHandpose } = await import('../dist/index.js');
+
+  // Test 1: Default (0-1 range)
+  logMsg('=== Test 1: Default input (0-1 range from texture) ===');
+  const hp1 = await createHandpose({ scoreThreshold: 0.0, weightsUrl: '../weights', forceF32: true });
+  const r1 = await hp1.detect(inputCanvas);
+  hp1.dispose();
+  if (r1) logSummary('default [0,1]', r1.landmarks, mpLandmarks);
+
+  // For the next tests, we need to pre-normalize the canvas pixel data
+  // and override the texture upload. But since the shader reads from texture,
+  // we need to modify the pixel data in the canvas before passing it.
+
+  // Test 2: Scale to 0-255 range by setting pixel values as value*255
+  // This means: put pixel values = original * 255, but canvas stores 0-255 uint8,
+  // so we'd need original values already in 0-1 range...
+  // Actually the canvas pixel values ARE 0-255 uint8 in ImageData.
+  // The GPU texture converts them to 0-1 float.
+  // So we can't directly control the float input through canvas manipulation.
+
+  // Alternative: test what happens if we modify pixels to simulate different normalizations
+  // by adjusting the canvas pixel brightness
+
+  // The key insight: the texture always maps 0-255 → 0.0-1.0
+  // If model expects [-1,1]: we need pixel*2-1, but can't do that through canvas
+  // If model expects [0,255]: we need pixel*255, but can't do that through canvas
+  //
+  // So the ONLY way to test is to modify the shader.
+  // Instead, let me read the raw model output and compute what divisor/transform gives best match
+
+  logMsg('\n=== Analyzing output transform needed ===');
+  if (!r1) { logMsg('No detection!'); return; }
+
+  // Our raw output (before /256): landmark * 256
+  // What if the output needs a different transform?
+  // Test: raw / D where D varies
+  for (const divisor of [128, 160, 180, 192, 200, 210, 220, 224, 230, 240, 250, 256, 280, 300, 320, 350, 365]) {
+    const factor = 256.0 / divisor;
+    let totalDist = 0;
+    for (let i = 0; i < 21; i++) {
+      const mx = r1.landmarks[i].x * factor;
+      const my = r1.landmarks[i].y * factor;
+      const dx = mx - mpLandmarks[i].x;
+      const dy = my - mpLandmarks[i].y;
+      totalDist += Math.sqrt(dx*dx + dy*dy);
+    }
+    const avg = (totalDist / 21 * 100).toFixed(2);
+    logMsg(`  divisor=${divisor}: avg dist=${avg}%`);
+  }
+
+  // Now test affine transforms: (raw - offset) / scale
+  logMsg('\n=== Testing affine output transforms: (raw - B) / A ===');
+  // From regression: micro = 0.7236 * mp + 0.1766
+  // So: mp = (micro - 0.1766) / 0.7236
+  // raw / 256 = 0.7236 * mp + 0.1766
+  // mp = (raw/256 - 0.1766) / 0.7236 = raw / (256 * 0.7236) - 0.1766/0.7236
+  // = raw / 185.2 - 0.2441
+  // Actually let's just test directly:
+
+  // Using our landmarks as raw/256:
+  // corrected = (landmark - offsetX) / scaleX for X
+  // and similarly for Y
+  for (const [name, sx, ox, sy, oy] of [
+    ['identity', 1, 0, 1, 0],
+    ['regression fit', 0.7236, 0.1766, 0.7009, 0.1815],
+    ['0-1 → -1,1 then /128', 0.5, 0.5, 0.5, 0.5],  // if model expects [-1,1]
+  ]) {
+    let totalDist = 0;
+    for (let i = 0; i < 21; i++) {
+      const mx = (r1.landmarks[i].x - ox) / sx;
+      const my = (r1.landmarks[i].y - oy) / sy;
+      const dx = mx - mpLandmarks[i].x;
+      const dy = my - mpLandmarks[i].y;
+      totalDist += Math.sqrt(dx*dx + dy*dy);
+    }
+    logMsg(`  ${name}: avg dist=${(totalDist/21*100).toFixed(2)}%`);
+  }
+
+  // Dump raw landmarks for first few points
+  logMsg('\n=== Key landmarks (raw values) ===');
+  const names = ['wrist', 'index_tip', 'middle_tip', 'pinky_tip'];
+  const indices = [0, 8, 12, 20];
+  for (const idx of indices) {
+    const m = r1.landmarks[idx];
+    const p = mpLandmarks[idx];
+    logMsg(`  ${names[indices.indexOf(idx)]}: ours=(${(m.x*256).toFixed(1)}, ${(m.y*256).toFixed(1)})  MP=(${(p.x*256).toFixed(1)}, ${(p.y*256).toFixed(1)})  ratio_x=${(m.x/p.x).toFixed(3)}  ratio_y=${(m.y/p.y).toFixed(3)}`);
+  }
+
+  status.textContent = 'Done!';
+}
+
+function logSummary(name, ours, mp) {
+  let totalDist = 0, maxDist = 0;
+  for (let i = 0; i < 21; i++) {
+    const dx = ours[i].x - mp[i].x;
+    const dy = ours[i].y - mp[i].y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    totalDist += dist;
+    maxDist = Math.max(maxDist, dist);
+  }
+  logMsg(`  ${name}: avg=${(totalDist/21*100).toFixed(2)}%, max=${(maxDist*100).toFixed(2)}%`);
+}
+
+run().catch(e => { status.textContent = 'Error: ' + e; logMsg('ERROR: ' + e.stack); });
+</script>
+</body>
+</html>
