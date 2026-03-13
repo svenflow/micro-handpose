@@ -209,6 +209,56 @@ try {
     L('   8-binding test error: ' + e.message);
   }
 
+  // Test 5: stride-loop workaround for 288 channels with 256 threads
+  L('5e. Stride-loop 256→288 test (our fix)...');
+  try {
+    const fixShader = device.createShaderModule({ code: `
+      var<workgroup> smem: array<f32, 288>;
+      @group(0) @binding(0) var<storage, read_write> out: array<f32>;
+      @compute @workgroup_size(256)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
+        for (var c: u32 = lid.x; c < 288u; c += 256u) {
+          smem[c] = f32(c + 1u);
+        }
+        workgroupBarrier();
+        for (var c: u32 = lid.x; c < 288u; c += 256u) {
+          var sum: f32 = 0.0;
+          for (var i: u32 = 0u; i < 4u; i += 1u) { sum += smem[i]; }
+          out[c] = sum + smem[c];
+        }
+      }
+    `});
+    const fixInfo = await fixShader.getCompilationInfo();
+    if (fixInfo.messages.some(m => m.type === 'error')) {
+      L('   ❌ compile error');
+    } else {
+      const buf = device.createBuffer({ size: 288*4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const rbuf = device.createBuffer({ size: 288*4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const lay = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }] });
+      const pipe = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [lay] }), compute: { module: fixShader, entryPoint: 'main' } });
+      const bg = device.createBindGroup({ layout: lay, entries: [{ binding: 0, resource: { buffer: buf } }] });
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipe);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(1);
+      pass.end();
+      enc.copyBufferToBuffer(buf, 0, rbuf, 0, 288*4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await rbuf.mapAsync(GPUMapMode.READ);
+      const data = new Float32Array(rbuf.getMappedRange());
+      // smem=[1..288], sum(0..3)=1+2+3+4=10, out[0]=10+1=11, out[287]=10+288=298
+      const ok = Math.abs(data[0] - 11) < 0.01 && Math.abs(data[287] - 298) < 0.01;
+      L('   out[0]=' + data[0] + ' out[256]=' + data[256] + ' out[287]=' + data[287]);
+      L('   expected: 11, 267, 298');
+      L('   ' + (ok ? '✅ stride-loop workaround WORKS!' : '❌ stride-loop BROKEN'));
+      rbuf.unmap(); buf.destroy(); rbuf.destroy();
+    }
+  } catch (e) {
+    L('   stride-loop error: ' + e.message);
+  }
+
   device.destroy();
 
   L('6. Creating handpose model...');
