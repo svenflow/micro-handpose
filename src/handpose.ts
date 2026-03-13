@@ -391,13 +391,16 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       const sinR = Math.sin(pxROI.rotation);
       const s = pxROI.sizePx / 256; // scale from crop pixels to source pixels
 
-      // Affine: crop pixel (fx,fy) → source normalized coords via R(-rotation) + scale + translate
-      // fx = px + 0.5 (pixel center, added in shader)
-      // src_norm = R(-rot) * s/srcDim * (fx - 128) + center/srcDim
+      // Affine: crop pixel (fx,fy) → source normalized coords via R(+rotation) + scale + translate
+      // The canvas crop applied R(-rotation) to go source→crop.
+      // Inverse is R(+rotation): crop→source.
+      // R(θ) = [[cos, -sin], [sin, cos]]
+      // src_x = cos(r)/s * crop_x - sin(r)/s * crop_y + ...  (in pixel space)
+      // Then normalize by dividing by srcWidth/srcHeight
       const a = cosR * s / srcWidth;
-      const b = sinR * s / srcWidth;
+      const b = -sinR * s / srcWidth;
       const tx = pxROI.centerXpx / srcWidth - 128 * (a + b);
-      const c = -sinR * s / srcHeight;
+      const c = sinR * s / srcHeight;
       const d = cosR * s / srcHeight;
       const ty = pxROI.centerYpx / srcHeight - 128 * (c + d);
 
