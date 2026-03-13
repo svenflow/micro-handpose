@@ -18,5 +18,11 @@
  * ```
  */
 
-export { createHandpose } from './handpose.js';
-export type { Handpose, HandposeResult, HandposeOptions, Landmark } from './types.js';
+export { createHandpose, createFullHandpose } from './handpose.js';
+export { compilePalmModel } from './palm_model.js';
+export { createPalmDetector, computeCropTransform, projectLandmarksToOriginal } from './palm_detection.js';
+export { createCropPipeline } from './crop_shader.js';
+export type { Handpose, HandposeResult, HandposeOptions, Landmark, FullHandpose, FullHandposeResult } from './types.js';
+export type { PalmDetection, HandROI, PalmDetector, PalmDetectorOptions } from './palm_detection.js';
+export type { PalmDetectionOutput, CompiledPalmModel } from './palm_model.js';
+export type { CropPipeline } from './crop_shader.js';

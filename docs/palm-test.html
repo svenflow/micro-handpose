@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Palm Detection + Full Pipeline Test</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; }
+    canvas { border: 1px solid #444; margin: 5px; }
+    .row { display: flex; gap: 20px; flex-wrap: wrap; }
+    .box { background: #222; padding: 15px; border-radius: 8px; margin: 10px 0; }
+    button { background: #3a3; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; margin: 5px; }
+    button:hover { background: #4b4; }
+    #log { white-space: pre-wrap; font-size: 12px; max-height: 400px; overflow-y: auto; background: #111; padding: 10px; border-radius: 5px; }
+    h2 { color: #8af; }
+    .status { font-size: 18px; padding: 10px; border-radius: 5px; margin: 10px 0; }
+    .status.ok { background: #143; color: #3f8; }
+    .status.err { background: #421; color: #f84; }
+    .status.working { background: #331; color: #fe8; }
+  </style>
+</head>
+<body>
+  <h1>🖐️ Palm Detection + Full Pipeline Test</h1>
+
+  <div class="box">
+    <h2>Step 1: Test Palm Detection Model</h2>
+    <p>Loads the palm detection WebGPU model and runs it on the test image.</p>
+    <button onclick="testPalmDetection()">Run Palm Detection</button>
+    <div id="palm-status" class="status working">Not started</div>
+    <div class="row">
+      <div>
+        <h3>Input (192x192)</h3>
+        <canvas id="palm-input" width="192" height="192"></canvas>
+      </div>
+      <div>
+        <h3>Detections</h3>
+        <canvas id="palm-output" width="384" height="384"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="box">
+    <h2>Step 2: Test Full Pipeline</h2>
+    <p>Palm detection → crop → landmarks → project back.</p>
+    <button onclick="testFullPipeline()">Run Full Pipeline</button>
+    <div id="full-status" class="status working">Not started</div>
+    <div class="row">
+      <div>
+        <h3>Original + Landmarks</h3>
+        <canvas id="full-output" width="384" height="384"></canvas>
+      </div>
+      <div>
+        <h3>Cropped Hand (256x256)</h3>
+        <canvas id="crop-output" width="256" height="256"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="box">
+    <h2>Step 3: Compare with MediaPipe</h2>
+    <button onclick="testComparison()">Run Comparison</button>
+    <div id="compare-status" class="status working">Not started</div>
+    <div class="row">
+      <div>
+        <h3>Ours (full pipeline)</h3>
+        <canvas id="ours-output" width="384" height="384"></canvas>
+      </div>
+      <div>
+        <h3>MediaPipe</h3>
+        <canvas id="mp-output" width="384" height="384"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="box">
+    <h2>Log</h2>
+    <div id="log"></div>
+  </div>
+
+  <script type="module">
+    const log = document.getElementById('log');
+    function addLog(msg) {
+      const line = `[${new Date().toISOString().substr(11,12)}] ${msg}`;
+      log.textContent += line + '\n';
+      log.scrollTop = log.scrollHeight;
+      console.log(msg);
+    }
+
+    function setStatus(id, text, type) {
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className = `status ${type}`;
+    }
+
+    // Load test image
+    async function loadTestImage() {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      return new Promise((resolve, reject) => {
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = 'hand_nikhil.jpg';
+      });
+    }
+
+    // Draw landmarks on canvas
+    function drawLandmarks(ctx, landmarks, color, size, w, h) {
+      ctx.fillStyle = color;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      for (const lm of landmarks) {
+        ctx.beginPath();
+        ctx.arc(lm.x * w, lm.y * h, size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Draw connections
+      const connections = [
+        [0,1],[1,2],[2,3],[3,4], // thumb
+        [0,5],[5,6],[6,7],[7,8], // index
+        [0,9],[9,10],[10,11],[11,12], // middle
+        [0,13],[13,14],[14,15],[15,16], // ring
+        [0,17],[17,18],[18,19],[19,20], // pinky
+        [5,9],[9,13],[13,17], // palm
+      ];
+      for (const [a, b] of connections) {
+        ctx.beginPath();
+        ctx.moveTo(landmarks[a].x * w, landmarks[a].y * h);
+        ctx.lineTo(landmarks[b].x * w, landmarks[b].y * h);
+        ctx.stroke();
+      }
+    }
+
+    // ============ Palm Detection Test ============
+    window.testPalmDetection = async function() {
+      try {
+        setStatus('palm-status', 'Loading model...', 'working');
+        addLog('Loading palm detection model...');
+
+        const { compilePalmModel, loadWeightsFromBuffer } = await import('./dist/index.js');
+
+        // Load palm detection weights
+        addLog('Fetching palm detection weights...');
+        const [metaRes, binRes] = await Promise.all([
+          fetch('weights/palm_detection_weights.json'),
+          fetch('weights/palm_detection_weights.bin'),
+        ]);
+        const metadata = await metaRes.json();
+        const buffer = await binRes.arrayBuffer();
+        addLog(`Weights loaded: ${(buffer.byteLength / 1024).toFixed(0)} KB, ${metadata.keys.length} tensors`);
+
+        const weights = loadWeightsFromBuffer(metadata, buffer);
+
+        addLog('Compiling palm detection model...');
+        const palmModel = await compilePalmModel(weights);
+        addLog('Model compiled!');
+
+        // Load and resize test image
+        const img = await loadTestImage();
+        addLog(`Test image loaded: ${img.width}x${img.height}`);
+
+        const palmCanvas = document.getElementById('palm-input');
+        const pCtx = palmCanvas.getContext('2d');
+        pCtx.drawImage(img, 0, 0, 192, 192);
+
+        // Run palm detection
+        addLog('Running palm detection...');
+        const t0 = performance.now();
+        const output = await palmModel.run(palmCanvas);
+        const dt = performance.now() - t0;
+        addLog(`Palm detection took ${dt.toFixed(1)}ms`);
+
+        // Check outputs
+        addLog(`Scores: ${output.scores.length} anchors`);
+        addLog(`Regressors: ${output.regressors.length} values`);
+
+        // Find top detections
+        const { createPalmDetector } = await import('./dist/index.js');
+        const detector = createPalmDetector(palmModel, { scoreThreshold: 0.3 });
+        const rois = await detector.detect(palmCanvas);
+        const rawDetections = await detector.detectRaw(palmCanvas);
+        addLog(`Detected ${rawDetections.length} palms (score > 0.3)`);
+
+        for (const det of rawDetections) {
+          addLog(`  Palm: score=${det.score.toFixed(3)}, box=[${det.box.map(v=>v.toFixed(3)).join(', ')}]`);
+          for (let k = 0; k < det.keypoints.length; k++) {
+            addLog(`    kp${k}: [${det.keypoints[k].map(v=>v.toFixed(3)).join(', ')}]`);
+          }
+        }
+
+        addLog(`ROIs: ${rois.length}`);
+        for (const roi of rois) {
+          addLog(`  ROI: center=(${roi.centerX.toFixed(3)}, ${roi.centerY.toFixed(3)}), size=(${roi.width.toFixed(3)}, ${roi.height.toFixed(3)}), rot=${(roi.rotation * 180 / Math.PI).toFixed(1)}°`);
+        }
+
+        // Draw detections
+        const outCanvas = document.getElementById('palm-output');
+        const oCtx = outCanvas.getContext('2d');
+        oCtx.drawImage(img, 0, 0, 384, 384);
+
+        for (const det of rawDetections) {
+          const [cx, cy, w, h] = det.box;
+          oCtx.strokeStyle = det.score > 0.5 ? '#0f0' : '#ff0';
+          oCtx.lineWidth = 2;
+          oCtx.strokeRect((cx - w/2) * 384, (cy - h/2) * 384, w * 384, h * 384);
+
+          // Draw keypoints
+          oCtx.fillStyle = '#f00';
+          for (const [kx, ky] of det.keypoints) {
+            oCtx.beginPath();
+            oCtx.arc(kx * 384, ky * 384, 4, 0, Math.PI * 2);
+            oCtx.fill();
+          }
+
+          // Score label
+          oCtx.fillStyle = '#fff';
+          oCtx.font = '14px monospace';
+          oCtx.fillText(det.score.toFixed(2), (cx - w/2) * 384, (cy - h/2) * 384 - 5);
+        }
+
+        // Draw ROIs
+        for (const roi of rois) {
+          oCtx.save();
+          oCtx.translate(roi.centerX * 384, roi.centerY * 384);
+          oCtx.rotate(roi.rotation);
+          oCtx.strokeStyle = '#00f';
+          oCtx.lineWidth = 2;
+          oCtx.setLineDash([5, 5]);
+          oCtx.strokeRect(-roi.width * 384 / 2, -roi.height * 384 / 2, roi.width * 384, roi.height * 384);
+          oCtx.restore();
+        }
+
+        // Also log score distribution
+        let maxScore = -Infinity;
+        let maxScoreIdx = -1;
+        for (let i = 0; i < output.scores.length; i++) {
+          const s = 1 / (1 + Math.exp(-output.scores[i]));
+          if (s > maxScore) { maxScore = s; maxScoreIdx = i; }
+        }
+        addLog(`Max sigmoid score: ${maxScore.toFixed(4)} at anchor ${maxScoreIdx}`);
+
+        // Count scores above thresholds
+        let above50 = 0, above30 = 0, above10 = 0;
+        for (let i = 0; i < output.scores.length; i++) {
+          const s = 1 / (1 + Math.exp(-output.scores[i]));
+          if (s > 0.5) above50++;
+          if (s > 0.3) above30++;
+          if (s > 0.1) above10++;
+        }
+        addLog(`Score distribution: ${above50} > 0.5, ${above30} > 0.3, ${above10} > 0.1`);
+
+        if (rawDetections.length > 0) {
+          setStatus('palm-status', `✅ Detected ${rawDetections.length} palm(s). Top score: ${rawDetections[0].score.toFixed(3)}`, 'ok');
+        } else {
+          setStatus('palm-status', `⚠️ No palms detected (max score: ${maxScore.toFixed(4)})`, 'err');
+        }
+
+        // Store for later use
+        window._palmModel = palmModel;
+        window._palmDetector = detector;
+        window._testImg = img;
+
+      } catch (e) {
+        addLog(`ERROR: ${e.message}\n${e.stack}`);
+        setStatus('palm-status', `❌ ${e.message}`, 'err');
+      }
+    };
+
+    // ============ Full Pipeline Test ============
+    window.testFullPipeline = async function() {
+      try {
+        setStatus('full-status', 'Loading...', 'working');
+        addLog('Testing full pipeline...');
+
+        const { createFullHandpose } = await import('./dist/index.js');
+
+        addLog('Creating full handpose detector...');
+        const detector = await createFullHandpose({
+          weightsUrl: 'weights',
+          palmWeightsUrl: 'weights',
+          scoreThreshold: 0.3,
+          palmScoreThreshold: 0.3,
+        });
+        addLog('Detector created!');
+
+        const img = await loadTestImage();
+
+        // Create input canvas
+        const inputCanvas = new OffscreenCanvas(img.width, img.height);
+        const iCtx = inputCanvas.getContext('2d');
+        iCtx.drawImage(img, 0, 0);
+
+        addLog('Running full pipeline...');
+        const t0 = performance.now();
+        const results = await detector.detect(inputCanvas);
+        const dt = performance.now() - t0;
+        addLog(`Full pipeline took ${dt.toFixed(1)}ms`);
+        addLog(`Detected ${results.length} hand(s)`);
+
+        for (const result of results) {
+          addLog(`  Hand: score=${result.score.toFixed(3)}, handedness=${result.handedness}`);
+          addLog(`  Landmarks (first 5):`);
+          for (let i = 0; i < Math.min(5, result.landmarks.length); i++) {
+            const lm = result.landmarks[i];
+            addLog(`    [${i}]: x=${lm.x.toFixed(4)}, y=${lm.y.toFixed(4)}, z=${lm.z.toFixed(4)}`);
+          }
+        }
+
+        // Draw results
+        const outCanvas = document.getElementById('full-output');
+        const oCtx = outCanvas.getContext('2d');
+        oCtx.drawImage(img, 0, 0, 384, 384);
+
+        for (const result of results) {
+          drawLandmarks(oCtx, result.landmarks, '#0f0', 4, 384, 384);
+        }
+
+        if (results.length > 0) {
+          setStatus('full-status', `✅ Detected ${results.length} hand(s). Score: ${results[0].score.toFixed(3)}`, 'ok');
+        } else {
+          setStatus('full-status', '⚠️ No hands detected', 'err');
+        }
+
+        window._fullDetector = detector;
+
+      } catch (e) {
+        addLog(`ERROR: ${e.message}\n${e.stack}`);
+        setStatus('full-status', `❌ ${e.message}`, 'err');
+      }
+    };
+
+    // ============ Comparison Test ============
+    window.testComparison = async function() {
+      try {
+        setStatus('compare-status', 'Loading MediaPipe...', 'working');
+        addLog('Running comparison test...');
+
+        // Our result
+        if (!window._fullDetector) {
+          addLog('Running full pipeline first...');
+          await window.testFullPipeline();
+        }
+
+        const img = await loadTestImage();
+        const inputCanvas = new OffscreenCanvas(img.width, img.height);
+        const iCtx = inputCanvas.getContext('2d');
+        iCtx.drawImage(img, 0, 0);
+
+        const ourResults = await window._fullDetector.detect(inputCanvas);
+
+        // Draw our results
+        const oursCanvas = document.getElementById('ours-output');
+        const oCtx = oursCanvas.getContext('2d');
+        oCtx.drawImage(img, 0, 0, 384, 384);
+        for (const result of ourResults) {
+          drawLandmarks(oCtx, result.landmarks, '#0f0', 4, 384, 384);
+        }
+
+        setStatus('compare-status', `Our pipeline: ${ourResults.length} hand(s) detected`, 'ok');
+        addLog('Comparison complete (MediaPipe comparison TBD — run side by side with accuracy-test.html)');
+
+      } catch (e) {
+        addLog(`ERROR: ${e.message}\n${e.stack}`);
+        setStatus('compare-status', `❌ ${e.message}`, 'err');
+      }
+    };
+  </script>
+</body>
+</html>

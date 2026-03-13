@@ -1384,6 +1384,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     mapAsyncNoWait: { median: number; min: number };
     total: { median: number; min: number };
     pipelined: { median: number; min: number };
+    renderReadback: { median: number; min: number } | null;
   }> {
     function stats(times: number[]) {
       const s = [...times].sort((a, b) => a - b);
@@ -1474,7 +1475,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       mapAsyncNoWait: stats(mapNoWaitTimes),
       total: stats(totalTimes),
       pipelined: stats(pipeTimes),
-      renderReadback,
+      renderReadback: renderReadback as { median: number; min: number } | null,
     };
   }
 
@@ -1572,7 +1573,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   return {
     device, run, runFromCanvas, runFromCanvasViaRender, runFromCanvasPipelined, flushPipelined,
     benchmark, benchmarkGPU, benchmarkDiagnostic, debugLayerOutputs,
-    _device: device,
-    _benchmarkSubmitOnly: submitOnly,
-  };
+  } satisfies CompiledModel;
 }

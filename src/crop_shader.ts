@@ -1,0 +1,156 @@
+/**
+ * WebGPU compute shader for affine crop + rotate + resize.
+ *
+ * Takes an original camera frame texture and applies an affine transform
+ * to produce a 256x256 cropped hand image suitable for the landmark model.
+ *
+ * Uses bilinear interpolation for smooth resampling.
+ */
+
+function S(s: string): string {
+  return s.replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ').replace(/\s*([{}();,=+\-*/<>!&|@])\s*/g, '$1').trim();
+}
+
+/**
+ * Affine crop shader.
+ *
+ * Params uniform:
+ * - src_width, src_height: source texture dimensions
+ * - dst_size: output size (256)
+ * - _pad: padding for alignment
+ *
+ * Transform uniform (6 floats packed as vec4 + vec2):
+ * - [a, b, tx, c, d, ty]: affine matrix mapping crop pixel → source normalized [0,1]
+ *   source_x = a * crop_x + b * crop_y + tx
+ *   source_y = c * crop_x + d * crop_y + ty
+ *
+ * Output: CHW float32 buffer of size [3, dst_size, dst_size] normalized to [0,1]
+ */
+export const CROP_AFFINE_SHADER = S(`
+struct CropParams { src_width:u32, src_height:u32, dst_size:u32, _pad:u32, }
+struct AffineTransform { a:f32, b:f32, tx:f32, c:f32, d:f32, ty:f32, }
+
+@group(0)@binding(0) var src_tex:texture_2d<f32>;
+@group(0)@binding(1) var<storage,read_write> output:array<f32>;
+@group(0)@binding(2) var<uniform> params:CropParams;
+@group(0)@binding(3) var<uniform> transform:AffineTransform;
+
+@compute @workgroup_size(16,16,1)
+fn main(@builtin(global_invocation_id) gid:vec3<u32>){
+  let dst_x=gid.x; let dst_y=gid.y;
+  if(dst_x>=params.dst_size||dst_y>=params.dst_size){return;}
+
+  // Map crop pixel to source normalized coordinates
+  let fx=f32(dst_x)+0.5;
+  let fy=f32(dst_y)+0.5;
+  let src_nx=transform.a*fx+transform.b*fy+transform.tx;
+  let src_ny=transform.c*fx+transform.d*fy+transform.ty;
+
+  // Convert to pixel coordinates
+  let src_px=src_nx*f32(params.src_width)-0.5;
+  let src_py=src_ny*f32(params.src_height)-0.5;
+
+  // Bilinear interpolation
+  let x0=i32(floor(src_px)); let y0=i32(floor(src_py));
+  let x1=x0+1; let y1=y0+1;
+  let lx=src_px-f32(x0); let ly=src_py-f32(y0);
+
+  let sw=i32(params.src_width); let sh=i32(params.src_height);
+
+  // Clamp to bounds (or return 0 for out-of-bounds)
+  var p00=vec4<f32>(0.0); var p01=vec4<f32>(0.0);
+  var p10=vec4<f32>(0.0); var p11=vec4<f32>(0.0);
+
+  if(x0>=0 && x0<sw && y0>=0 && y0<sh){ p00=textureLoad(src_tex,vec2<u32>(u32(x0),u32(y0)),0); }
+  if(x1>=0 && x1<sw && y0>=0 && y0<sh){ p01=textureLoad(src_tex,vec2<u32>(u32(x1),u32(y0)),0); }
+  if(x0>=0 && x0<sw && y1>=0 && y1<sh){ p10=textureLoad(src_tex,vec2<u32>(u32(x0),u32(y1)),0); }
+  if(x1>=0 && x1<sw && y1>=0 && y1<sh){ p11=textureLoad(src_tex,vec2<u32>(u32(x1),u32(y1)),0); }
+
+  let pixel=p00*(1.0-lx)*(1.0-ly)+p01*lx*(1.0-ly)+p10*(1.0-lx)*ly+p11*lx*ly;
+
+  // Write CHW format
+  let out_stride=params.dst_size*params.dst_size;
+  output[0u*out_stride+dst_y*params.dst_size+dst_x]=pixel.r;
+  output[1u*out_stride+dst_y*params.dst_size+dst_x]=pixel.g;
+  output[2u*out_stride+dst_y*params.dst_size+dst_x]=pixel.b;
+}
+`);
+
+export interface CropPipeline {
+  /** Execute the crop transform and write output to the given buffer */
+  crop: (
+    encoder: GPUCommandEncoder,
+    sourceTexture: GPUTexture,
+    outputBuffer: GPUBuffer,
+    transform: [number, number, number, number, number, number],
+    srcWidth: number,
+    srcHeight: number,
+    dstSize: number,
+  ) => void;
+}
+
+/**
+ * Create a reusable crop pipeline on the given device.
+ */
+export function createCropPipeline(device: GPUDevice): CropPipeline {
+  const shaderModule = device.createShaderModule({ code: CROP_AFFINE_SHADER });
+
+  const layout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' as const } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' as GPUBufferBindingType } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' as GPUBufferBindingType } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' as GPUBufferBindingType } },
+    ],
+  });
+
+  const pipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+    compute: { module: shaderModule, entryPoint: 'main' },
+  });
+
+  function crop(
+    encoder: GPUCommandEncoder,
+    sourceTexture: GPUTexture,
+    outputBuffer: GPUBuffer,
+    transform: [number, number, number, number, number, number],
+    srcWidth: number,
+    srcHeight: number,
+    dstSize: number,
+  ): void {
+    const paramsData = new Uint32Array([srcWidth, srcHeight, dstSize, 0]);
+    const paramsBuf = device.createBuffer({
+      size: paramsData.byteLength,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(paramsBuf, 0, paramsData);
+
+    const transformData = new Float32Array(transform);
+    // Pad to 32 bytes (8 floats) for uniform alignment
+    const transformPadded = new Float32Array(8);
+    transformPadded.set(transformData);
+    const transformBuf = device.createBuffer({
+      size: transformPadded.byteLength,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(transformBuf, 0, transformPadded);
+
+    const bindGroup = device.createBindGroup({
+      layout,
+      entries: [
+        { binding: 0, resource: sourceTexture.createView() },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: paramsBuf } },
+        { binding: 3, resource: { buffer: transformBuf } },
+      ],
+    });
+
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.ceil(dstSize / 16), Math.ceil(dstSize / 16), 1);
+    pass.end();
+  }
+
+  return { crop };
+}

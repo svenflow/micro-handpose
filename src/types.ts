@@ -33,6 +33,12 @@ export interface HandposeOptions {
   scoreThreshold?: number;
   /** Force f32 weights even when shader-f16 is available. Default: false */
   forceF32?: boolean;
+  /** URL to fetch palm detection weights from. Required for full-frame detection. */
+  palmWeightsUrl?: string;
+  /** Minimum palm detection score (0-1). Default: 0.5 */
+  palmScoreThreshold?: number;
+  /** Maximum number of hands to detect. Default: 2 */
+  maxHands?: number;
 }
 
 /** A handpose detector instance */
@@ -58,6 +64,34 @@ export interface Handpose {
 
   /** Debug: read intermediate layer outputs to find where activations die */
   debugLayerOutputs: (source: HandposeInput) => Promise<any>;
+
+  /** Dispose GPU resources */
+  dispose: () => void;
+}
+
+/** Detection result for a single hand with full-frame coordinates */
+export interface FullHandposeResult {
+  /** Confidence score (0-1) that a hand is present */
+  score: number;
+  /** Whether this is a left or right hand */
+  handedness: 'left' | 'right';
+  /** 21 hand landmarks in original image coordinates [0,1] */
+  landmarks: Landmark[];
+  /** Palm detection score */
+  palmScore: number;
+}
+
+/** A full-frame handpose detector instance (palm detection + landmarks) */
+export interface FullHandpose {
+  /**
+   * Detect hand landmarks from a full camera frame.
+   *
+   * Runs palm detection to find hands, crops each detected hand,
+   * runs landmark detection, and projects landmarks back to original coordinates.
+   *
+   * Returns array of detected hands (empty if none found).
+   */
+  detect: (source: HandposeInput) => Promise<FullHandposeResult[]>;
 
   /** Dispose GPU resources */
   dispose: () => void;
