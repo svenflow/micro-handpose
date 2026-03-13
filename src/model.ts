@@ -749,7 +749,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     const { inCh, outCh, h, w, stride, prefix } = spec;
     const outH = stride === 2 ? h / 2 : h;
     const outW = stride === 2 ? w / 2 : w;
-    const pad = stride === 1 ? 2 : 1;
+    const pad = 2; // Always pad=2 for 5x5 kernel (matches PyTorch nn.Conv2d(kernel_size=5, padding=2))
 
     const dwWT = weights.get(`${prefix}convs.0.weight`);
     const dwBT = weights.get(`${prefix}convs.0.bias`);

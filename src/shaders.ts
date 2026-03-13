@@ -227,7 +227,8 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let x=gid.x; let y=gid.y; let c=gid.z;
   if(x>=params.in_size||y>=params.in_size||c>=params.channels){return;}
   let in_idx=c*params.in_size*params.in_size+y*params.in_size+x;
-  let out_idx=c*params.out_size*params.out_size+y*params.out_size+x;
+  let oy=y+1u; let ox=x+1u;
+  let out_idx=c*params.out_size*params.out_size+oy*params.out_size+ox;
   output[out_idx]=input[in_idx];
 }
 `);
@@ -670,8 +671,9 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   if(x>=params.in_size||y>=params.in_size){return;}
   let pixel=textureLoad(input_tex,vec2<u32>(x,y),0);
   let out_stride=params.out_size*params.out_size;
-  output[0u*out_stride+y*params.out_size+x]=pixel.r;
-  output[1u*out_stride+y*params.out_size+x]=pixel.g;
-  output[2u*out_stride+y*params.out_size+x]=pixel.b;
+  let oy=y+1u; let ox=x+1u;
+  output[0u*out_stride+oy*params.out_size+ox]=pixel.r;
+  output[1u*out_stride+oy*params.out_size+ox]=pixel.g;
+  output[2u*out_stride+oy*params.out_size+ox]=pixel.b;
 }
 `);
