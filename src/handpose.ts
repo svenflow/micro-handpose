@@ -258,14 +258,7 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       }
 
       // Project back to original image coordinates
-      const refDim = Math.min(srcWidth, srcHeight);
-      const cropPixelSize = roi.width * refDim;
-      const projROI = {
-        ...roi,
-        width: cropPixelSize / srcWidth,
-        height: cropPixelSize / srcHeight,
-      };
-      const originalLandmarks = projectLandmarksToOriginal(cropLandmarks, projROI);
+      const originalLandmarks = projectLandmarksToOriginal(cropLandmarks, roi, srcWidth, srcHeight);
 
       // Apply one euro filter for temporal smoothing
       const handIdx = results.length;

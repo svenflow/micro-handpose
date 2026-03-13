@@ -316,14 +316,21 @@ export function computeCropTransform(roi: HandROI, cropSize: number = 256): {
   const sy = roi.height / cropSize;
 
   // Forward: crop [0,cropSize] → original [0,1]
-  // Step 1: center crop at origin: x' = x - cropSize/2, y' = y - cropSize/2
-  // Step 2: scale: x'' = x' * sx, y'' = y' * sy
-  // Step 3: rotate: x''' = x''*cos - y''*sin, y''' = x''*sin + y''*cos
-  // Step 4: translate to ROI center: xOut = x''' + cx, yOut = y''' + cy
+  // The crop applies R(θ) to go from original → crop space.
+  // So crop → original requires R(-θ), the inverse rotation.
+  //
+  // Steps: center → scale → rotate_inverse → translate to ROI center
+  // R(-θ) = [cos, sin; -sin, cos]
+  //
+  // For non-square images (sx ≠ sy), the rotation happens in uniform physical
+  // space. The correct decomposition is:
+  //   x_out = sx * (cos * dx + sin * dy) + cx
+  //   y_out = sy * (-sin * dx + cos * dy) + cy
+  // where dx = x - cropSize/2, dy = y - cropSize/2
 
   const a = sx * cos;
-  const b = -sy * sin;
-  const c = sx * sin;
+  const b = sx * sin;
+  const c = -sy * sin;
   const d = sy * cos;
   const tx = roi.centerX - (a * cropSize / 2 + b * cropSize / 2);
   const ty = roi.centerY - (c * cropSize / 2 + d * cropSize / 2);
@@ -347,20 +354,40 @@ export function computeCropTransform(roi: HandROI, cropSize: number = 256): {
 /**
  * Project landmarks from crop space back to original image coordinates.
  *
+ * The crop is always square in pixel space (using refDim = min(srcW, srcH)).
+ * For non-square images, the X and Y normalization factors differ, so we
+ * need srcWidth/srcHeight to correctly project back.
+ *
  * @param landmarks Array of {x, y, z} in crop space [0, 1] (from 256x256 crop)
- * @param roi The hand ROI used for cropping
+ * @param roi The hand ROI used for cropping (width/height in normalized [0,1] coords using refDim)
+ * @param srcWidth Original image width in pixels
+ * @param srcHeight Original image height in pixels
  * @returns Array of {x, y, z} in original image space [0, 1]
  */
 export function projectLandmarksToOriginal(
   landmarks: Array<{ x: number; y: number; z: number }>,
   roi: HandROI,
+  srcWidth: number,
+  srcHeight: number,
 ): Array<{ x: number; y: number; z: number }> {
-  const { forward } = computeCropTransform(roi, 1); // Use [0,1] crop space
-  const [a, b, tx, c, d, ty] = forward;
+  const cos = Math.cos(roi.rotation);
+  const sin = Math.sin(roi.rotation);
+  const refDim = Math.min(srcWidth, srcHeight);
+  const physicalSize = roi.width * refDim; // crop size in pixels (square)
+  const wx = physicalSize / srcWidth;  // X span in normalized image coords
+  const wy = physicalSize / srcHeight; // Y span in normalized image coords
 
-  return landmarks.map(lm => ({
-    x: a * lm.x + b * lm.y + tx,
-    y: c * lm.x + d * lm.y + ty,
-    z: lm.z, // z is relative depth, no transform needed
-  }));
+  // Crop → original: undo rotation R(-θ) in uniform physical space,
+  // then normalize to image coordinates.
+  //   x_out = wx * (cos*(x-0.5) + sin*(y-0.5)) + roi.centerX
+  //   y_out = wy * (-sin*(x-0.5) + cos*(y-0.5)) + roi.centerY
+  return landmarks.map(lm => {
+    const dx = lm.x - 0.5;
+    const dy = lm.y - 0.5;
+    return {
+      x: wx * (cos * dx + sin * dy) + roi.centerX,
+      y: wy * (-sin * dx + cos * dy) + roi.centerY,
+      z: lm.z,
+    };
+  });
 }

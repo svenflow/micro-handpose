@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Landmark Comparison: micro-handpose vs MediaPipe</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; }
+    .row { display: flex; gap: 20px; flex-wrap: wrap; align-items: start; }
+    .box { background: #222; padding: 15px; border-radius: 8px; margin: 10px 0; }
+    canvas { border: 1px solid #444; }
+    #log { white-space: pre-wrap; font-size: 12px; max-height: 600px; overflow-y: auto; background: #111; padding: 10px; border-radius: 5px; }
+    .status { font-size: 16px; padding: 8px 12px; border-radius: 5px; margin: 8px 0; }
+    .status.ok { background: #143; color: #3f8; }
+    .status.err { background: #421; color: #f84; }
+    .status.working { background: #331; color: #fe8; }
+    h2 { color: #8af; margin-top: 0; }
+    .legend { font-size: 14px; margin: 8px 0; }
+    .legend .purple { color: #7c6aef; }
+    .legend .green { color: #34d399; }
+  </style>
+</head>
+<body>
+  <h1>Landmark Comparison Test (Static Image)</h1>
+  <p>Runs both micro-handpose and MediaPipe on the same static hand image, draws both, and compares coordinates.</p>
+
+  <div class="box">
+    <div id="status" class="status working">Loading...</div>
+    <div class="legend">
+      <span class="purple">&#9679; Purple = micro-handpose</span> &nbsp;&nbsp;
+      <span class="green">&#9679; Green = MediaPipe</span>
+    </div>
+    <div class="row">
+      <div>
+        <h3>Overlay (both on same image)</h3>
+        <canvas id="overlay" width="500" height="500"></canvas>
+      </div>
+      <div>
+        <h3>micro-handpose only</h3>
+        <canvas id="micro-canvas" width="500" height="500"></canvas>
+      </div>
+      <div>
+        <h3>MediaPipe only</h3>
+        <canvas id="mp-canvas" width="500" height="500"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="box">
+    <h2>Coordinate Comparison</h2>
+    <div id="log"></div>
+  </div>
+
+  <script type="module">
+    const log = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+
+    function addLog(msg) {
+      log.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],
+      [0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],
+      [5,9],[9,13],[13,17],
+    ];
+
+    const NAMES = [
+      'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+      'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+      'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+      'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+      'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+    ];
+
+    function drawHand(ctx, landmarks, w, h, color, dotSize = 4) {
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.8;
+
+      for (const [a, b] of CONNECTIONS) {
+        const la = landmarks[a];
+        const lb = landmarks[b];
+        if (!la || !lb) continue;
+        ctx.beginPath();
+        ctx.moveTo(la.x * w, la.y * h);
+        ctx.lineTo(lb.x * w, lb.y * h);
+        ctx.stroke();
+      }
+
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i];
+        if (!lm) continue;
+        ctx.beginPath();
+        ctx.arc(lm.x * w, lm.y * h, i === 0 ? dotSize + 2 : dotSize, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    async function run() {
+      try {
+        // Load test image
+        statusEl.textContent = 'Loading test image...';
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = 'hand_nikhil.jpg';
+        });
+        addLog(`Image loaded: ${img.width}x${img.height}`);
+
+        // Run micro-handpose
+        statusEl.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=compare');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.1,
+        });
+        addLog('micro-handpose loaded');
+
+        statusEl.textContent = 'Running micro-handpose...';
+        const microResults = await handpose.detect(img);
+        addLog(`micro-handpose: ${microResults.length} hand(s) detected`);
+
+        if (microResults.length > 0) {
+          addLog(`  score: ${microResults[0].score.toFixed(4)}, handedness: ${microResults[0].handedness}`);
+          for (let i = 0; i < 21; i++) {
+            const lm = microResults[0].landmarks[i];
+            addLog(`  [${i}] ${NAMES[i].padEnd(12)} x=${lm.x.toFixed(4)} y=${lm.y.toFixed(4)} z=${lm.z.toFixed(4)}`);
+          }
+        }
+
+        // Run MediaPipe
+        statusEl.textContent = 'Loading MediaPipe...';
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+
+        const mpHandLandmarker = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'CPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+        });
+        addLog('MediaPipe loaded');
+
+        statusEl.textContent = 'Running MediaPipe...';
+        const mpResults = mpHandLandmarker.detect(img);
+        addLog(`MediaPipe: ${mpResults.landmarks?.length || 0} hand(s) detected`);
+
+        if (mpResults.landmarks && mpResults.landmarks.length > 0) {
+          const mpLandmarks = mpResults.landmarks[0];
+          addLog(`  handedness: ${mpResults.handednesses?.[0]?.[0]?.categoryName}`);
+          for (let i = 0; i < 21; i++) {
+            const lm = mpLandmarks[i];
+            addLog(`  [${i}] ${NAMES[i].padEnd(12)} x=${lm.x.toFixed(4)} y=${lm.y.toFixed(4)} z=${lm.z.toFixed(4)}`);
+          }
+        }
+
+        // Compare
+        if (microResults.length > 0 && mpResults.landmarks?.length > 0) {
+          const microLm = microResults[0].landmarks;
+          const mpLm = mpResults.landmarks[0];
+
+          addLog('\n=== COMPARISON ===');
+          addLog(`${'#'.padEnd(3)} ${'Name'.padEnd(12)} ${'micro_x'.padEnd(9)} ${'mp_x'.padEnd(9)} ${'dx'.padEnd(9)} ${'micro_y'.padEnd(9)} ${'mp_y'.padEnd(9)} ${'dy'.padEnd(9)} dist`);
+
+          let totalDist = 0;
+          let maxDist = 0;
+          let maxIdx = 0;
+
+          // Check for potential X-flip
+          let microMeanX = 0, mpMeanX = 0;
+          let microMeanY = 0, mpMeanY = 0;
+          for (let i = 0; i < 21; i++) {
+            microMeanX += microLm[i].x;
+            mpMeanX += mpLm[i].x;
+            microMeanY += microLm[i].y;
+            mpMeanY += mpLm[i].y;
+          }
+          microMeanX /= 21; mpMeanX /= 21;
+          microMeanY /= 21; mpMeanY /= 21;
+
+          // Also check flipped version
+          let distNormal = 0, distFlipped = 0;
+          for (let i = 0; i < 21; i++) {
+            const m = microLm[i];
+            const p = mpLm[i];
+            distNormal += Math.sqrt((m.x - p.x) ** 2 + (m.y - p.y) ** 2);
+            distFlipped += Math.sqrt(((1 - m.x) - p.x) ** 2 + (m.y - p.y) ** 2);
+          }
+
+          for (let i = 0; i < 21; i++) {
+            const m = microLm[i];
+            const p = mpLm[i];
+            const dx = m.x - p.x;
+            const dy = m.y - p.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            totalDist += dist;
+            if (dist > maxDist) { maxDist = dist; maxIdx = i; }
+            addLog(`${String(i).padEnd(3)} ${NAMES[i].padEnd(12)} ${m.x.toFixed(4).padEnd(9)} ${p.x.toFixed(4).padEnd(9)} ${(dx > 0 ? '+' : '') + dx.toFixed(4).padStart(8)} ${m.y.toFixed(4).padEnd(9)} ${p.y.toFixed(4).padEnd(9)} ${(dy > 0 ? '+' : '') + dy.toFixed(4).padStart(8)} ${dist.toFixed(4)}`);
+          }
+
+          addLog(`\nAvg distance: ${(totalDist / 21).toFixed(4)}`);
+          addLog(`Max distance: ${maxDist.toFixed(4)} at ${NAMES[maxIdx]}`);
+          addLog(`Center offset: dx=${(microMeanX - mpMeanX).toFixed(4)}, dy=${(microMeanY - mpMeanY).toFixed(4)}`);
+          addLog(`\nFlip check: normal_dist=${(distNormal/21).toFixed(4)}, flipped_dist=${(distFlipped/21).toFixed(4)}`);
+          if (distFlipped < distNormal * 0.7) {
+            addLog('*** X-AXIS FLIP DETECTED: landmarks are horizontally mirrored! ***');
+          } else if (distNormal < distFlipped * 0.7) {
+            addLog('Orientation looks correct (normal is better than flipped)');
+          } else {
+            addLog('Unclear — distances are similar either way');
+          }
+
+          // Handedness comparison
+          addLog(`\nHandedness: micro=${microResults[0].handedness}, mp=${mpResults.handednesses?.[0]?.[0]?.categoryName}`);
+        }
+
+        // Draw results
+        const W = 500, H = 500;
+
+        // Draw overlay
+        const overlayCtx = document.getElementById('overlay').getContext('2d');
+        overlayCtx.drawImage(img, 0, 0, W, H);
+        if (mpResults.landmarks?.length > 0) {
+          drawHand(overlayCtx, mpResults.landmarks[0], W, H, '#34d399', 5);
+        }
+        if (microResults.length > 0) {
+          drawHand(overlayCtx, microResults[0].landmarks, W, H, '#7c6aef', 4);
+        }
+
+        // Draw micro only
+        const microCtx = document.getElementById('micro-canvas').getContext('2d');
+        microCtx.drawImage(img, 0, 0, W, H);
+        if (microResults.length > 0) {
+          drawHand(microCtx, microResults[0].landmarks, W, H, '#7c6aef', 5);
+        }
+
+        // Draw MP only
+        const mpCtx = document.getElementById('mp-canvas').getContext('2d');
+        mpCtx.drawImage(img, 0, 0, W, H);
+        if (mpResults.landmarks?.length > 0) {
+          drawHand(mpCtx, mpResults.landmarks[0], W, H, '#34d399', 5);
+        }
+
+        statusEl.textContent = '✅ Done — see overlay and coordinates below';
+        statusEl.className = 'status ok';
+
+      } catch (e) {
+        addLog(`ERROR: ${e.message}\n${e.stack}`);
+        statusEl.textContent = `❌ ${e.message}`;
+        statusEl.className = 'status err';
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
