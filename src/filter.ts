@@ -89,9 +89,12 @@ export interface SmootherOptions {
 
 export function createLandmarkSmoother(options: SmootherOptions = {}): LandmarkSmoother {
   const {
-    // MediaPipe defaults for hand landmarks (from their config)
-    minCutoff = 1.0,
-    beta = 10.0,
+    // Tuned to match MediaPipe's visual smoothness:
+    // - Low minCutoff = heavy smoothing for slow/stationary movements (removes jitter)
+    // - High beta = quickly reduce smoothing during fast movements (reduces lag)
+    // - dCutoff filters the speed estimate itself
+    minCutoff = 0.05,
+    beta = 80.0,
     dCutoff = 1.0,
   } = options;
 
