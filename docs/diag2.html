@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>micro-handpose hand image diagnostic</title>
+<style>body{background:#111;color:#eee;font-family:monospace;padding:16px;font-size:13px;white-space:pre-wrap;word-break:break-all;}
+canvas{border:1px solid #333;margin:8px 0;display:block;max-width:256px;}
+.ok{color:#34d399;} .fail{color:#f87171;} .warn{color:#fbbf24;}
+</style>
+</head><body>
+<div id="log">HAND IMAGE DIAGNOSTIC — tests model with real hand photo
+================================================
+</div>
+<canvas id="inputCanvas" width="256" height="256"></canvas>
+<canvas id="outputCanvas" width="256" height="256"></canvas>
+<script type="module">
+const log = document.getElementById('log');
+function L(msg, cls) {
+  if (cls) {
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = msg + '\n';
+    log.appendChild(span);
+  } else {
+    log.textContent += msg + '\n';
+  }
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+try {
+  // Step 1: Load real hand image
+  L('1. Loading hand image...');
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = () => reject(new Error('Failed to load hand image'));
+    img.src = './hand_test.jpg?v=' + Date.now();
+  });
+  L('   loaded: ' + img.width + 'x' + img.height);
+
+  // Step 2: Draw to 256x256 canvas
+  L('2. Drawing to 256x256 canvas...');
+  const inputCanvas = document.getElementById('inputCanvas');
+  const ictx = inputCanvas.getContext('2d');
+  // Center-crop to square, then resize
+  const size = Math.min(img.width, img.height);
+  const sx = (img.width - size) / 2;
+  const sy = (img.height - size) / 2;
+  ictx.drawImage(img, sx, sy, size, size, 0, 0, 256, 256);
+  L('   drawn (center-cropped ' + size + 'x' + size + ' → 256x256)');
+
+  // Verify canvas has non-trivial content
+  const pixels = ictx.getImageData(0, 0, 256, 256).data;
+  let nonZero = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i] > 10 || pixels[i+1] > 10 || pixels[i+2] > 10) nonZero++;
+  }
+  L('   non-black pixels: ' + nonZero + '/' + (256*256) + ' (' + (100*nonZero/(256*256)).toFixed(1) + '%)');
+
+  // Step 3: Check WebGPU
+  L('3. Checking WebGPU...');
+  if (!navigator.gpu) { L('   ERROR: No WebGPU', 'fail'); throw new Error('no webgpu'); }
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) { L('   ERROR: No adapter', 'fail'); throw new Error('no adapter'); }
+  const hasF16 = adapter.features.has('shader-f16');
+  L('   adapter: ' + (adapter.info?.vendor || 'unknown') + ' / ' + (adapter.info?.architecture || 'unknown'));
+  L('   shader-f16: ' + hasF16);
+  L('   maxComputeInvocationsPerWorkgroup: ' + adapter.limits.maxComputeInvocationsPerWorkgroup);
+
+  // Step 4: Create model
+  L('4. Creating handpose model (scoreThreshold=0)...');
+  const { createHandpose } = await import('./dist/index.js?v=' + Date.now());
+  const hp = await createHandpose({ weightsUrl: './weights/', scoreThreshold: 0 });
+  L('   model created OK', 'ok');
+
+  // Step 5: Run inference on hand image
+  L('5. Running inference on hand image...');
+  const t0 = performance.now();
+  const result = await hp.detect(inputCanvas);
+  const elapsed = performance.now() - t0;
+  L('   inference time: ' + elapsed.toFixed(1) + 'ms');
+
+  if (!result) {
+    L('   ❌ result is NULL — model returned nothing even with threshold=0!', 'fail');
+    L('   this means the GPU pipeline is completely broken', 'fail');
+  } else {
+    L('   score: ' + result.score.toFixed(6));
+    L('   handedness: ' + result.handedness);
+
+    // Check if landmarks are all zero
+    const allZero = result.landmarks.every(l => l.x === 0 && l.y === 0 && l.z === 0);
+    const anyNaN = result.landmarks.some(l => isNaN(l.x) || isNaN(l.y) || isNaN(l.z));
+
+    if (anyNaN) {
+      L('   ❌ landmarks contain NaN — GPU producing garbage!', 'fail');
+    } else if (allZero) {
+      L('   ❌ ALL LANDMARKS ARE ZERO — GPU pipeline not producing output!', 'fail');
+    } else if (result.score < 0.1) {
+      L('   ⚠️ very low score but non-zero landmarks — model runs but doesn\'t detect hand', 'warn');
+    } else {
+      L('   ✅ MODEL WORKS! Score=' + result.score.toFixed(3) + ', non-zero landmarks', 'ok');
+    }
+
+    // Print all 21 landmarks
+    L('\n   All 21 landmarks:');
+    for (let i = 0; i < 21; i++) {
+      const l = result.landmarks[i];
+      const label = ['WRIST','THUMB_CMC','THUMB_MCP','THUMB_IP','THUMB_TIP',
+        'INDEX_MCP','INDEX_PIP','INDEX_DIP','INDEX_TIP',
+        'MIDDLE_MCP','MIDDLE_PIP','MIDDLE_DIP','MIDDLE_TIP',
+        'RING_MCP','RING_PIP','RING_DIP','RING_TIP',
+        'PINKY_MCP','PINKY_PIP','PINKY_DIP','PINKY_TIP'][i];
+      L('   [' + i.toString().padStart(2) + '] ' + label.padEnd(12) + ' x=' + l.x.toFixed(4) + ' y=' + l.y.toFixed(4) + ' z=' + l.z.toFixed(4));
+    }
+
+    // Draw landmarks on output canvas
+    const outCanvas = document.getElementById('outputCanvas');
+    const octx = outCanvas.getContext('2d');
+    octx.drawImage(inputCanvas, 0, 0);
+
+    // Draw connections
+    const connections = [
+      [0,1],[1,2],[2,3],[3,4],  // thumb
+      [0,5],[5,6],[6,7],[7,8],  // index
+      [0,9],[9,10],[10,11],[11,12], // middle
+      [0,13],[13,14],[14,15],[15,16], // ring
+      [0,17],[17,18],[18,19],[19,20], // pinky
+      [5,9],[9,13],[13,17],     // palm
+    ];
+    octx.strokeStyle = '#7c6aef';
+    octx.lineWidth = 2;
+    for (const [a, b] of connections) {
+      const la = result.landmarks[a], lb = result.landmarks[b];
+      octx.beginPath();
+      octx.moveTo(la.x * 256, la.y * 256);
+      octx.lineTo(lb.x * 256, lb.y * 256);
+      octx.stroke();
+    }
+
+    // Draw dots
+    for (let i = 0; i < 21; i++) {
+      const l = result.landmarks[i];
+      octx.fillStyle = i === 0 ? '#f87171' : '#34d399';
+      octx.beginPath();
+      octx.arc(l.x * 256, l.y * 256, 4, 0, Math.PI * 2);
+      octx.fill();
+    }
+  }
+
+  // Step 6: Benchmark
+  L('\n6. Benchmark (10 warmup + 20 timed runs)...');
+  for (let i = 0; i < 10; i++) await hp.detect(inputCanvas);
+
+  const times = [];
+  for (let i = 0; i < 20; i++) {
+    const t = performance.now();
+    await hp.detect(inputCanvas);
+    times.push(performance.now() - t);
+  }
+  times.sort((a, b) => a - b);
+  const median = times[Math.floor(times.length / 2)];
+  const min = times[0];
+  const avg = times.reduce((a, b) => a + b, 0) / times.length;
+  L('   min:    ' + min.toFixed(2) + 'ms');
+  L('   median: ' + median.toFixed(2) + 'ms');
+  L('   avg:    ' + avg.toFixed(2) + 'ms');
+  L('   all:    [' + times.map(t => t.toFixed(1)).join(', ') + ']');
+
+  // Step 7: Detailed GPU-only timing via benchmarkDiagnostic if available
+  L('\n7. Detailed timing breakdown...');
+  try {
+    const diag = await hp.benchmarkDiagnostic(inputCanvas);
+    L('   GPU-only:        median=' + diag.gpuOnly.median.toFixed(2) + 'ms, min=' + diag.gpuOnly.min.toFixed(2) + 'ms');
+    L('   mapAsync-only:   median=' + diag.mapAsyncOnly.median.toFixed(2) + 'ms, min=' + diag.mapAsyncOnly.min.toFixed(2) + 'ms');
+    L('   mapAsync-noWait: median=' + diag.mapAsyncNoWait.median.toFixed(2) + 'ms, min=' + diag.mapAsyncNoWait.min.toFixed(2) + 'ms');
+    L('   total:           median=' + diag.total.median.toFixed(2) + 'ms, min=' + diag.total.min.toFixed(2) + 'ms');
+    L('   pipelined:       median=' + diag.pipelined.median.toFixed(2) + 'ms, min=' + diag.pipelined.min.toFixed(2) + 'ms');
+    if (diag.renderReadback) {
+      L('   render-readback: median=' + diag.renderReadback.median.toFixed(2) + 'ms, min=' + diag.renderReadback.min.toFixed(2) + 'ms');
+    }
+  } catch (e) {
+    L('   benchmarkDiagnostic error: ' + e.message, 'warn');
+  }
+
+  L('\n=== ALL DONE ===', 'ok');
+  L('UA: ' + navigator.userAgent);
+} catch (e) {
+  L('\nFATAL: ' + e.message, 'fail');
+  L('Stack: ' + (e.stack || 'no stack'));
+}
+</script></body></html>
