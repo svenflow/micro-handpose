@@ -49,6 +49,8 @@ interface Handpose {
     detect: (source: HandposeInput) => Promise<HandposeResult[]>;
     /** Dispose GPU resources */
     dispose: () => void;
+    /** Internal debug access (not part of public API) */
+    _debug?: any;
 }
 /** Accepted input types for detection */
 type HandposeInput = HTMLCanvasElement | OffscreenCanvas | ImageBitmap | HTMLImageElement | HTMLVideoElement | ImageData;

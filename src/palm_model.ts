@@ -3,15 +3,15 @@
  *
  * BlazeNet backbone with PReLU activations, FPN, and SSD output heads.
  *
- * Architecture:
+ * Architecture (FULL model - palmdetector_FULL_192x192):
  * 1. Initial conv 5x5 stride-2 + PReLU → 96x96x32
- * 2. Stage 1: 4 blocks (32ch), stride-2 transition → 48x48x64
- * 3. Stage 2: 4 blocks (64ch), stride-2 transition → 24x24x128 (save backbone24 skip)
- * 4. Stage 3: 4 blocks (128ch), stride-2 transition → 12x12x256 (save backbone12 skip after block 14)
- * 5. Stage 4a: 3 blocks (256ch) at 12x12
- * 6. Stage 4b: stride-2 transition → 6x6x256, then 3 more blocks at 6x6
- * 7. FPN Level 1: upsample 6→12 → conv2d_20 (256→256) → add backbone12 skip → 2 blocks at 12x12
- * 8. FPN Level 2: upsample 12→24 → conv2d_23 (256→128) → add backbone24 skip → 2 blocks at 24x24
+ * 2. Stage 1: 5 blocks (32ch), stride-2 transition → 48x48x64
+ * 3. Stage 2: 5 blocks (64ch), stride-2 transition → 24x24x128 (save backbone24 skip after block 13)
+ * 4. Stage 3: 5 blocks (128ch), stride-2 transition → 12x12x256 (save backbone12 skip after block 18)
+ * 5. Stage 4a: 4 blocks (256ch) at 12x12
+ * 6. Stage 4b: stride-2 transition → 6x6x256, then 4 more blocks at 6x6
+ * 7. FPN Level 1: upsample 6→12 → conv2d_25 (256→256) → add backbone12 skip → 2 blocks at 12x12
+ * 8. FPN Level 2: upsample 12→24 → conv2d_28 (256→128) → add backbone24 skip → 2 blocks at 24x24
  * 9. SSD heads:
  *    - 12x12: 6 classifiers + 108 regressors (6 anchors × 18 values)
  *    - 24x24: 2 classifiers + 36 regressors (2 anchors × 18 values)
@@ -53,32 +53,27 @@ function findKey(keys: string[], ...substrings: string[]): number {
 }
 
 /**
- * Palm detection model layer structure:
+ * Palm detection model layer structure (FULL model - palmdetector_FULL_192x192):
  *
  * conv2d/Conv2D [32,5,5,3] + batch_normalization/bias [32] + p_re_lu/alpha [1,1,32]
- * Then 18 depthwise-separable blocks:
+ * Then 24 depthwise-separable blocks:
  *   depthwise_conv2d_N + conv2d_N+1 + batch_normalization_N+1 + p_re_lu_N+1
  *
- * Blocks 0-3: 32ch (stage 1), block 3 is stride-2 transition to 64ch
- * Blocks 4-7: 64ch (stage 2), block 7 is stride-2 transition to 128ch
- * Blocks 8-11: 128ch (stage 3), block 11 is stride-2 transition to 256ch
- * Blocks 12-19: 256ch (stage 4)
+ * Blocks 0-4:  32ch (stage 1), block 4 is stride-2 transition to 64ch
+ * Blocks 5-9:  64ch (stage 2), block 9 is stride-2 transition to 128ch
+ * Blocks 10-14: 128ch (stage 3), block 14 is stride-2 transition to 256ch
+ * Blocks 15-23: 256ch (stage 4), block 19 is stride-2 transition 12→6
  *
- * FPN path (from stage 4 output):
- *   conv2d_20 (256→256) projects stage4
- *   upsample 12→24, add with backbone3 skip (conv2d_22 projects backbone3 output)
- *   Two more dw+pw blocks (dw_19/conv2d_21, dw_20/conv2d_22 path)
- *
- * Actually looking at the manifest more carefully:
- * conv2d_20: [256,1,1,256] FPN project at 12x12 (with bn_20 bias, prelu_20 alpha)
- * conv2d_22/Conv2D1: [256,1,1,256] backbone3 skip projection
- * conv2d_21: [256,1,1,256] after first FPN upsample block
- * dw_19, dw_20: FPN blocks
+ * FPN path (from stage 4 output at 6x6):
+ *   conv2d_25 (256→256) projects after upsample 6→12
+ *   Add backbone 12x12 skip (from block 18)
+ *   Two dw+pw blocks (dw_24/conv2d_26, dw_25/conv2d_27)
  *
  * For 24x24 head path:
- * conv2d_23: [128,1,1,256] project to 128ch
- * dw_21 + conv2d_24: block at 24x24 128ch
- * dw_22 + conv2d_25/Conv2D1: block at 24x24 128ch (conv2d_25/Conv2D1 is skip project)
+ * conv2d_28: [128,1,1,256] project to 128ch after upsample 12→24
+ * Add backbone 24x24 skip (from block 13)
+ * dw_26 + conv2d_29: block at 24x24 128ch
+ * dw_27 + conv2d_30/Conv2D1: block at 24x24 128ch
  *
  * SSD heads:
  * classifier_palm_16: [6,1,1,256] at 12x12
@@ -250,7 +245,7 @@ export async function compilePalmModel(
   // - batch_normalization_M/... (fused bias for conv2d_M)
   // - p_re_lu_M/... (PReLU alpha for conv2d_M)
 
-  // Build the 20 backbone blocks explicitly
+  // Build the 24 backbone blocks explicitly (FULL model)
   interface BackboneBlock {
     dwWeightBuf: GPUBuffer;
     dwBiasBuf: GPUBuffer;  // from depthwise batchnorm — but BlazeNet folds BN into pw, not dw!
@@ -274,30 +269,35 @@ export async function compilePalmModel(
     stride: 1 | 2;
     inH: number;
   }> = [
-    // Stage 1: 32ch blocks, 96x96 input
+    // Stage 1: 32ch blocks, 96x96 input (5 blocks, last is stride-2 → 64ch)
     { dwKey: 'depthwise_conv2d/', pwKey: 'conv2d_1/', bnKey: 'batch_normalization_1/', preluKey: 'p_re_lu_1/', inCh: 32, outCh: 32, stride: 1, inH: 96 },
     { dwKey: 'depthwise_conv2d_1/', pwKey: 'conv2d_2/', bnKey: 'batch_normalization_2/', preluKey: 'p_re_lu_2/', inCh: 32, outCh: 32, stride: 1, inH: 96 },
     { dwKey: 'depthwise_conv2d_2/', pwKey: 'conv2d_3/', bnKey: 'batch_normalization_3/', preluKey: 'p_re_lu_3/', inCh: 32, outCh: 32, stride: 1, inH: 96 },
-    { dwKey: 'depthwise_conv2d_3/', pwKey: 'conv2d_4/', bnKey: 'batch_normalization_4/', preluKey: 'p_re_lu_4/', inCh: 32, outCh: 64, stride: 2, inH: 96 },
-    // Stage 2: 64ch blocks, 48x48 input
-    { dwKey: 'depthwise_conv2d_4/', pwKey: 'conv2d_5/', bnKey: 'batch_normalization_5/', preluKey: 'p_re_lu_5/', inCh: 64, outCh: 64, stride: 1, inH: 48 },
+    { dwKey: 'depthwise_conv2d_3/', pwKey: 'conv2d_4/', bnKey: 'batch_normalization_4/', preluKey: 'p_re_lu_4/', inCh: 32, outCh: 32, stride: 1, inH: 96 },
+    { dwKey: 'depthwise_conv2d_4/', pwKey: 'conv2d_5/', bnKey: 'batch_normalization_5/', preluKey: 'p_re_lu_5/', inCh: 32, outCh: 64, stride: 2, inH: 96 },
+    // Stage 2: 64ch blocks, 48x48 input (5 blocks, last is stride-2 → 128ch)
     { dwKey: 'depthwise_conv2d_5/', pwKey: 'conv2d_6/', bnKey: 'batch_normalization_6/', preluKey: 'p_re_lu_6/', inCh: 64, outCh: 64, stride: 1, inH: 48 },
     { dwKey: 'depthwise_conv2d_6/', pwKey: 'conv2d_7/', bnKey: 'batch_normalization_7/', preluKey: 'p_re_lu_7/', inCh: 64, outCh: 64, stride: 1, inH: 48 },
-    { dwKey: 'depthwise_conv2d_7/', pwKey: 'conv2d_8/', bnKey: 'batch_normalization_8/', preluKey: 'p_re_lu_8/', inCh: 64, outCh: 128, stride: 2, inH: 48 },
-    // Stage 3: 128ch blocks, 24x24 input
-    { dwKey: 'depthwise_conv2d_8/', pwKey: 'conv2d_9/', bnKey: 'batch_normalization_9/', preluKey: 'p_re_lu_9/', inCh: 128, outCh: 128, stride: 1, inH: 24 },
-    { dwKey: 'depthwise_conv2d_9/', pwKey: 'conv2d_10/', bnKey: 'batch_normalization_10/', preluKey: 'p_re_lu_10/', inCh: 128, outCh: 128, stride: 1, inH: 24 },
+    { dwKey: 'depthwise_conv2d_7/', pwKey: 'conv2d_8/', bnKey: 'batch_normalization_8/', preluKey: 'p_re_lu_8/', inCh: 64, outCh: 64, stride: 1, inH: 48 },
+    { dwKey: 'depthwise_conv2d_8/', pwKey: 'conv2d_9/', bnKey: 'batch_normalization_9/', preluKey: 'p_re_lu_9/', inCh: 64, outCh: 64, stride: 1, inH: 48 },
+    { dwKey: 'depthwise_conv2d_9/', pwKey: 'conv2d_10/', bnKey: 'batch_normalization_10/', preluKey: 'p_re_lu_10/', inCh: 64, outCh: 128, stride: 2, inH: 48 },
+    // Stage 3: 128ch blocks, 24x24 input (5 blocks, last is stride-2 → 256ch)
     { dwKey: 'depthwise_conv2d_10/', pwKey: 'conv2d_11/', bnKey: 'batch_normalization_11/', preluKey: 'p_re_lu_11/', inCh: 128, outCh: 128, stride: 1, inH: 24 },
-    { dwKey: 'depthwise_conv2d_11/', pwKey: 'conv2d_12/', bnKey: 'batch_normalization_12/', preluKey: 'p_re_lu_12/', inCh: 128, outCh: 256, stride: 2, inH: 24 },
-    // Stage 4a: 256ch blocks, 12x12 input
-    { dwKey: 'depthwise_conv2d_12/', pwKey: 'conv2d_13/', bnKey: 'batch_normalization_13/', preluKey: 'p_re_lu_13/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
-    { dwKey: 'depthwise_conv2d_13/', pwKey: 'conv2d_14/', bnKey: 'batch_normalization_14/', preluKey: 'p_re_lu_14/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
-    { dwKey: 'depthwise_conv2d_14/', pwKey: 'conv2d_15/', bnKey: 'batch_normalization_15/', preluKey: 'p_re_lu_15/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
-    // Stage 4b: stride-2 transition 12→6, then 256ch at 6x6
-    { dwKey: 'depthwise_conv2d_15/', pwKey: 'conv2d_16/', bnKey: 'batch_normalization_16/', preluKey: 'p_re_lu_16/', inCh: 256, outCh: 256, stride: 2, inH: 12 },
-    { dwKey: 'depthwise_conv2d_16/', pwKey: 'conv2d_17/', bnKey: 'batch_normalization_17/', preluKey: 'p_re_lu_17/', inCh: 256, outCh: 256, stride: 1, inH: 6 },
-    { dwKey: 'depthwise_conv2d_17/', pwKey: 'conv2d_18/', bnKey: 'batch_normalization_18/', preluKey: 'p_re_lu_18/', inCh: 256, outCh: 256, stride: 1, inH: 6 },
-    { dwKey: 'depthwise_conv2d_18/', pwKey: 'conv2d_19/', bnKey: 'batch_normalization_19/', preluKey: 'p_re_lu_19/', inCh: 256, outCh: 256, stride: 1, inH: 6 },
+    { dwKey: 'depthwise_conv2d_11/', pwKey: 'conv2d_12/', bnKey: 'batch_normalization_12/', preluKey: 'p_re_lu_12/', inCh: 128, outCh: 128, stride: 1, inH: 24 },
+    { dwKey: 'depthwise_conv2d_12/', pwKey: 'conv2d_13/', bnKey: 'batch_normalization_13/', preluKey: 'p_re_lu_13/', inCh: 128, outCh: 128, stride: 1, inH: 24 },
+    { dwKey: 'depthwise_conv2d_13/', pwKey: 'conv2d_14/', bnKey: 'batch_normalization_14/', preluKey: 'p_re_lu_14/', inCh: 128, outCh: 128, stride: 1, inH: 24 },
+    { dwKey: 'depthwise_conv2d_14/', pwKey: 'conv2d_15/', bnKey: 'batch_normalization_15/', preluKey: 'p_re_lu_15/', inCh: 128, outCh: 256, stride: 2, inH: 24 },
+    // Stage 4a: 256ch blocks, 12x12 input (4 blocks)
+    { dwKey: 'depthwise_conv2d_15/', pwKey: 'conv2d_16/', bnKey: 'batch_normalization_16/', preluKey: 'p_re_lu_16/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
+    { dwKey: 'depthwise_conv2d_16/', pwKey: 'conv2d_17/', bnKey: 'batch_normalization_17/', preluKey: 'p_re_lu_17/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
+    { dwKey: 'depthwise_conv2d_17/', pwKey: 'conv2d_18/', bnKey: 'batch_normalization_18/', preluKey: 'p_re_lu_18/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
+    { dwKey: 'depthwise_conv2d_18/', pwKey: 'conv2d_19/', bnKey: 'batch_normalization_19/', preluKey: 'p_re_lu_19/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
+    // Stage 4b: stride-2 transition 12→6, then 256ch at 6x6 (5 blocks)
+    { dwKey: 'depthwise_conv2d_19/', pwKey: 'conv2d_20/', bnKey: 'batch_normalization_20/', preluKey: 'p_re_lu_20/', inCh: 256, outCh: 256, stride: 2, inH: 12 },
+    { dwKey: 'depthwise_conv2d_20/', pwKey: 'conv2d_21/', bnKey: 'batch_normalization_21/', preluKey: 'p_re_lu_21/', inCh: 256, outCh: 256, stride: 1, inH: 6 },
+    { dwKey: 'depthwise_conv2d_21/', pwKey: 'conv2d_22/', bnKey: 'batch_normalization_22/', preluKey: 'p_re_lu_22/', inCh: 256, outCh: 256, stride: 1, inH: 6 },
+    { dwKey: 'depthwise_conv2d_22/', pwKey: 'conv2d_23/', bnKey: 'batch_normalization_23/', preluKey: 'p_re_lu_23/', inCh: 256, outCh: 256, stride: 1, inH: 6 },
+    { dwKey: 'depthwise_conv2d_23/', pwKey: 'conv2d_24/', bnKey: 'batch_normalization_24/', preluKey: 'p_re_lu_24/', inCh: 256, outCh: 256, stride: 1, inH: 6 },
     // NOTE: block 19 (the last backbone block before FPN) uses different naming for the dw bias
     // Actually the DW bias is always from the BN fused into the DW conv itself.
     // Let me re-examine: In BlazeNet, each block is DW5x5 → BN → PReLU → PW1x1 → BN → PReLU → Add
@@ -358,77 +358,77 @@ export async function compilePalmModel(
 
   // ============ FPN weights ============
   //
-  // ARCHITECTURE (verified against TFLite intermediate tensors):
+  // ARCHITECTURE (FULL model - verified against TFLite):
   //
-  // Backbone ends at 6x6x256 (block 17 = dw_18+conv2d_19)
+  // Backbone ends at 6x6x256 (block 23 = dw_23+conv2d_24)
   //
   // FPN Level 1 (6→12):
   //   1. Bilinear upsample 6x6→12x12 (256ch)
-  //   2. conv2d_20 (256→256) + BN_20 + PReLU_20 on upsampled features
-  //   3. Element-wise add backbone_12x12 skip (from block 14 = 12x12x256)
-  //   4. Block: dw_19 + conv2d_21 + BN_21 + PReLU_21 (12x12x256, residual skip)
-  //   5. Block: dw_20 + conv2d_22 + BN_22 + PReLU_22 (12x12x256, residual skip)
+  //   2. conv2d_25 (256→256) + BN_25 + PReLU_25 on upsampled features
+  //   3. Element-wise add backbone_12x12 skip (from block 18 = 12x12x256)
+  //   4. Block: dw_24 + conv2d_26 + BN_26 + PReLU_26 (12x12x256, residual skip)
+  //   5. Block: dw_25 + conv2d_27 + BN_27 + PReLU_27 (12x12x256, residual skip)
   //   6. 12x12 SSD heads on block 5 output
   //
   // FPN Level 2 (12→24):
   //   7. Bilinear upsample 12x12→24x24 (256ch) from block 5 output
-  //   8. conv2d_23 (256→128) + BN_23 + PReLU_23 on upsampled features
-  //   9. Element-wise add backbone_24x24 skip (from block 10 = 24x24x128)
-  //  10. Block: dw_21 + conv2d_24 + BN_24 + PReLU_24 (24x24x128, residual skip)
-  //  11. Block: dw_22 + conv2d_25 + BN_25 + PReLU_25 (24x24x128, residual skip)
+  //   8. conv2d_28 (256→128) + BN_28 + PReLU_28 on upsampled features
+  //   9. Element-wise add backbone_24x24 skip (from block 13 = 24x24x128)
+  //  10. Block: dw_26 + conv2d_29 + BN_29 + PReLU_29 (24x24x128, residual skip)
+  //  11. Block: dw_27 + conv2d_30 + BN_30 + PReLU_30 (24x24x128, residual skip)
   //  12. 24x24 SSD heads on block 11 output
 
-  // FPN Level 1: conv2d_20 (256→256) applied after 6→12 upsample
-  const fpn6to12W = transposePW(findWeight('conv2d_20/Conv2D'));
+  // FPN Level 1: conv2d_25 (256→256) applied after 6→12 upsample
+  const fpn6to12W = transposePW(findWeight('conv2d_25/Conv2D'));
   const fpn6to12WBuf = makeBuf(fpn6to12W.byteLength, SC);
   writeBuf(fpn6to12WBuf, 0, fpn6to12W);
-  const fpn6to12BBuf = uploadWeights(findWeight('batch_normalization_20/'));
-  const fpn6to12AlphaBuf = uploadWeights(findWeight('p_re_lu_20/'));
+  const fpn6to12BBuf = uploadWeights(findWeight('batch_normalization_25/'));
+  const fpn6to12AlphaBuf = uploadWeights(findWeight('p_re_lu_25/'));
 
-  // FPN 12x12 block 1: dw_19 + conv2d_21
+  // FPN 12x12 block 1: dw_24 + conv2d_26
   const fpn12Block1 = {
-    dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_19/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
+    dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_24/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
     dwBiasBuf: (() => { const z = new Float32Array(256); const b = makeBuf(z.byteLength, SC); writeBuf(b, 0, z); return b; })(),
-    pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_21/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
-    pwBiasBuf: uploadWeights(findWeight('batch_normalization_21/')),
-    alphaBuf: uploadWeights(findWeight('p_re_lu_21/')),
+    pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_26/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
+    pwBiasBuf: uploadWeights(findWeight('batch_normalization_26/')),
+    alphaBuf: uploadWeights(findWeight('p_re_lu_26/')),
     inCh: 256, outCh: 256, stride: 1 as const, inH: 12,
   };
 
-  // FPN 12x12 block 2: dw_20 + conv2d_22/Conv2D1
+  // FPN 12x12 block 2: dw_25 + conv2d_27/Conv2D1
   const fpn12Block2 = {
-    dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_20/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
+    dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_25/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
     dwBiasBuf: (() => { const z = new Float32Array(256); const b = makeBuf(z.byteLength, SC); writeBuf(b, 0, z); return b; })(),
-    pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_22/Conv2D1')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
-    pwBiasBuf: uploadWeights(findWeight('batch_normalization_22/')),
-    alphaBuf: uploadWeights(findWeight('p_re_lu_22/')),
+    pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_27/Conv2D1')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
+    pwBiasBuf: uploadWeights(findWeight('batch_normalization_27/')),
+    alphaBuf: uploadWeights(findWeight('p_re_lu_27/')),
     inCh: 256, outCh: 256, stride: 1 as const, inH: 12,
   };
 
-  // FPN Level 2: conv2d_23 (256→128) applied after 12→24 upsample
-  const fpn12to24W = transposePW(findWeight('conv2d_23/Conv2D'));
+  // FPN Level 2: conv2d_28 (256→128) applied after 12→24 upsample
+  const fpn12to24W = transposePW(findWeight('conv2d_28/Conv2D'));
   const fpn12to24WBuf = makeBuf(fpn12to24W.byteLength, SC);
   writeBuf(fpn12to24WBuf, 0, fpn12to24W);
-  const fpn12to24BBuf = uploadWeights(findWeight('batch_normalization_23/'));
-  const fpn12to24AlphaBuf = uploadWeights(findWeight('p_re_lu_23/'));
+  const fpn12to24BBuf = uploadWeights(findWeight('batch_normalization_28/'));
+  const fpn12to24AlphaBuf = uploadWeights(findWeight('p_re_lu_28/'));
 
-  // FPN 24x24 block 1: dw_21 + conv2d_24
+  // FPN 24x24 block 1: dw_26 + conv2d_29
   const fpn24Block1 = {
-    dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_21/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
+    dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_26/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
     dwBiasBuf: (() => { const z = new Float32Array(128); const b = makeBuf(z.byteLength, SC); writeBuf(b, 0, z); return b; })(),
-    pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_24/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
-    pwBiasBuf: uploadWeights(findWeight('batch_normalization_24/')),
-    alphaBuf: uploadWeights(findWeight('p_re_lu_24/')),
+    pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_29/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
+    pwBiasBuf: uploadWeights(findWeight('batch_normalization_29/')),
+    alphaBuf: uploadWeights(findWeight('p_re_lu_29/')),
     inCh: 128, outCh: 128, stride: 1 as const, inH: 24,
   };
 
-  // FPN 24x24 block 2: dw_22 + conv2d_25/Conv2D1
+  // FPN 24x24 block 2: dw_27 + conv2d_30/Conv2D1
   const fpn24Block2 = {
-    dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_22/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
+    dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_27/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
     dwBiasBuf: (() => { const z = new Float32Array(128); const b = makeBuf(z.byteLength, SC); writeBuf(b, 0, z); return b; })(),
-    pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_25/Conv2D1')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
-    pwBiasBuf: uploadWeights(findWeight('batch_normalization_25/')),
-    alphaBuf: uploadWeights(findWeight('p_re_lu_25/')),
+    pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_30/Conv2D1')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
+    pwBiasBuf: uploadWeights(findWeight('batch_normalization_30/')),
+    alphaBuf: uploadWeights(findWeight('p_re_lu_30/')),
     inCh: 128, outCh: 128, stride: 1 as const, inH: 24,
   };
 
@@ -467,8 +467,8 @@ export async function compilePalmModel(
   const zeroBuf = makeBuf(24 * 24 * 256 * 4, SO);  // Pre-zeroed by WebGPU
 
   // Save buffers for skip connections
-  const backbone12SkipBuf = makeBuf(12 * 12 * 256 * 4, SO | GPUBufferUsage.COPY_DST); // After block 14 (12x12x256)
-  const backbone24SkipBuf = makeBuf(24 * 24 * 128 * 4, SO | GPUBufferUsage.COPY_DST); // After block 10 (24x24x128)
+  const backbone12SkipBuf = makeBuf(12 * 12 * 256 * 4, SO | GPUBufferUsage.COPY_DST); // After block 18 (12x12x256)
+  const backbone24SkipBuf = makeBuf(24 * 24 * 128 * 4, SO | GPUBufferUsage.COPY_DST); // After block 13 (24x24x128)
 
   // SSD output buffers
   const cls16Buf = makeBuf(12 * 12 * 6 * 4, SOC);   // 12x12x6 = 864
@@ -733,7 +733,7 @@ export async function compilePalmModel(
       pass.end();
     }
 
-    // Backbone blocks 0-18 with double buffering
+    // Backbone blocks 0-23 with double buffering (FULL model)
     // After input conv: actBufA has 96x96x32
     let curBuf = actBufA;
     let altBuf = actBufB;
@@ -748,17 +748,17 @@ export async function compilePalmModel(
       altBuf = tmp;
 
       // Save backbone skip connections for FPN
-      if (i === 10) {
-        // After block 10: 24x24x128 — skip for FPN level 2 (12→24)
+      if (i === 13) {
+        // After block 13: 24x24x128 — skip for FPN level 2 (12→24)
         encoder.copyBufferToBuffer(curBuf, 0, backbone24SkipBuf, 0, 24 * 24 * 128 * 4);
       }
-      if (i === 14) {
-        // After block 14: 12x12x256 — skip for FPN level 1 (6→12)
+      if (i === 18) {
+        // After block 18: 12x12x256 — skip for FPN level 1 (6→12)
         encoder.copyBufferToBuffer(curBuf, 0, backbone12SkipBuf, 0, 12 * 12 * 256 * 4);
       }
     }
 
-    // After backbone block 18: curBuf has 6x6x256
+    // After backbone block 23: curBuf has 6x6x256
 
     // ============ FPN Level 1: 6→12 ============
     // Step 1: Upsample 6→12 (no add — use zeroBuf as skip)
@@ -780,7 +780,7 @@ export async function compilePalmModel(
     }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // Step 2: conv1x1+PReLU (conv2d_20) on upsampled 12x12x256
+    // Step 2: conv1x1+PReLU (conv2d_25) on upsampled 12x12x256
     encodeConv1x1PReLU(encoder, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, fpnConv6to12Uniform, 256, 12, 12);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
@@ -834,7 +834,7 @@ export async function compilePalmModel(
     }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // Step 7: conv1x1+PReLU (conv2d_23) on upsampled 24x24: 256→128
+    // Step 7: conv1x1+PReLU (conv2d_28) on upsampled 24x24: 256→128
     encodeConv1x1PReLU(encoder, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, fpnConv12to24Uniform, 128, 24, 24);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
@@ -1130,19 +1130,19 @@ export async function compilePalmModel(
       altBuf = tmp;
 
       // Read back after key blocks
-      if (i === 0 || i === 3 || i === 7 || i === 11 || i === 14 || i === 15 || i === 18) {
+      if (i === 0 || i === 4 || i === 9 || i === 14 || i === 18 || i === 19 || i === 23) {
         const outH = block.stride === 2 ? block.inH / 2 : block.inH;
         const size = outH * outH * block.outCh;
         result[`block${i}`] = stats(await debugReadBuffer(curBuf, size));
       }
 
       // Save backbone skip connections for FPN
-      if (i === 10) {
+      if (i === 13) {
         enc = device.createCommandEncoder();
         enc.copyBufferToBuffer(curBuf, 0, backbone24SkipBuf, 0, 24 * 24 * 128 * 4);
         device.queue.submit([enc.finish()]);
       }
-      if (i === 14) {
+      if (i === 18) {
         enc = device.createCommandEncoder();
         enc.copyBufferToBuffer(curBuf, 0, backbone12SkipBuf, 0, 12 * 12 * 256 * 4);
         device.queue.submit([enc.finish()]);
@@ -1174,7 +1174,7 @@ export async function compilePalmModel(
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpnUpsample6to12 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
 
-    // conv1x1+PReLU (conv2d_20) on upsampled 12x12x256
+    // conv1x1+PReLU (conv2d_25) on upsampled 12x12x256
     enc = device.createCommandEncoder();
     encodeConv1x1PReLU(enc, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, fpnConv6to12Uniform, 256, 12, 12);
     device.queue.submit([enc.finish()]);
@@ -1207,14 +1207,14 @@ export async function compilePalmModel(
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpnAdd12 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
 
-    // FPN 12x12 block 1 (dw_19 + conv2d_21)
+    // FPN 12x12 block 1 (dw_24 + conv2d_26)
     enc = device.createCommandEncoder();
     encodeDwPwBlock(enc, fpn12Block1, curBuf, altBuf, curBuf, fpn12Block1Uniforms);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpn12Block1 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
 
-    // FPN 12x12 block 2 (dw_20 + conv2d_22)
+    // FPN 12x12 block 2 (dw_25 + conv2d_27)
     enc = device.createCommandEncoder();
     encodeDwPwBlock(enc, fpn12Block2, curBuf, altBuf, curBuf, fpn12Block2Uniforms);
     device.queue.submit([enc.finish()]);
@@ -1257,9 +1257,9 @@ export async function compilePalmModel(
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpnUpsample12to24 = stats(await debugReadBuffer(curBuf, 24 * 24 * 256));
 
-    // conv1x1+PReLU (conv2d_23) on upsampled 24x24: 256→128
+    // conv1x1+PReLU (conv2d_28) on upsampled 24x24: 256→128
     enc = device.createCommandEncoder();
-    encodeConv1x1PReLU(enc, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, 256, 128, 24, 24);
+    encodeConv1x1PReLU(enc, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, fpnConv12to24Uniform, 128, 24, 24);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpn12to24Conv = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
@@ -1290,14 +1290,14 @@ export async function compilePalmModel(
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpnAdd24 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
 
-    // FPN 24x24 block 1 (dw_21 + conv2d_24)
+    // FPN 24x24 block 1 (dw_26 + conv2d_29)
     enc = device.createCommandEncoder();
     encodeDwPwBlock(enc, fpn24Block1, curBuf, altBuf, curBuf, fpn24Block1Uniforms);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
     result.fpn24Block1 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
 
-    // FPN 24x24 block 2 (dw_22 + conv2d_25)
+    // FPN 24x24 block 2 (dw_27 + conv2d_30)
     enc = device.createCommandEncoder();
     encodeDwPwBlock(enc, fpn24Block2, curBuf, altBuf, curBuf, fpn24Block2Uniforms);
     device.queue.submit([enc.finish()]);
@@ -1306,12 +1306,12 @@ export async function compilePalmModel(
 
     // 24x24 SSD heads
     enc = device.createCommandEncoder();
-    encodeConv1x1(enc, curBuf, cls8WBuf, cls8BBuf, cls8Buf, 128, 2, 24, 24);
+    encodeConv1x1(enc, curBuf, cls8WBuf, cls8BBuf, cls8Buf, ssdCls8Uniform, 2, 24, 24);
     device.queue.submit([enc.finish()]);
     result.cls8 = stats(await debugReadBuffer(cls8Buf, 24 * 24 * 2));
 
     enc = device.createCommandEncoder();
-    encodeConv1x1(enc, curBuf, reg8WBuf, reg8BBuf, reg8Buf, 128, 36, 24, 24);
+    encodeConv1x1(enc, curBuf, reg8WBuf, reg8BBuf, reg8Buf, ssdReg8Uniform, 36, 24, 24);
     device.queue.submit([enc.finish()]);
     result.reg8 = stats(await debugReadBuffer(reg8Buf, 24 * 24 * 36));
 
