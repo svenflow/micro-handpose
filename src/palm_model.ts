@@ -10,8 +10,8 @@
  * 4. Stage 3: 4 blocks (128ch), stride-2 transition → 12x12x256 (save backbone12 skip after block 14)
  * 5. Stage 4a: 3 blocks (256ch) at 12x12
  * 6. Stage 4b: stride-2 transition → 6x6x256, then 3 more blocks at 6x6
- * 7. FPN Level 1: conv2d_20 at 6x6 → upsample 6→12 + add backbone12 skip → 2 blocks at 12x12
- * 8. FPN Level 2: conv2d_23 (256→128) at 12x12 → upsample 12→24 + add backbone24 skip → 2 blocks at 24x24
+ * 7. FPN Level 1: upsample 6→12 → conv2d_20 (256→256) → add backbone12 skip → 2 blocks at 12x12
+ * 8. FPN Level 2: upsample 12→24 → conv2d_23 (256→128) → add backbone24 skip → 2 blocks at 24x24
  * 9. SSD heads:
  *    - 12x12: 6 classifiers + 108 regressors (6 anchors × 18 values)
  *    - 24x24: 2 classifiers + 36 regressors (2 anchors × 18 values)
@@ -690,13 +690,33 @@ export async function compilePalmModel(
     // After backbone block 18: curBuf has 6x6x256
 
     // ============ FPN Level 1: 6→12 ============
-    // Step 1: conv1x1+PReLU (conv2d_20) on 6x6x256 → 6x6x256
-    encodeConv1x1PReLU(encoder, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, 256, 256, 6, 6);
-    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-
-    // Step 2: Upsample 6→12 + add backbone12Skip (12x12x256)
+    // Step 1: Upsample 6→12 (no add — use zeroBuf as skip)
     {
       const uniform = makeUniform(new Uint32Array([1, 256, 6, 6, 12, 12]));
+      const bg = device.createBindGroup({
+        layout: upsampleAddLayout,
+        entries: [
+          { binding: 0, resource: { buffer: curBuf } },
+          { binding: 1, resource: { buffer: zeroBuf } },
+          { binding: 2, resource: { buffer: altBuf } },
+          { binding: 3, resource: { buffer: uniform } },
+        ],
+      });
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(upsampleAddPipe);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(ceil(12, 8), ceil(12, 8), 256);
+      pass.end();
+    }
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+
+    // Step 2: conv1x1+PReLU (conv2d_20) on upsampled 12x12x256
+    encodeConv1x1PReLU(encoder, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, 256, 256, 12, 12);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+
+    // Step 3: Element-wise add backbone12Skip (identity upsample: 12→12)
+    {
+      const uniform = makeUniform(new Uint32Array([1, 256, 12, 12, 12, 12]));
       const bg = device.createBindGroup({
         layout: upsampleAddLayout,
         entries: [
@@ -714,25 +734,45 @@ export async function compilePalmModel(
     }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // Step 3: FPN 12x12 refinement blocks
+    // Step 4: FPN 12x12 refinement blocks
     encodeDwPwBlock(encoder, fpn12Block1, curBuf, altBuf, curBuf);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
     encodeDwPwBlock(encoder, fpn12Block2, curBuf, altBuf, curBuf);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // Step 4: 12x12 SSD heads (on curBuf = 12x12x256)
+    // Step 5: 12x12 SSD heads (on curBuf = 12x12x256)
     encodeConv1x1(encoder, curBuf, cls16WBuf, cls16BBuf, cls16Buf, 256, 6, 12, 12);
     encodeConv1x1(encoder, curBuf, reg16WBuf, reg16BBuf, reg16Buf, 256, 108, 12, 12);
 
     // ============ FPN Level 2: 12→24 ============
-    // Step 5: conv1x1+PReLU (conv2d_23) on 12x12: 256→128
-    encodeConv1x1PReLU(encoder, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, 256, 128, 12, 12);
+    // Step 6: Upsample 12→24 (no add — use zeroBuf as skip)
+    {
+      const uniform = makeUniform(new Uint32Array([1, 256, 12, 12, 24, 24]));
+      const bg = device.createBindGroup({
+        layout: upsampleAddLayout,
+        entries: [
+          { binding: 0, resource: { buffer: curBuf } },
+          { binding: 1, resource: { buffer: zeroBuf } },
+          { binding: 2, resource: { buffer: altBuf } },
+          { binding: 3, resource: { buffer: uniform } },
+        ],
+      });
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(upsampleAddPipe);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(ceil(24, 8), ceil(24, 8), 256);
+      pass.end();
+    }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // Step 6: Upsample 12→24 + add backbone24Skip (24x24x128)
+    // Step 7: conv1x1+PReLU (conv2d_23) on upsampled 24x24: 256→128
+    encodeConv1x1PReLU(encoder, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, 256, 128, 24, 24);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+
+    // Step 8: Element-wise add backbone24Skip (identity upsample: 24→24)
     {
-      const uniform = makeUniform(new Uint32Array([1, 128, 12, 12, 24, 24]));
+      const uniform = makeUniform(new Uint32Array([1, 128, 24, 24, 24, 24]));
       const bg = device.createBindGroup({
         layout: upsampleAddLayout,
         entries: [
@@ -750,14 +790,14 @@ export async function compilePalmModel(
     }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // Step 7: FPN 24x24 refinement blocks
+    // Step 9: FPN 24x24 refinement blocks
     encodeDwPwBlock(encoder, fpn24Block1, curBuf, altBuf, curBuf);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
     encodeDwPwBlock(encoder, fpn24Block2, curBuf, altBuf, curBuf);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // Step 8: 24x24 SSD heads (on curBuf = 24x24x128)
+    // Step 10: 24x24 SSD heads (on curBuf = 24x24x128)
     encodeConv1x1(encoder, curBuf, cls8WBuf, cls8BBuf, cls8Buf, 128, 2, 24, 24);
     encodeConv1x1(encoder, curBuf, reg8WBuf, reg8BBuf, reg8Buf, 128, 36, 24, 24);
 
@@ -951,17 +991,43 @@ export async function compilePalmModel(
 
     // ============ FPN Level 1: 6→12 ============
 
-    // conv1x1+PReLU (conv2d_20) on 6x6x256
-    enc = device.createCommandEncoder();
-    encodeConv1x1PReLU(enc, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, 256, 256, 6, 6);
-    device.queue.submit([enc.finish()]);
-    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpn6to12Conv = stats(await debugReadBuffer(curBuf, 6 * 6 * 256));
-
-    // Upsample 6→12 + add backbone12Skip
+    // Upsample 6→12 (no add)
     enc = device.createCommandEncoder();
     {
       const uniform = makeUniform(new Uint32Array([1, 256, 6, 6, 12, 12]));
+      const bg = device.createBindGroup({
+        layout: upsampleAddLayout,
+        entries: [
+          { binding: 0, resource: { buffer: curBuf } },
+          { binding: 1, resource: { buffer: zeroBuf } },
+          { binding: 2, resource: { buffer: altBuf } },
+          { binding: 3, resource: { buffer: uniform } },
+        ],
+      });
+      const pass = enc.beginComputePass();
+      pass.setPipeline(upsampleAddPipe);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(ceil(12, 8), ceil(12, 8), 256);
+      pass.end();
+    }
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.fpnUpsample6to12 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+
+    // conv1x1+PReLU (conv2d_20) on upsampled 12x12x256
+    enc = device.createCommandEncoder();
+    encodeConv1x1PReLU(enc, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, 256, 256, 12, 12);
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.fpn6to12Conv = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+
+    // backbone12 skip check
+    result.backbone12Skip = stats(await debugReadBuffer(backbone12SkipBuf, 12 * 12 * 256));
+
+    // Element-wise add backbone12Skip (identity upsample 12→12)
+    enc = device.createCommandEncoder();
+    {
+      const uniform = makeUniform(new Uint32Array([1, 256, 12, 12, 12, 12]));
       const bg = device.createBindGroup({
         layout: upsampleAddLayout,
         entries: [
@@ -979,10 +1045,7 @@ export async function compilePalmModel(
     }
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpnUpsample6to12 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
-
-    // backbone12 skip check
-    result.backbone12Skip = stats(await debugReadBuffer(backbone12SkipBuf, 12 * 12 * 256));
+    result.fpnAdd12 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
 
     // FPN 12x12 block 1 (dw_19 + conv2d_21)
     enc = device.createCommandEncoder();
@@ -1011,20 +1074,43 @@ export async function compilePalmModel(
 
     // ============ FPN Level 2: 12→24 ============
 
-    // conv1x1+PReLU (conv2d_23) on 12x12: 256→128
+    // Upsample 12→24 (no add — 256ch from fpn12Block2 output)
     enc = device.createCommandEncoder();
-    encodeConv1x1PReLU(enc, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, 256, 128, 12, 12);
+    {
+      const uniform = makeUniform(new Uint32Array([1, 256, 12, 12, 24, 24]));
+      const bg = device.createBindGroup({
+        layout: upsampleAddLayout,
+        entries: [
+          { binding: 0, resource: { buffer: curBuf } },
+          { binding: 1, resource: { buffer: zeroBuf } },
+          { binding: 2, resource: { buffer: altBuf } },
+          { binding: 3, resource: { buffer: uniform } },
+        ],
+      });
+      const pass = enc.beginComputePass();
+      pass.setPipeline(upsampleAddPipe);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(ceil(24, 8), ceil(24, 8), 256);
+      pass.end();
+    }
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpn12to24Conv = stats(await debugReadBuffer(curBuf, 12 * 12 * 128));
+    result.fpnUpsample12to24 = stats(await debugReadBuffer(curBuf, 24 * 24 * 256));
+
+    // conv1x1+PReLU (conv2d_23) on upsampled 24x24: 256→128
+    enc = device.createCommandEncoder();
+    encodeConv1x1PReLU(enc, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, 256, 128, 24, 24);
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.fpn12to24Conv = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
 
     // backbone24 skip check
     result.backbone24Skip = stats(await debugReadBuffer(backbone24SkipBuf, 24 * 24 * 128));
 
-    // Upsample 12→24 + add backbone24Skip
+    // Element-wise add backbone24Skip (identity upsample 24→24)
     enc = device.createCommandEncoder();
     {
-      const uniform = makeUniform(new Uint32Array([1, 128, 12, 12, 24, 24]));
+      const uniform = makeUniform(new Uint32Array([1, 128, 24, 24, 24, 24]));
       const bg = device.createBindGroup({
         layout: upsampleAddLayout,
         entries: [
@@ -1042,7 +1128,7 @@ export async function compilePalmModel(
     }
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpnUpsample12to24 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+    result.fpnAdd24 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
 
     // FPN 24x24 block 1 (dw_21 + conv2d_24)
     enc = device.createCommandEncoder();

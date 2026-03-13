@@ -158,12 +158,14 @@ declare function loadWeightsFromBuffer(metadata: WeightsMetadata, buffer: ArrayB
  *
  * Architecture:
  * 1. Initial conv 5x5 stride-2 + PReLU → 96x96x32
- * 2. Stage 1: 4 blocks (32ch), stride-2 transition → 48x48x64 (save backbone2 skip)
- * 3. Stage 2: 4 blocks (64ch), stride-2 transition → 24x24x128 (save backbone3 skip)
- * 4. Stage 3: 4 blocks (128ch), stride-2 transition → 12x12x256
- * 5. Stage 4: 8 blocks (256ch) at 12x12
- * 6. FPN: conv1x1 + upsample 12→24 + add backbone3; 2 blocks at 24x24
- * 7. SSD heads:
+ * 2. Stage 1: 4 blocks (32ch), stride-2 transition → 48x48x64
+ * 3. Stage 2: 4 blocks (64ch), stride-2 transition → 24x24x128 (save backbone24 skip)
+ * 4. Stage 3: 4 blocks (128ch), stride-2 transition → 12x12x256 (save backbone12 skip after block 14)
+ * 5. Stage 4a: 3 blocks (256ch) at 12x12
+ * 6. Stage 4b: stride-2 transition → 6x6x256, then 3 more blocks at 6x6
+ * 7. FPN Level 1: upsample 6→12 → conv2d_20 (256→256) → add backbone12 skip → 2 blocks at 12x12
+ * 8. FPN Level 2: upsample 12→24 → conv2d_23 (256→128) → add backbone24 skip → 2 blocks at 24x24
+ * 9. SSD heads:
  *    - 12x12: 6 classifiers + 108 regressors (6 anchors × 18 values)
  *    - 24x24: 2 classifiers + 36 regressors (2 anchors × 18 values)
  *

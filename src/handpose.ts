@@ -353,9 +353,13 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
     // Direct approach: set transform matrix, then draw source
     // Canvas 2D transform: [a, b, c, d, e, f]
     // Maps (srcX, srcY) → (a*srcX + c*srcY + e, b*srcX + d*srcY + f)
-    // We want: crop_x = (src_x - srcCenterX) * cos * scale + ... + 128
-    const scaleX = 256 / (roi.width * sourceWidth);
-    const scaleY = 256 / (roi.height * sourceHeight);
+    //
+    // The ROI dimensions are in normalized [0,1] space from palm detection (192x192 square).
+    // For non-square source images, we need uniform scaling to avoid distortion.
+    // Use the smaller source dimension as reference to ensure the ROI maps to a square crop.
+    const refDim = Math.min(sourceWidth, sourceHeight);
+    const scaleX = 256 / (roi.width * refDim);
+    const scaleY = 256 / (roi.height * refDim);
 
     const cosR = Math.cos(roi.rotation);
     const sinR = Math.sin(roi.rotation);

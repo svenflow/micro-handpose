@@ -208,22 +208,28 @@ function detectionToROI(detection: PalmDetection): HandROI {
   const wrist = detection.keypoints[0];
   const middleMCP = detection.keypoints[2];
 
-  // Angle from wrist to middle finger, relative to vertical (90 degrees up)
   const dx = middleMCP[0] - wrist[0];
   const dy = middleMCP[1] - wrist[1];
-  // atan2 gives angle from positive x-axis; we want angle from positive y-axis (down)
-  // Rotate so hand points up: target angle is -pi/2 (pointing up in image coords)
-  const rotation = Math.atan2(dx, dy); // angle relative to vertical
+
+  // Compute the angle of the wrist→MCP vector from the positive X axis
+  // In image coords: +X = right, +Y = down
+  // A hand pointing up has angle ≈ -90° (or -π/2)
+  const angle = Math.atan2(dy, dx);
+
+  // Target angle: hand should point up in the crop = -π/2 in image coords
+  // Rotation = how much to rotate the image so the hand becomes upright
+  const targetAngle = -Math.PI / 2;
+  const rotation = targetAngle - angle;
 
   // Scale the box by 2.6x to include full hand with fingers
   const scale = 2.6;
   const size = Math.max(w, h) * scale;
 
-  // Shift center slightly toward fingers (along wrist→MCP direction)
-  const shiftFactor = 0.5; // shift center by 50% of box size toward fingers
+  // Shift center toward fingers (along wrist→MCP direction)
+  // MediaPipe uses shift_y = -0.5, meaning shift 0.5×size toward fingers
   const dist = Math.sqrt(dx * dx + dy * dy);
-  const shiftX = dist > 0 ? (dx / dist) * size * shiftFactor * 0.5 : 0;
-  const shiftY = dist > 0 ? (dy / dist) * size * shiftFactor * 0.5 : 0;
+  const shiftX = dist > 0 ? (dx / dist) * size * 0.5 : 0;
+  const shiftY = dist > 0 ? (dy / dist) * size * 0.5 : 0;
 
   return {
     centerX: cx + shiftX,
