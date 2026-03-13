@@ -1010,6 +1010,11 @@ handpose.<span class="fn">dispose</span>()</pre>
 
         if (activeModel === 'micro') {
           await ensureMicroHandpose();
+          // In debug mode, also load MediaPipe for side-by-side comparison
+          if (debugCompare) {
+            statusVal.textContent = 'Loading MediaPipe for comparison...';
+            await ensureMediaPipeWasm();
+          }
         } else if (activeModel === 'mediapipe-gpu') {
           await ensureMediaPipeGpu();
         } else {
@@ -1067,6 +1072,10 @@ handpose.<span class="fn">dispose</span>()</pre>
       }
     }
 
+    // Debug compare mode: run both micro + mediapipe on each frame
+    const debugCompare = new URLSearchParams(location.search).has('debug');
+    let debugFrameCount = 0;
+
     async function detectMicro() {
       const t0 = performance.now();
       const hands = await microHandpose.detect(video);
@@ -1076,6 +1085,26 @@ handpose.<span class="fn">dispose</span>()</pre>
       updateFps();
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // In debug mode, also run MediaPipe and draw both
+      if (debugCompare && mpHandsWasm) {
+        mpWasmTimestamp += 33;
+        const mpResults = mpHandsWasm.detectForVideo(video, mpWasmTimestamp);
+        if (mpResults && mpResults.landmarks && mpResults.landmarks.length > 0) {
+          drawHandColored(mpResults.landmarks[0], canvas.width, canvas.height, '#34d399', 0.5);
+        }
+        // Log first few frames of comparison
+        if (debugFrameCount < 5 && hands.length > 0 && mpResults?.landmarks?.length > 0) {
+          const m = hands[0].landmarks;
+          const p = mpResults.landmarks[0];
+          console.log('FRAME ' + debugFrameCount + ' comparison:');
+          console.log('  micro wrist:', JSON.stringify({x: m[0].x.toFixed(3), y: m[0].y.toFixed(3)}));
+          console.log('  mp    wrist:', JSON.stringify({x: p[0].x.toFixed(3), y: p[0].y.toFixed(3)}));
+          console.log('  micro index_tip:', JSON.stringify({x: m[8].x.toFixed(3), y: m[8].y.toFixed(3)}));
+          console.log('  mp    index_tip:', JSON.stringify({x: p[8].x.toFixed(3), y: p[8].y.toFixed(3)}));
+          debugFrameCount++;
+        }
+      }
 
       if (hands.length > 0) {
         handVal.textContent = hands.map(h => h.handedness).join(', ');
