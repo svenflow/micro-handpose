@@ -12,11 +12,15 @@ function S(s: string): string {
 }
 
 /**
- * Initial 5x5 conv, stride 2, with PReLU activation.
+ * Initial 5x5 conv, stride 2, with PReLU activation and SAME padding.
  * Input: 192x192x3, Output: 96x96x32
  * Weight layout: [outCh, kH, kW, inCh] = [32, 5, 5, 3]
  * Bias: [32] (fused batchnorm)
  * Alpha: [1, 1, 32] PReLU per-channel
+ *
+ * TFLite SAME padding for 5x5 stride-2 on 192:
+ *   total_pad = (96-1)*2 + 5 - 192 = 3
+ *   pad_top = 1, pad_left = 1
  */
 export const PALM_CONV5X5_STRIDE2_PRELU_SHADER = S(`
 struct ConvParams { batch:u32, in_channels:u32, out_channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, }
@@ -32,13 +36,15 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let oc=oc_batch%params.out_channels; let batch=oc_batch/params.out_channels;
   if(out_x>=params.out_width||out_y>=params.out_height||batch>=params.batch){return;}
   var sum:f32=0.0;
+  let in_h=i32(params.in_height); let in_w=i32(params.in_width);
   for(var ic:u32=0u;ic<params.in_channels;ic=ic+1u){
     for(var ky:u32=0u;ky<5u;ky=ky+1u){
       for(var kx:u32=0u;kx<5u;kx=kx+1u){
-        let in_y=out_y*2u+ky;
-        let in_x=out_x*2u+kx;
-        if(in_y<params.in_height && in_x<params.in_width){
-          let in_idx=batch*params.in_channels*params.in_height*params.in_width+ic*params.in_height*params.in_width+in_y*params.in_width+in_x;
+        // SAME padding: pad_top=1, pad_left=1
+        let in_y=i32(out_y*2u+ky)-1;
+        let in_x=i32(out_x*2u+kx)-1;
+        if(in_y>=0 && in_y<in_h && in_x>=0 && in_x<in_w){
+          let in_idx=batch*params.in_channels*params.in_height*params.in_width+ic*params.in_height*params.in_width+u32(in_y)*params.in_width+u32(in_x);
           let w_idx=oc*5u*5u*params.in_channels+ky*5u*params.in_channels+kx*params.in_channels+ic;
           sum=sum+input[in_idx]*weight[w_idx];
         }
