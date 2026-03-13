@@ -134,7 +134,22 @@
         setStatus('palm-status', 'Loading model...', 'working');
         addLog('Loading palm detection model...');
 
-        const { compilePalmModel, loadWeightsFromBuffer } = await import('./dist/index.js');
+        const module = await import('./dist/index.js');
+        const { compilePalmModel } = module;
+
+        // Inline weight loader (same logic as loadWeightsFromBuffer in model.ts)
+        function loadWeights(metadata, buffer) {
+          const weights = new Map();
+          for (let i = 0; i < metadata.keys.length; i++) {
+            const key = metadata.keys[i];
+            const shape = metadata.shapes[i];
+            const offset = metadata.offsets[i];
+            const size = shape.reduce((a, b) => a * b, 1);
+            const data = new Float32Array(buffer, offset, size);
+            weights.set(key, { data, shape });
+          }
+          return weights;
+        }
 
         // Load palm detection weights
         addLog('Fetching palm detection weights...');
@@ -146,7 +161,7 @@
         const buffer = await binRes.arrayBuffer();
         addLog(`Weights loaded: ${(buffer.byteLength / 1024).toFixed(0)} KB, ${metadata.keys.length} tensors`);
 
-        const weights = loadWeightsFromBuffer(metadata, buffer);
+        const weights = loadWeights(metadata, buffer);
 
         addLog('Compiling palm detection model...');
         const palmModel = await compilePalmModel(weights);
