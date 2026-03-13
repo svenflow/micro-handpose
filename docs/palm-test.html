@@ -134,7 +134,7 @@
         setStatus('palm-status', 'Loading model...', 'working');
         addLog('Loading palm detection model...');
 
-        const module = await import('./dist/index.js?v=7');
+        const module = await import('./dist/index.js?v=11');
         const { compilePalmModel } = module;
 
         // Inline weight loader (same logic as loadWeightsFromBuffer in model.ts)
@@ -195,7 +195,7 @@
         addLog(`Regressors: ${output.regressors.length} values`);
 
         // Find top detections
-        const { createPalmDetector } = await import('./dist/index.js?v=7');
+        const { createPalmDetector } = await import('./dist/index.js?v=11');
         const detector = createPalmDetector(palmModel, { scoreThreshold: 0.3 });
         const rois = await detector.detect(palmCanvas);
         const rawDetections = await detector.detectRaw(palmCanvas);
@@ -292,7 +292,7 @@
         setStatus('full-status', 'Loading...', 'working');
         addLog('Testing full pipeline...');
 
-        const { createFullHandpose } = await import('./dist/index.js?v=7');
+        const { createFullHandpose } = await import('./dist/index.js?v=11');
 
         addLog('Creating full handpose detector...');
         const detector = await createFullHandpose({

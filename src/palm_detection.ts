@@ -221,15 +221,22 @@ function detectionToROI(detection: PalmDetection): HandROI {
   const targetAngle = -Math.PI / 2;
   const rotation = targetAngle - angle;
 
-  // Scale the box by 2.6x to include full hand with fingers
+  // MediaPipe's RectTransformationCalculator:
+  // 1. long_side = max(w, h) of the UNSCALED palm box
+  // 2. Shift center by (shift_x, shift_y) in the ROTATED frame (shift uses unscaled long_side)
+  // 3. Then scale: final_size = long_side * scale
+  const longSide = Math.max(w, h);
   const scale = 2.6;
-  const size = Math.max(w, h) * scale;
+  const size = longSide * scale;
 
-  // Shift center toward fingers (along wrist→MCP direction)
-  // MediaPipe uses shift_y = -0.5, meaning shift 0.5×size toward fingers
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  const shiftX = dist > 0 ? (dx / dist) * size * 0.5 : 0;
-  const shiftY = dist > 0 ? (dy / dist) * size * 0.5 : 0;
+  // Shift in rotated frame: shift_x=0, shift_y=-0.5 (toward fingers in crop-up direction)
+  // In image space: apply rotation to the shift vector
+  const shiftAmount = -0.5 * longSide;
+  const cosR = Math.cos(rotation);
+  const sinR = Math.sin(rotation);
+  // shift_x=0, so: result_x = -shift_y*sin(rot), result_y = shift_y*cos(rot)
+  const shiftX = -shiftAmount * sinR;
+  const shiftY = shiftAmount * cosR;
 
   return {
     centerX: cx + shiftX,

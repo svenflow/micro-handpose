@@ -249,8 +249,26 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
   const landmarkWeights = loadWeightsFromBuffer(landmarkMeta, landmarkBuf);
   const palmWeights = loadWeightsFromBuffer(palmMeta, palmBuf);
 
-  // Compile both models
-  const landmarkModel = await compileModel(landmarkWeights, { forceF32 });
+  // Compile both models (with f16 self-test for landmark model)
+  let landmarkModel = await compileModel(landmarkWeights, { forceF32 });
+
+  // Self-test: some platforms (macOS Chrome) pass f16 validation but produce zeros.
+  if (!forceF32) {
+    const testCanvas = new OffscreenCanvas(256, 256);
+    const testCtx = testCanvas.getContext('2d')!;
+    testCtx.fillStyle = '#886644';
+    testCtx.fillRect(0, 0, 256, 256);
+    testCtx.fillStyle = '#cc9966';
+    testCtx.fillRect(50, 50, 156, 156);
+    const testOutput = await landmarkModel.runFromCanvas(testCanvas);
+    const allZero = testOutput.landmarks.every(v => v === 0) &&
+                    testOutput.handflag.every(v => v === 0);
+    if (allZero) {
+      console.warn('[micro-handpose] f16 model produced all-zero output — recompiling with f32');
+      landmarkModel.device.destroy();
+      landmarkModel = await compileModel(landmarkWeights, { forceF32: true });
+    }
+  }
 
   // Compile palm model (uses its own device for now; could share in future)
   const palmModel = await compilePalmModel(palmWeights);
