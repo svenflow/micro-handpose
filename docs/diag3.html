@@ -23,8 +23,8 @@ try {
   if (!navigator.gpu) { L('NO WEBGPU', 'fail'); throw new Error('x'); }
 
   const adapter = await navigator.gpu.requestAdapter();
-  const hasF16 = adapter.features.has('shader-f16');
-  L('f16=' + hasF16 + ' maxWG=' + adapter.limits.maxComputeInvocationsPerWorkgroup);
+  const hasDEF = adapter.features.has('shader-f16');
+  L('f16=' + hasDEF + ' maxWG=' + adapter.limits.maxComputeInvocationsPerWorkgroup);
 
   const { createHandpose } = await import('./dist/index.js?v=' + Date.now());
 
@@ -43,21 +43,21 @@ try {
   ctx.drawImage(img, (img.width-sz)/2, (img.height-sz)/2, sz, sz, 0, 0, 256, 256);
   L('IMG OK ' + img.width + 'x' + img.height);
 
-  // TEST 1: F16 path
-  L('--- F16 TEST ---', 'warn');
+  // TEST 1: Default path (should auto-fallback to f32 on iOS)
+  L('--- DEFAULT TEST ---', 'warn');
   const hp16 = await createHandpose({ weightsUrl: './weights/', scoreThreshold: 0 });
   const r16 = await hp16.detect(canvas);
   if (!r16) {
-    L('F16: NULL RESULT', 'fail');
+    L('DEF: NULL RESULT', 'fail');
   } else {
     const allZ = r16.landmarks.every(l => l.x===0 && l.y===0 && l.z===0);
     const anyNaN = r16.landmarks.some(l => isNaN(l.x));
-    L('F16 score=' + r16.score.toFixed(4) + ' hand=' + r16.handedness);
-    L('F16 lm0: ' + r16.landmarks[0].x.toFixed(3) + ',' + r16.landmarks[0].y.toFixed(3));
-    L('F16 lm10: ' + r16.landmarks[10].x.toFixed(3) + ',' + r16.landmarks[10].y.toFixed(3));
-    if (anyNaN) L('F16: NaN!', 'fail');
-    else if (allZ) L('F16: ALL ZERO', 'fail');
-    else L('F16: WORKS!', 'ok');
+    L('DEF score=' + r16.score.toFixed(4) + ' hand=' + r16.handedness);
+    L('DEF lm0: ' + r16.landmarks[0].x.toFixed(3) + ',' + r16.landmarks[0].y.toFixed(3));
+    L('DEF lm10: ' + r16.landmarks[10].x.toFixed(3) + ',' + r16.landmarks[10].y.toFixed(3));
+    if (anyNaN) L('DEF: NaN!', 'fail');
+    else if (allZ) L('DEF: ALL ZERO', 'fail');
+    else L('DEF: WORKS!', 'ok');
   }
   // Bench f16
   for (let i = 0; i < 3; i++) await hp16.detect(canvas);
@@ -68,7 +68,7 @@ try {
     t16.push(performance.now() - t);
   }
   t16.sort((a,b) => a-b);
-  L('F16 median=' + t16[5].toFixed(1) + 'ms min=' + t16[0].toFixed(1) + 'ms');
+  L('DEF median=' + t16[5].toFixed(1) + 'ms min=' + t16[0].toFixed(1) + 'ms');
   hp16.dispose();
 
   // TEST 2: F32 path
@@ -113,6 +113,16 @@ try {
   }
   hp32.dispose();
 
+  // SUMMARY at bottom (visible in screenshots)
+  L('');
+  L('========== SUMMARY ==========', 'warn');
+  const defOK = r16 && !r16.landmarks.every(l => l.x===0 && l.y===0 && l.z===0);
+  const f32OK = r32 && !r32.landmarks.every(l => l.x===0 && l.y===0 && l.z===0);
+  L('DEFAULT: ' + (defOK ? 'WORKS!' : 'BROKEN'), defOK ? 'ok' : 'fail');
+  L('F32:     ' + (f32OK ? 'WORKS!' : 'BROKEN'), f32OK ? 'ok' : 'fail');
+  if (defOK) L('DEF time: ' + t16[5].toFixed(1) + 'ms');
+  if (f32OK) L('F32 time: ' + t32[5].toFixed(1) + 'ms');
+  L('iOS: ' + (/iPhone|iPad/.test(navigator.userAgent) ? 'YES' : 'NO'));
   L('=== DONE ===', 'ok');
 } catch (e) {
   L('FATAL: ' + e.message, 'fail');

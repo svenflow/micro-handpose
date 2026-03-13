@@ -29,7 +29,7 @@
 
         log('creating detector...');
         const t0 = performance.now();
-        const handpose = await createHandpose({ weightsUrl: 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.1.2/weights/' });
+        const handpose = await createHandpose({ weightsUrl: './weights/' });
         log(`ready in ${(performance.now() - t0).toFixed(0)}ms`);
 
         const img = document.getElementById('testImg');
