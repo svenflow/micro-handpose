@@ -18,6 +18,10 @@ try {
   if (!adapter) { L('ERROR: No adapter'); throw new Error('no adapter'); }
   L('   vendor: ' + (adapter.info?.vendor || 'unknown'));
   L('   arch: ' + (adapter.info?.architecture || 'unknown'));
+  L('   maxComputeWorkgroupSizeX: ' + adapter.limits.maxComputeWorkgroupSizeX);
+  L('   maxComputeInvocationsPerWorkgroup: ' + adapter.limits.maxComputeInvocationsPerWorkgroup);
+  L('   maxStorageBuffersPerShaderStage: ' + adapter.limits.maxStorageBuffersPerShaderStage);
+  L('   maxBufferSize: ' + adapter.limits.maxBufferSize);
 
   L('3. Checking shader-f16...');
   const hasF16 = adapter.features.has('shader-f16');
@@ -28,19 +32,183 @@ try {
   const device = await adapter.requestDevice({ requiredFeatures: features });
   L('   OK');
 
+  // ===== RAW GPU BUFFER TEST (before model) =====
+  L('5. Raw GPU buffer write+readback test...');
+  try {
+    // Test 1: Simple compute shader writes known values
+    const testShader = device.createShaderModule({ code: `
+      @group(0) @binding(0) var<storage, read_write> out: array<f32>;
+      @compute @workgroup_size(4)
+      fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+        out[gid.x] = f32(gid.x + 1u) * 1.5;
+      }
+    `});
+    const testInfo = await testShader.getCompilationInfo();
+    const testErrors = testInfo.messages.filter(m => m.type === 'error');
+    if (testErrors.length > 0) { L('   shader errors: ' + JSON.stringify(testErrors)); }
+
+    const testBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const testReadBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const testLayout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }] });
+    const testPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [testLayout] }), compute: { module: testShader, entryPoint: 'main' } });
+    const testBG = device.createBindGroup({ layout: testLayout, entries: [{ binding: 0, resource: { buffer: testBuf } }] });
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(testPipeline);
+    pass.setBindGroup(0, testBG);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    enc.copyBufferToBuffer(testBuf, 0, testReadBuf, 0, 16);
+    device.queue.submit([enc.finish()]);
+
+    await device.queue.onSubmittedWorkDone();
+    await testReadBuf.mapAsync(GPUMapMode.READ);
+    const testData = new Float32Array(testReadBuf.getMappedRange());
+    L('   expected: [1.5, 3.0, 4.5, 6.0]');
+    L('   got:      [' + testData[0].toFixed(1) + ', ' + testData[1].toFixed(1) + ', ' + testData[2].toFixed(1) + ', ' + testData[3].toFixed(1) + ']');
+    const testOK = testData[0] === 1.5 && testData[1] === 3.0 && testData[2] === 4.5 && testData[3] === 6.0;
+    L('   ' + (testOK ? '✅ GPU compute + readback WORKS' : '❌ GPU readback BROKEN'));
+    testReadBuf.unmap();
+    testBuf.destroy();
+    testReadBuf.destroy();
+
+    if (!testOK) {
+      L('   FATAL: Basic GPU readback is broken. Cannot proceed.');
+      throw new Error('GPU readback broken');
+    }
+  } catch (e) {
+    L('   raw test error: ' + e.message);
+  }
+
+  // Test 2: Large buffer with workgroup_size(288) to match model
+  L('5b. Large workgroup test (288 threads)...');
+  try {
+    const shader288 = device.createShaderModule({ code: `
+      @group(0) @binding(0) var<storage, read_write> out: array<f32>;
+      @compute @workgroup_size(288)
+      fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+        if (gid.x < 288u) { out[gid.x] = f32(gid.x) * 0.1; }
+      }
+    `});
+    const info288 = await shader288.getCompilationInfo();
+    const err288 = info288.messages.filter(m => m.type === 'error');
+    if (err288.length > 0) {
+      L('   ❌ workgroup_size(288) FAILS: ' + JSON.stringify(err288.map(e => e.message)));
+    } else {
+      const buf288 = device.createBuffer({ size: 288 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const read288 = device.createBuffer({ size: 288 * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const lay288 = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }] });
+      const pipe288 = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [lay288] }), compute: { module: shader288, entryPoint: 'main' } });
+      const bg288 = device.createBindGroup({ layout: lay288, entries: [{ binding: 0, resource: { buffer: buf288 } }] });
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipe288);
+      pass.setBindGroup(0, bg288);
+      pass.dispatchWorkgroups(1);
+      pass.end();
+      enc.copyBufferToBuffer(buf288, 0, read288, 0, 288 * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await read288.mapAsync(GPUMapMode.READ);
+      const data288 = new Float32Array(read288.getMappedRange());
+      L('   out[0]=' + data288[0].toFixed(1) + ' out[100]=' + data288[100].toFixed(1) + ' out[287]=' + data288[287].toFixed(1));
+      L('   expected: 0.0, 10.0, 28.7');
+      const ok288 = Math.abs(data288[100] - 10.0) < 0.01 && Math.abs(data288[287] - 28.7) < 0.01;
+      L('   ' + (ok288 ? '✅ workgroup_size(288) works' : '❌ workgroup_size(288) BROKEN'));
+      read288.unmap();
+      buf288.destroy(); read288.destroy();
+    }
+  } catch (e) {
+    L('   288 test error: ' + e.message);
+  }
+
+  // Test 3: f16 weight read test
   if (hasF16) {
-    L('5. Testing f16 shader compilation...');
+    L('5c. f16 weight storage test...');
     try {
-      const testModule = device.createShaderModule({
-        code: 'enable f16;\n@compute @workgroup_size(1)\nfn main() { var x: f16 = f16(1.0); _ = x; }'
-      });
-      const info = await testModule.getCompilationInfo();
-      const errors = info.messages.filter(m => m.type === 'error');
-      L(errors.length > 0 ? '   ERRORS: ' + JSON.stringify(errors.map(e => e.message)) : '   f16 compilation OK!');
+      const f16Shader = device.createShaderModule({ code: `
+        enable f16;
+        @group(0) @binding(0) var<storage, read> weights: array<f16>;
+        @group(0) @binding(1) var<storage, read_write> out: array<f32>;
+        @compute @workgroup_size(4)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+          out[gid.x] = f32(weights[gid.x]) * 2.0;
+        }
+      `});
+      const f16Info = await f16Shader.getCompilationInfo();
+      const f16Errors = f16Info.messages.filter(m => m.type === 'error');
+      if (f16Errors.length > 0) {
+        L('   ❌ f16 shader errors: ' + JSON.stringify(f16Errors.map(e => e.message)));
+      } else {
+        // Create f16 weight buffer with known values
+        const f16Weights = new Uint16Array(4);
+        // f16 encoding: 1.0 = 0x3C00, 2.0 = 0x4000, 3.0 = 0x4200, 4.0 = 0x4400
+        f16Weights[0] = 0x3C00; f16Weights[1] = 0x4000; f16Weights[2] = 0x4200; f16Weights[3] = 0x4400;
+        const wBuf = device.createBuffer({ size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(wBuf, 0, f16Weights);
+        const oBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+        const rBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        const lay = device.createBindGroupLayout({ entries: [
+          { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+          { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }
+        ]});
+        const pipe = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [lay] }), compute: { module: f16Shader, entryPoint: 'main' } });
+        const bg = device.createBindGroup({ layout: lay, entries: [
+          { binding: 0, resource: { buffer: wBuf } },
+          { binding: 1, resource: { buffer: oBuf } }
+        ]});
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(pipe);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(1);
+        pass.end();
+        enc.copyBufferToBuffer(oBuf, 0, rBuf, 0, 16);
+        device.queue.submit([enc.finish()]);
+        await device.queue.onSubmittedWorkDone();
+        await rBuf.mapAsync(GPUMapMode.READ);
+        const data = new Float32Array(rBuf.getMappedRange());
+        L('   expected: [2.0, 4.0, 6.0, 8.0]');
+        L('   got:      [' + data[0].toFixed(1) + ', ' + data[1].toFixed(1) + ', ' + data[2].toFixed(1) + ', ' + data[3].toFixed(1) + ']');
+        const ok = Math.abs(data[0] - 2.0) < 0.01 && Math.abs(data[3] - 8.0) < 0.01;
+        L('   ' + (ok ? '✅ f16 read works' : '❌ f16 read BROKEN'));
+        rBuf.unmap();
+        wBuf.destroy(); oBuf.destroy(); rBuf.destroy();
+      }
     } catch (e) {
-      L('   f16 EXCEPTION: ' + e.message);
+      L('   f16 test error: ' + e.message);
     }
   }
+
+  // Test 4: 8-binding test (model uses up to 8 bindings)
+  L('5d. 8-binding shader test...');
+  try {
+    const shader8 = device.createShaderModule({ code: `
+      @group(0) @binding(0) var<storage, read> a: array<f32>;
+      @group(0) @binding(1) var<storage, read> b: array<f32>;
+      @group(0) @binding(2) var<storage, read> c: array<f32>;
+      @group(0) @binding(3) var<storage, read> d: array<f32>;
+      @group(0) @binding(4) var<storage, read> e: array<f32>;
+      @group(0) @binding(5) var<storage, read> f: array<f32>;
+      @group(0) @binding(6) var<storage, read> g: array<f32>;
+      @group(0) @binding(7) var<storage, read_write> out: array<f32>;
+      @compute @workgroup_size(1)
+      fn main() {
+        out[0] = a[0] + b[0] + c[0] + d[0] + e[0] + f[0] + g[0];
+      }
+    `});
+    const info8 = await shader8.getCompilationInfo();
+    const err8 = info8.messages.filter(m => m.type === 'error');
+    if (err8.length > 0) {
+      L('   ❌ 8 bindings FAIL: ' + JSON.stringify(err8.map(e => e.message)));
+    } else {
+      L('   ✅ 8-binding shader compiles OK');
+    }
+  } catch (e) {
+    L('   8-binding test error: ' + e.message);
+  }
+
   device.destroy();
 
   L('6. Creating handpose model...');
@@ -56,20 +224,19 @@ try {
   ctx.fillRect(0, 0, 256, 256);
   const result = await hp.detect(canvas);
   if (result) {
-    L('   ✅ READBACK WORKS!');
     L('   score: ' + result.score.toFixed(6));
-    L('   handedness: ' + result.handedness + ' (raw ~' + (result.handedness === 'right' ? '>0.5' : '<0.5') + ')');
+    L('   handedness: ' + result.handedness);
     L('   landmarks[0]: x=' + result.landmarks[0].x.toFixed(4) + ' y=' + result.landmarks[0].y.toFixed(4) + ' z=' + result.landmarks[0].z.toFixed(4));
     L('   landmarks[10]: x=' + result.landmarks[10].x.toFixed(4) + ' y=' + result.landmarks[10].y.toFixed(4) + ' z=' + result.landmarks[10].z.toFixed(4));
     L('   landmarks[20]: x=' + result.landmarks[20].x.toFixed(4) + ' y=' + result.landmarks[20].y.toFixed(4) + ' z=' + result.landmarks[20].z.toFixed(4));
     const allZero = result.landmarks.every(l => l.x === 0 && l.y === 0 && l.z === 0);
-    L('   all-zero check: ' + (allZero ? '⚠️ ALL ZEROS (readback broken)' : '✅ non-zero values'));
+    L('   ' + (allZero ? '⚠️ ALL ZEROS (readback broken)' : '✅ non-zero values (readback works!)'));
   } else {
     L('   ❌ result is null (should not happen with threshold=0)');
   }
 
   // Quick benchmark: 5 runs
-  L('8. Quick benchmark (5 runs)...');
+  L('8. Benchmark (5 runs)...');
   const qtimes = [];
   for (let i = 0; i < 5; i++) {
     const t0 = performance.now();
@@ -78,50 +245,24 @@ try {
   }
   L('   times: ' + qtimes.join(', ') + ' ms');
 
-  // Batched timing to overcome Safari 1ms precision
-  L('9. Batched benchmark (for sub-ms precision)...');
-
-  // Warmup
+  // Batched timing
+  L('9. Batched benchmark...');
   for (let i = 0; i < 10; i++) await hp.detect(canvas);
-
-  const batchSizes = [1, 10, 50];
-  for (const batchSize of batchSizes) {
+  for (const batchSize of [10, 50]) {
     const batchTimes = [];
     const numBatches = Math.min(Math.ceil(50 / batchSize), 10);
     for (let b = 0; b < numBatches; b++) {
       const t0 = performance.now();
-      for (let i = 0; i < batchSize; i++) {
-        await hp.detect(canvas);
-      }
+      for (let i = 0; i < batchSize; i++) await hp.detect(canvas);
       batchTimes.push(performance.now() - t0);
     }
     const totalMs = batchTimes.reduce((a, b) => a + b, 0);
     const totalRuns = numBatches * batchSize;
-    const avgMs = totalMs / totalRuns;
-    batchTimes.sort((a, b) => a - b);
-    const medianBatch = batchTimes[Math.floor(batchTimes.length / 2)];
-    L('   batch=' + batchSize + ': avg=' + avgMs.toFixed(2) + 'ms/run, median_batch=' + (medianBatch / batchSize).toFixed(2) + 'ms/run, total=' + totalMs.toFixed(0) + 'ms/' + totalRuns + 'runs');
-  }
-
-  // Diagnostic benchmark
-  L('10. Diagnostic benchmark (GPU vs readback breakdown)...');
-  try {
-    const diag = await hp.benchmarkDiagnostic(canvas);
-    L('    GPU only:        median=' + diag.gpuOnly.median.toFixed(2) + 'ms, min=' + diag.gpuOnly.min.toFixed(2) + 'ms');
-    L('    mapAsync:        median=' + diag.mapAsyncOnly.median.toFixed(2) + 'ms, min=' + diag.mapAsyncOnly.min.toFixed(2) + 'ms');
-    L('    mapAsync(noWait): median=' + diag.mapAsyncNoWait.median.toFixed(2) + 'ms, min=' + diag.mapAsyncNoWait.min.toFixed(2) + 'ms');
-    L('    Total (e2e):     median=' + diag.total.median.toFixed(2) + 'ms, min=' + diag.total.min.toFixed(2) + 'ms');
-    L('    Pipelined:       median=' + diag.pipelined.median.toFixed(2) + 'ms, min=' + diag.pipelined.min.toFixed(2) + 'ms');
-    if (diag.renderReadback) {
-      L('    Render readback: median=' + diag.renderReadback.median.toFixed(2) + 'ms, min=' + diag.renderReadback.min.toFixed(2) + 'ms');
-    }
-  } catch (e) {
-    L('    benchmarkDiagnostic error: ' + e.message);
+    L('   batch=' + batchSize + ': avg=' + (totalMs / totalRuns).toFixed(2) + 'ms/run, total=' + totalMs.toFixed(0) + 'ms/' + totalRuns + 'runs');
   }
 
   L('\n=== ALL DONE ===');
-  L('Timer precision: ' + performance.now().toString().split('.')[1]?.length + ' decimal places');
-  L('User agent: ' + navigator.userAgent);
+  L('UA: ' + navigator.userAgent);
 } catch (e) {
   L('\nFATAL: ' + e.message);
   L('Stack: ' + (e.stack || 'no stack'));
