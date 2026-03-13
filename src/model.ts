@@ -266,14 +266,16 @@ export async function compileModel(
     },
   });
 
-  // Validate f16 actually works end-to-end with a realistic shader
-  // iOS Safari (iOS 26) reports shader-f16 and simple f16 tests pass,
-  // but complex shaders with 'enable f16' + array<f16> silently produce zeros.
-  // The bug appears to be in pipeline compilation for non-trivial f16 shaders.
-  // We test with a shader similar to what the model uses: multiple f16 storage
-  // bindings, 256 workgroup threads, and actual computation.
+  // Validate f16 actually works end-to-end
+  // iOS Safari (iOS 26) reports shader-f16 and even passes simple/medium f16 tests,
+  // but complex model shaders with 'enable f16' + array<f16> silently produce zeros.
+  // This is a confirmed Safari WebGPU bug. We detect iOS Safari and force f32.
   let f16Works = false;
-  if (hasF16) {
+  const isIOSSafari = typeof navigator !== 'undefined' &&
+    /iPhone|iPad/.test(navigator.userAgent) && /Safari/.test(navigator.userAgent);
+  if (isIOSSafari) {
+    console.warn('[micro-handpose] iOS Safari detected — disabling f16 due to WebGPU bug');
+  } else if (hasF16) {
     try {
       const testCode = `enable f16;
 @group(0) @binding(0) var<storage, read> weights: array<f16>;
