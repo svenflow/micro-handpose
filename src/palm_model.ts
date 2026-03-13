@@ -1263,11 +1263,72 @@ export async function compilePalmModel(
     device.queue.submit([enc.finish()]);
     result.reg16 = stats(await debugReadBuffer(reg16Buf, 15552), 500);
 
+    // FPN debug: project 256→128 at 12x12
+    enc = device.createCommandEncoder();
+    encodeConv1x1PReLU(enc, curBuf, fpnProjWBuf, fpnProjBBuf, fpnProjAlphaBuf, altBuf, 256, 128, 12, 12);
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.fpnProj = stats(await debugReadBuffer(curBuf, 12 * 12 * 128));
+
+    // backbone2 skip
+    result.backbone2Skip = stats(await debugReadBuffer(backbone2SkipBuf, 24 * 24 * 128));
+
+    // Upsample 12→24 + add backbone2 skip
+    enc = device.createCommandEncoder();
+    {
+      const uniform = makeUniform(new Uint32Array([1, 128, 12, 12, 24, 24]));
+      const bg = device.createBindGroup({
+        layout: upsampleAddLayout,
+        entries: [
+          { binding: 0, resource: { buffer: curBuf } },
+          { binding: 1, resource: { buffer: backbone2SkipBuf } },
+          { binding: 2, resource: { buffer: altBuf } },
+          { binding: 3, resource: { buffer: uniform } },
+        ],
+      });
+      const pass = enc.beginComputePass();
+      pass.setPipeline(upsampleAddPipe);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(ceil(24, 8), ceil(24, 8), 128);
+      pass.end();
+    }
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.fpnUpsample = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+
+    // FPN block 1
+    enc = device.createCommandEncoder();
+    encodeDwPwBlock(enc, fpnBlock1, curBuf, altBuf, curBuf);
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.fpnBlock1 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+
+    // FPN block 2
+    enc = device.createCommandEncoder();
+    encodeDwPwBlock(enc, fpnBlock2, curBuf, altBuf, curBuf);
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.fpnBlock2 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+
+    // 24x24 SSD heads
+    enc = device.createCommandEncoder();
+    encodeConv1x1(enc, curBuf, cls8WBuf, cls8BBuf, cls8Buf, 128, 2, 24, 24);
+    device.queue.submit([enc.finish()]);
+    result.cls8 = stats(await debugReadBuffer(cls8Buf, 24 * 24 * 2));
+
+    enc = device.createCommandEncoder();
+    encodeConv1x1(enc, curBuf, reg8WBuf, reg8BBuf, reg8Buf, 128, 36, 24, 24);
+    device.queue.submit([enc.finish()]);
+    result.reg8 = stats(await debugReadBuffer(reg8Buf, 24 * 24 * 36));
+
     // Weight checks
     result.initWeights = stats(await debugReadBuffer(initConvWeightBuf, 100), 100);
     result.initBias = stats(await debugReadBuffer(initConvBiasBuf, 32), 32);
     result.cls16Weights = stats(await debugReadBuffer(cls16WBuf, 100), 100);
     result.cls16Bias = stats(await debugReadBuffer(cls16BBuf, 6), 6);
+    result.cls8Weights = stats(await debugReadBuffer(cls8WBuf, 100), 100);
+    result.cls8Bias = stats(await debugReadBuffer(cls8BBuf, 2), 2);
+    result.fpnProjWeights = stats(await debugReadBuffer(fpnProjWBuf, 100), 100);
 
     return result;
   }
