@@ -38,7 +38,7 @@ pixels = np.array(img, dtype=np.float32) / 255.0  # [256, 256, 3] in [0, 1]
 # Convert to NCHW and pad to 257x257
 x = pixels.transpose(2, 0, 1)  # [3, 256, 256]
 padded = np.zeros((3, 257, 257), dtype=np.float32)
-padded[:, 1:257, 1:257] = x  # Same as CANVAS_INPUT_SHADER: pixel at (y+1, x+1)
+padded[:, 0:256, 0:256] = x  # PyTorch ConstantPad2d((0,1,0,1)): image at (0,0), zeros on right+bottom
 
 def conv2d(input, weight, bias, stride=1, padding=0):
     """Standard 2D convolution. input: [C_in, H, W], weight: [C_out, C_in, kH, kW]"""
@@ -65,12 +65,18 @@ def conv2d(input, weight, bias, stride=1, padding=0):
         output[oc] += bias[oc]
     return output
 
-def depthwise_conv2d(input, weight, bias, stride=1, padding=0):
-    """Depthwise 2D convolution. input: [C, H, W], weight: [C, 1, kH, kW]"""
+def depthwise_conv2d(input, weight, bias, stride=1, padding=0, asymmetric=False):
+    """Depthwise 2D convolution. input: [C, H, W], weight: [C, 1, kH, kW]
+    If asymmetric=True, uses F.pad(x, (1,2,1,2)) style padding (1 left/top, 2 right/bottom)"""
     c, h, w = input.shape
     kh, kw = weight.shape[2], weight.shape[3]
 
-    if padding > 0:
+    if asymmetric:
+        # PyTorch F.pad(x, (1, 2, 1, 2)): 1 left, 2 right, 1 top, 2 bottom
+        padded_input = np.zeros((c, h + 3, w + 3), dtype=np.float32)
+        padded_input[:, 1:h+1, 1:w+1] = input
+        padding = 0  # already padded
+    elif padding > 0:
         padded_input = np.zeros((c, h + 2*padding, w + 2*padding), dtype=np.float32)
         padded_input[:, padding:h+padding, padding:w+padding] = input
     else:
@@ -147,8 +153,11 @@ def resmodule(input, prefix, stride=1):
     in_ch = input.shape[0]
     out_ch = pw_weight.shape[0]
 
-    # Depthwise conv
-    dw_out = depthwise_conv2d(input, dw_weight, dw_bias, stride=stride, padding=2)
+    # Depthwise conv - stride=2 uses asymmetric padding F.pad(x, (1,2,1,2))
+    if stride == 2:
+        dw_out = depthwise_conv2d(input, dw_weight, dw_bias, stride=stride, asymmetric=True)
+    else:
+        dw_out = depthwise_conv2d(input, dw_weight, dw_bias, stride=stride, padding=2)
 
     # Pointwise conv
     pw_out = pointwise_conv2d(dw_out, pw_weight, pw_bias)

@@ -176,8 +176,8 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let x=gid.x; let y=gid.y; let c=gid.z;
   if(x>=params.in_size||y>=params.in_size||c>=params.channels){return;}
   let in_idx=c*params.in_size*params.in_size+y*params.in_size+x;
-  let oy=y+1u; let ox=x+1u;
-  let out_idx=c*params.out_size*params.out_size+oy*params.out_size+ox;
+  // PyTorch uses ConstantPad2d((0,1,0,1)): pad right+bottom, image stays at (0,0)
+  let out_idx=c*params.out_size*params.out_size+y*params.out_size+x;
   output[out_idx]=input[in_idx];
 }
 `),wt=A(`
@@ -547,10 +547,10 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   if(x>=params.in_size||y>=params.in_size){return;}
   let pixel=textureLoad(input_tex,vec2<u32>(x,y),0);
   let out_stride=params.out_size*params.out_size;
-  let oy=y+1u; let ox=x+1u;
-  output[0u*out_stride+oy*params.out_size+ox]=pixel.r;
-  output[1u*out_stride+oy*params.out_size+ox]=pixel.g;
-  output[2u*out_stride+oy*params.out_size+ox]=pixel.b;
+  // PyTorch uses ConstantPad2d((0,1,0,1)): pad right+bottom, image stays at (0,0)
+  output[0u*out_stride+y*params.out_size+x]=pixel.r;
+  output[1u*out_stride+y*params.out_size+x]=pixel.g;
+  output[2u*out_stride+y*params.out_size+x]=pixel.b;
 }
 `);function Dt(o,w){let h=new Map,b=o.dtype??"float32";for(let U=0;U<o.keys.length;U++){let a=o.keys[U],W=o.shapes[U],R=o.offsets[U],E=W.reduce((X,g)=>X*g,1),M,x;if(b==="float32")M=new Float32Array(w,R,E);else{let X=new DataView(w);M=new Float32Array(E);for(let g=0;g<E;g++)M[g]=xi(X.getUint16(R+g*2,!0));x=w.slice(R,R+E*2)}h.set(a,{data:M,shape:W,rawF16:x})}return h}function xi(o){let w=o>>15&1,h=o>>10&31,b=o&1023;if(h===0){if(b===0)return w?-0:0;let W=-14,R=b/1024;return(w?-1:1)*Math.pow(2,W)*R}if(h===31)return b===0?w?-1/0:1/0:NaN;let U=h-15,a=1+b/1024;return(w?-1:1)*Math.pow(2,U)*a}var vi=[[24,24,128,1,"backbone1.3.f.0."],[24,24,128,1,"backbone1.3.f.1."],[24,48,128,2,"backbone1.4."],[48,48,64,1,"backbone2.0.f.0."],[48,48,64,1,"backbone2.0.f.1."],[48,96,64,2,"backbone2.1."],[96,96,32,1,"backbone3.0.f.0."],[96,96,32,1,"backbone3.0.f.1."],[96,96,32,2,"backbone3.1."],[96,96,16,1,"backbone4.0.f.0."],[96,96,16,1,"backbone4.0.f.1."],[96,96,16,2,"backbone4.1."],[96,96,16,1,"backbone5.0."],[96,96,32,1,"backbone6.0."],[48,48,64,1,"ff.0.f.0."],[48,48,64,1,"ff.0.f.1."],[48,48,64,1,"ff.0.f.2."],[48,48,64,1,"ff.0.f.3."],[48,96,64,2,"ff.1."],[96,96,32,1,"ff.2.f.0."],[96,96,32,1,"ff.2.f.1."],[96,96,32,1,"ff.2.f.2."],[96,96,32,1,"ff.2.f.3."],[96,288,32,2,"ff.3."],[288,288,16,1,"ff.4.f.0."],[288,288,16,1,"ff.4.f.1."],[288,288,16,1,"ff.4.f.2."],[288,288,16,1,"ff.4.f.3."],[288,288,16,2,"ff.5."],[288,288,8,1,"ff.6.f.0."],[288,288,8,1,"ff.6.f.1."],[288,288,8,1,"ff.6.f.2."],[288,288,8,1,"ff.6.f.3."],[288,288,8,2,"ff.7."],[288,288,4,1,"ff.8.f.0."],[288,288,4,1,"ff.8.f.1."],[288,288,4,1,"ff.8.f.2."],[288,288,4,1,"ff.8.f.3."],[288,288,4,2,"ff.9."],[288,288,2,1,"ff.10.f.0."],[288,288,2,1,"ff.10.f.1."],[288,288,2,1,"ff.10.f.2."],[288,288,2,1,"ff.10.f.3."]],Ct=vi.map(([o,w,h,b,U])=>({type:"resmodule",inCh:o,outCh:w,h,w:h,stride:b,prefix:U})),Pi=2,ki=5,Bi=8,Ui=11;async function ia(o,w){if(!navigator.gpu)throw new Error("WebGPU not supported");let h=await navigator.gpu.requestAdapter();if(!h)throw new Error("No GPU adapter found");let b=h.features.has("shader-f16"),U=b?["shader-f16"]:[],a=await h.requestDevice({requiredFeatures:U,requiredLimits:{maxStorageBuffersPerShaderStage:Math.min(h.limits.maxStorageBuffersPerShaderStage,8),maxComputeWorkgroupSizeX:Math.min(h.limits.maxComputeWorkgroupSizeX,288),maxComputeInvocationsPerWorkgroup:Math.min(h.limits.maxComputeInvocationsPerWorkgroup,288)}}),W=!1;if(typeof navigator<"u"&&/iPhone|iPad/.test(navigator.userAgent)&&/Safari/.test(navigator.userAgent))console.warn("[micro-handpose] iOS Safari detected \u2014 disabling f16 due to WebGPU bug");else if(b)try{let t=`enable f16;
 @group(0) @binding(0) var<storage, read> input: array<f32>;
