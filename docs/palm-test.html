@@ -349,6 +349,14 @@
       }
     };
 
+    // Auto-run on load
+    window.addEventListener('load', async () => {
+      addLog('Auto-running palm detection test...');
+      await window.testPalmDetection();
+      addLog('Auto-running full pipeline test...');
+      await window.testFullPipeline();
+    });
+
     // ============ Comparison Test ============
     window.testComparison = async function() {
       try {
