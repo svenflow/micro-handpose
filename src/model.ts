@@ -266,10 +266,11 @@ export async function compileModel(
     },
   });
 
-  // Validate f16 actually works end-to-end
-  // iOS Safari (iOS 26) reports shader-f16 and even passes simple/medium f16 tests,
+  // Validate f16 actually works end-to-end with a realistic multi-pass test.
+  // iOS Safari and some macOS Chrome builds report shader-f16 and pass simple tests,
   // but complex model shaders with 'enable f16' + array<f16> silently produce zeros.
-  // This is a confirmed Safari WebGPU bug. We detect iOS Safari and force f32.
+  // We run a comprehensive validation: two chained compute passes with large f16 buffers
+  // mimicking the actual model patterns (depthwise-like + pointwise-like).
   let f16Works = false;
   const isIOSSafari = typeof navigator !== 'undefined' &&
     /iPhone|iPad/.test(navigator.userAgent) && /Safari/.test(navigator.userAgent);
@@ -277,86 +278,154 @@ export async function compileModel(
     console.warn('[micro-handpose] iOS Safari detected — disabling f16 due to WebGPU bug');
   } else if (hasF16) {
     try {
-      const testCode = `enable f16;
-@group(0) @binding(0) var<storage, read> weights: array<f16>;
-@group(0) @binding(1) var<storage, read> bias: array<f16>;
-@group(0) @binding(2) var<storage, read> input: array<f32>;
+      // Pass 1: depthwise-like (reads large f16 weight array, writes f32 intermediate)
+      const pass1Code = `enable f16;
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read> dw_weight: array<f16>;
+@group(0) @binding(2) var<storage, read> dw_bias: array<f16>;
+@group(0) @binding(3) var<storage, read_write> intermediate: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let ch = gid.x;
+  if (ch >= 96u) { return; }
+  var sum: f32 = 0.0;
+  for (var i: u32 = 0u; i < 25u; i = i + 1u) {
+    sum = sum + input[ch * 25u + i] * f32(dw_weight[ch * 25u + i]);
+  }
+  intermediate[ch] = max(0.0, sum + f32(dw_bias[ch]));
+}`;
+      // Pass 2: pointwise-like (reads f32 intermediate + large f16 pw weights)
+      const pass2Code = `enable f16;
+@group(0) @binding(0) var<storage, read> intermediate: array<f32>;
+@group(0) @binding(1) var<storage, read> pw_weight: array<f16>;
+@group(0) @binding(2) var<storage, read> pw_bias: array<f16>;
 @group(0) @binding(3) var<storage, read_write> output: array<f32>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x >= 64u) { return; }
+  let oc = gid.x;
+  if (oc >= 96u) { return; }
   var sum: f32 = 0.0;
-  for (var i: u32 = 0u; i < 64u; i = i + 1u) {
-    sum = sum + f32(weights[gid.x * 64u + i]) * input[i];
+  for (var ic: u32 = 0u; ic < 96u; ic = ic + 1u) {
+    sum = sum + intermediate[ic] * f32(pw_weight[oc * 96u + ic]);
   }
-  output[gid.x] = sum + f32(bias[gid.x]);
+  output[oc] = sum + f32(pw_bias[oc]);
 }`;
-      const testModule = device.createShaderModule({ code: testCode });
-      const info = await testModule.getCompilationInfo();
-      if (info.messages.some((m: GPUCompilationMessage) => m.type === 'error')) {
+      const mod1 = device.createShaderModule({ code: pass1Code });
+      const mod2 = device.createShaderModule({ code: pass2Code });
+      const info1 = await mod1.getCompilationInfo();
+      const info2 = await mod2.getCompilationInfo();
+      if (info1.messages.some((m: GPUCompilationMessage) => m.type === 'error') ||
+          info2.messages.some((m: GPUCompilationMessage) => m.type === 'error')) {
         f16Works = false;
       } else {
-        // Create f16 weight buffer (64x64 = 4096 f16 values, all = 1.0h)
-        const f16Weights = new Uint16Array(4096);
-        f16Weights.fill(0x3C00); // f16(1.0)
-        // f16 bias (64 values, all = 0.5h)
-        const f16Bias = new Uint16Array(64);
-        f16Bias.fill(0x3800); // f16(0.5)
-        // f32 input (64 values, all = 1.0)
-        const f32Input = new Float32Array(64);
+        // f32 input: 96 channels × 25 spatial = 2400 values, all 1.0
+        const f32Input = new Float32Array(2400);
         f32Input.fill(1.0);
+        // f16 depthwise weights: 96 × 25 = 2400 values, all 0.04h (1/25 so sum≈1.0)
+        const f16DwW = new Uint16Array(2400);
+        f16DwW.fill(0x2914); // f16(0.04)
+        const f16DwB = new Uint16Array(96);
+        f16DwB.fill(0x3800); // f16(0.5)
+        // f16 pointwise weights: 96 × 96 = 9216 values (~18KB), all ~0.01h
+        const f16PwW = new Uint16Array(9216);
+        f16PwW.fill(0x211E); // f16(~0.0104)
+        const f16PwB = new Uint16Array(96);
+        f16PwB.fill(0x3000); // f16(0.25)
 
-        const wBuf = device.createBuffer({ size: f16Weights.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-        const bBuf = device.createBuffer({ size: f16Bias.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-        const iBuf = device.createBuffer({ size: f32Input.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-        const oBuf = device.createBuffer({ size: 256, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-        const readBuf = device.createBuffer({ size: 256, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        const SC2 = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+        const SO2 = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC;
+        const inputBuf = device.createBuffer({ size: f32Input.byteLength, usage: SC2 });
+        const dwWBuf = device.createBuffer({ size: f16DwW.byteLength, usage: SC2 });
+        const dwBBuf = device.createBuffer({ size: f16DwB.byteLength, usage: SC2 });
+        const interBuf = device.createBuffer({ size: 96 * 4, usage: GPUBufferUsage.STORAGE });
+        const pwWBuf = device.createBuffer({ size: f16PwW.byteLength, usage: SC2 });
+        const pwBBuf = device.createBuffer({ size: f16PwB.byteLength, usage: SC2 });
+        const outBuf = device.createBuffer({ size: 96 * 4, usage: SO2 });
+        const readBuf = device.createBuffer({ size: 96 * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
 
-        device.queue.writeBuffer(wBuf, 0, f16Weights);
-        device.queue.writeBuffer(bBuf, 0, f16Bias);
-        device.queue.writeBuffer(iBuf, 0, f32Input);
+        device.queue.writeBuffer(inputBuf, 0, f32Input);
+        device.queue.writeBuffer(dwWBuf, 0, f16DwW);
+        device.queue.writeBuffer(dwBBuf, 0, f16DwB);
+        device.queue.writeBuffer(pwWBuf, 0, f16PwW);
+        device.queue.writeBuffer(pwBBuf, 0, f16PwB);
 
-        const layout = device.createBindGroupLayout({
+        const rsType = 'read-only-storage' as GPUBufferBindingType;
+        const sType = 'storage' as GPUBufferBindingType;
+        const layout1 = device.createBindGroupLayout({
           entries: [
-            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' as GPUBufferBindingType } },
-            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' as GPUBufferBindingType } },
-            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' as GPUBufferBindingType } },
-            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' as GPUBufferBindingType } },
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: rsType } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: rsType } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: rsType } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: sType } },
           ],
         });
-        const pipeline = device.createComputePipeline({
-          layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-          compute: { module: testModule, entryPoint: 'main' },
-        });
-        const bg = device.createBindGroup({
-          layout,
+        const layout2 = device.createBindGroupLayout({
           entries: [
-            { binding: 0, resource: { buffer: wBuf } },
-            { binding: 1, resource: { buffer: bBuf } },
-            { binding: 2, resource: { buffer: iBuf } },
-            { binding: 3, resource: { buffer: oBuf } },
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: rsType } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: rsType } },
+            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: rsType } },
+            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: sType } },
+          ],
+        });
+        const pipe1 = device.createComputePipeline({
+          layout: device.createPipelineLayout({ bindGroupLayouts: [layout1] }),
+          compute: { module: mod1, entryPoint: 'main' },
+        });
+        const pipe2 = device.createComputePipeline({
+          layout: device.createPipelineLayout({ bindGroupLayouts: [layout2] }),
+          compute: { module: mod2, entryPoint: 'main' },
+        });
+        const bg1 = device.createBindGroup({
+          layout: layout1,
+          entries: [
+            { binding: 0, resource: { buffer: inputBuf } },
+            { binding: 1, resource: { buffer: dwWBuf } },
+            { binding: 2, resource: { buffer: dwBBuf } },
+            { binding: 3, resource: { buffer: interBuf } },
+          ],
+        });
+        const bg2 = device.createBindGroup({
+          layout: layout2,
+          entries: [
+            { binding: 0, resource: { buffer: interBuf } },
+            { binding: 1, resource: { buffer: pwWBuf } },
+            { binding: 2, resource: { buffer: pwBBuf } },
+            { binding: 3, resource: { buffer: outBuf } },
           ],
         });
 
+        // Two chained compute passes (like the actual model)
         const enc = device.createCommandEncoder();
-        const pass = enc.beginComputePass();
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, bg);
-        pass.dispatchWorkgroups(1);
-        pass.end();
-        enc.copyBufferToBuffer(oBuf, 0, readBuf, 0, 256);
+        const p1 = enc.beginComputePass();
+        p1.setPipeline(pipe1);
+        p1.setBindGroup(0, bg1);
+        p1.dispatchWorkgroups(2); // 128 threads, 96 channels
+        p1.end();
+        const p2 = enc.beginComputePass();
+        p2.setPipeline(pipe2);
+        p2.setBindGroup(0, bg2);
+        p2.dispatchWorkgroups(2);
+        p2.end();
+        enc.copyBufferToBuffer(outBuf, 0, readBuf, 0, 96 * 4);
         device.queue.submit([enc.finish()]);
 
         await device.queue.onSubmittedWorkDone();
         await readBuf.mapAsync(GPUMapMode.READ);
         const result = new Float32Array(readBuf.getMappedRange());
-        // Each output = sum(1.0 * 1.0, 64 times) + 0.5 = 64.5
-        f16Works = Math.abs(result[0]! - 64.5) < 0.5 && Math.abs(result[63]! - 64.5) < 0.5;
+        // DW output per channel: sum(1.0 * 0.04, 25 times) + 0.5 = 1.5 → ReLU → 1.5
+        // PW output per channel: sum(1.5 * 0.0104, 96 times) + 0.25 ≈ 1.5*0.0104*96 + 0.25 ≈ 1.7472
+        // Allow some f16 precision tolerance
+        const expected = 1.5 * 0.0104 * 96 + 0.25;
+        const allNonZero = result[0]! !== 0 && result[47]! !== 0 && result[95]! !== 0;
+        const closeEnough = Math.abs(result[0]! - expected) < 1.0; // generous tolerance for f16
+        f16Works = allNonZero && closeEnough;
+        console.log(`[micro-handpose] f16 validation: result[0]=${result[0]}, expected=${expected.toFixed(2)}, allNonZero=${allNonZero}, closeEnough=${closeEnough}, f16Works=${f16Works}`);
         readBuf.unmap();
-        wBuf.destroy(); bBuf.destroy(); iBuf.destroy(); oBuf.destroy(); readBuf.destroy();
+        inputBuf.destroy(); dwWBuf.destroy(); dwBBuf.destroy(); interBuf.destroy();
+        pwWBuf.destroy(); pwBBuf.destroy(); outBuf.destroy(); readBuf.destroy();
 
         if (!f16Works) {
-          console.warn('[micro-handpose] f16 storage validation FAILED (realistic test) — falling back to f32');
+          console.warn(`[micro-handpose] f16 multi-pass validation FAILED (got ${result[0]}, expected ~${expected.toFixed(2)}) — falling back to f32`);
         }
       }
     } catch {

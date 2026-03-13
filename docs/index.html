@@ -1414,12 +1414,29 @@ handpose.<span class="fn">dispose</span>()</pre>
       const avgClass = avgDist < 0.02 ? 'good' : avgDist < 0.05 ? 'warn' : 'bad';
       const maxClass = maxDist < 0.03 ? 'good' : maxDist < 0.08 ? 'warn' : 'bad';
 
+      // Compute systematic offset (mean dx, dy)
+      let totalDx = 0, totalDy = 0;
+      for (const d of diffs) { totalDx += d.mx - d.px; totalDy += d.my - d.py; }
+      const meanDx = totalDx / 21;
+      const meanDy = totalDy / 21;
+
+      // Compute scale analysis (bounding box ratio)
+      let mMinX=1,mMaxX=0,mMinY=1,mMaxY=0,pMinX=1,pMaxX=0,pMinY=1,pMaxY=0;
+      for (const d of diffs) {
+        mMinX=Math.min(mMinX,d.mx);mMaxX=Math.max(mMaxX,d.mx);
+        mMinY=Math.min(mMinY,d.my);mMaxY=Math.max(mMaxY,d.my);
+        pMinX=Math.min(pMinX,d.px);pMaxX=Math.max(pMaxX,d.px);
+        pMinY=Math.min(pMinY,d.py);pMaxY=Math.max(pMaxY,d.py);
+      }
+      const scaleX = (mMaxX-mMinX)/(pMaxX-pMinX+0.0001);
+      const scaleY = (mMaxY-mMinY)/(pMaxY-pMinY+0.0001);
+
       summary.innerHTML = `
         Score: <span class="metric">${microResult.score.toFixed(4)}</span> &bull;
         Handedness: <span class="metric">${microResult.handedness}</span> &bull;
         Avg 2D diff: <span class="metric ${avgClass}">${(avgDist * 100).toFixed(2)}%</span> &bull;
         Max 2D diff: <span class="metric ${maxClass}">${(maxDist * 100).toFixed(2)}%</span>
-        <br><small>(differences as % of image dimensions)</small>
+        <br><small>Systematic offset: dx=${(meanDx*100).toFixed(2)}%, dy=${(meanDy*100).toFixed(2)}% | Scale X: ${scaleX.toFixed(2)}x, Y: ${scaleY.toFixed(2)}x</small>
       `;
 
       let html = `

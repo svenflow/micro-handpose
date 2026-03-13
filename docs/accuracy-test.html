@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>micro-handpose accuracy test</title>
+<style>
+body { background: #1a1a2e; color: #e0e0e0; font-family: monospace; padding: 20px; }
+canvas { border: 1px solid #333; }
+table { border-collapse: collapse; margin-top: 10px; }
+th, td { border: 1px solid #333; padding: 4px 8px; text-align: right; font-size: 12px; }
+th { background: #2a2a3e; }
+.bad { color: #f87171; }
+.warn { color: #fbbf24; }
+.good { color: #34d399; }
+#log { white-space: pre-wrap; font-size: 11px; margin-top: 10px; background: #111; padding: 10px; max-height: 400px; overflow: auto; }
+.canvases { display: flex; gap: 10px; margin: 10px 0; }
+</style>
+</head>
+<body>
+<h2>Accuracy Comparison: micro-handpose vs MediaPipe</h2>
+<p>Status: <span id="status">Loading...</span></p>
+<div class="canvases">
+  <div><div>micro-handpose (purple)</div><canvas id="c1" width="256" height="256"></canvas></div>
+  <div><div>MediaPipe (green)</div><canvas id="c2" width="256" height="256"></canvas></div>
+  <div><div>Overlay</div><canvas id="c3" width="256" height="256"></canvas></div>
+</div>
+<div id="results"></div>
+<div id="log"></div>
+
+<script type="module">
+const status = document.getElementById('status');
+const log = document.getElementById('log');
+function logMsg(msg) { log.textContent += msg + '\n'; console.log(msg); }
+
+const LANDMARK_NAMES = [
+  'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+  'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+  'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+  'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+  'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip'
+];
+
+const CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4], [0,5],[5,6],[6,7],[7,8],
+  [0,9],[9,10],[10,11],[11,12], [0,13],[13,14],[14,15],[15,16],
+  [0,17],[17,18],[18,19],[19,20], [5,9],[9,13],[13,17]
+];
+
+function drawHand(ctx, landmarks, w, h, color, lineWidth=2) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  for (const [a, b] of CONNECTIONS) {
+    ctx.beginPath();
+    ctx.moveTo(landmarks[a].x * w, landmarks[a].y * h);
+    ctx.lineTo(landmarks[b].x * w, landmarks[b].y * h);
+    ctx.stroke();
+  }
+  ctx.fillStyle = color;
+  for (const lm of landmarks) {
+    ctx.beginPath();
+    ctx.arc(lm.x * w, lm.y * h, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+async function run() {
+  // Load test image
+  status.textContent = 'Loading hand image...';
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+
+  // Try multiple sources
+  const sources = [
+    'hand_test.jpg',
+    'https://storage.googleapis.com/mediapipe-tasks/hand_landmarker/thumb_up.jpg',
+    'https://upload.wikimedia.org/wikipedia/commons/thumb/0/06/Human-Ede.jpg/220px-Human-Ede.jpg'
+  ];
+
+  let loaded = false;
+  for (const src of sources) {
+    try {
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = src;
+      });
+      logMsg(`Loaded image: ${src} (${img.naturalWidth}x${img.naturalHeight})`);
+      loaded = true;
+      break;
+    } catch { logMsg(`Failed to load: ${src}`); }
+  }
+
+  if (!loaded) { status.textContent = 'Failed to load any test image'; return; }
+
+  // Draw image to canvases
+  const canvases = ['c1', 'c2', 'c3'].map(id => {
+    const c = document.getElementById(id);
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0, 256, 256);
+    return { c, ctx };
+  });
+
+  // Create input canvas early for f16 test
+  const inputCanvas = document.createElement('canvas');
+  inputCanvas.width = 256;
+  inputCanvas.height = 256;
+  inputCanvas.getContext('2d').drawImage(img, 0, 0, 256, 256);
+
+  // Load micro-handpose
+  status.textContent = 'Loading micro-handpose...';
+  logMsg('Loading micro-handpose...');
+  const { createHandpose } = await import('../dist/index.js');
+  // Test both f16 and f32
+  logMsg('Testing f16 path first...');
+  const handposeF16 = await createHandpose({ scoreThreshold: 0.0, weightsUrl: '../weights' });
+  const f16Result = await handposeF16.detect(inputCanvas);
+  logMsg(`f16 result: score=${f16Result?.score?.toFixed(6)}, x[0]=${f16Result?.landmarks?.[0]?.x?.toFixed(6) ?? 'null'}`);
+  const f16AllZero = f16Result && f16Result.landmarks.every(l => l.x === 0 && l.y === 0 && l.z === 0);
+  logMsg(`f16 all-zero: ${f16AllZero}`);
+  handposeF16.dispose();
+
+  logMsg('Testing f32 path...');
+  const handpose = await createHandpose({ scoreThreshold: 0.0, weightsUrl: '../weights', forceF32: true });
+  logMsg('micro-handpose loaded');
+
+  // Load MediaPipe
+  status.textContent = 'Loading MediaPipe...';
+  logMsg('Loading MediaPipe...');
+  const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs');
+  const wasmFiles = await vision.FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm'
+  );
+  const mpLandmarker = await vision.HandLandmarker.createFromOptions(wasmFiles, {
+    baseOptions: {
+      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+      delegate: 'CPU',
+    },
+    runningMode: 'IMAGE',
+    numHands: 1,
+  });
+  logMsg('MediaPipe loaded');
+
+  // Run micro-handpose
+  status.textContent = 'Running micro-handpose...';
+  const microResult = await handpose.detect(inputCanvas);
+  logMsg(`micro-handpose result: score=${microResult?.score?.toFixed(4)}, handedness=${microResult?.handedness}`);
+
+  // Run MediaPipe (on same 256x256 input for fair comparison)
+  status.textContent = 'Running MediaPipe...';
+  const mpResult = mpLandmarker.detect(inputCanvas);
+  const mpLandmarks = mpResult?.landmarks?.[0] || null;
+  logMsg(`MediaPipe result: ${mpLandmarks ? mpLandmarks.length + ' landmarks' : 'no detection'}`);
+
+  // Also run MediaPipe on original (non-square) image for reference
+  const origCanvas = document.createElement('canvas');
+  origCanvas.width = img.naturalWidth;
+  origCanvas.height = img.naturalHeight;
+  origCanvas.getContext('2d').drawImage(img, 0, 0);
+  const mpOrigResult = mpLandmarker.detect(origCanvas);
+  const mpOrigLandmarks = mpOrigResult?.landmarks?.[0] || null;
+  logMsg(`MediaPipe (original aspect): ${mpOrigLandmarks ? mpOrigLandmarks.length + ' landmarks' : 'no detection'}`);
+
+  if (!microResult) { status.textContent = 'micro-handpose: no detection'; return; }
+  if (!mpLandmarks) { status.textContent = 'MediaPipe: no detection'; return; }
+
+  // Draw results
+  drawHand(canvases[0].ctx, microResult.landmarks, 256, 256, '#7c6aef');
+  drawHand(canvases[1].ctx, mpLandmarks, 256, 256, '#34d399');
+  drawHand(canvases[2].ctx, microResult.landmarks, 256, 256, '#7c6aef');
+  drawHand(canvases[2].ctx, mpLandmarks, 256, 256, '#34d399', 1);
+
+  // Detailed comparison
+  logMsg('\n=== Per-Landmark Comparison (on 256x256 square input) ===');
+  logMsg('Both models received the SAME 256x256 canvas');
+  logMsg('');
+
+  let totalDx = 0, totalDy = 0, totalDz = 0;
+  let totalDist = 0;
+  let maxDist = 0;
+  const diffs = [];
+
+  for (let i = 0; i < 21; i++) {
+    const m = microResult.landmarks[i];
+    const p = mpLandmarks[i];
+    const dx = m.x - p.x;
+    const dy = m.y - p.y;
+    const dz = m.z - p.z;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    totalDx += dx;
+    totalDy += dy;
+    totalDz += dz;
+    totalDist += dist;
+    maxDist = Math.max(maxDist, dist);
+    diffs.push({ i, dx, dy, dz, dist, m, p });
+    logMsg(`  ${LANDMARK_NAMES[i].padEnd(12)} micro(${m.x.toFixed(4)}, ${m.y.toFixed(4)}, ${m.z.toFixed(4)}) vs MP(${p.x.toFixed(4)}, ${p.y.toFixed(4)}, ${p.z.toFixed(4)})  diff=(${(dx*100).toFixed(2)}%, ${(dy*100).toFixed(2)}%)  dist=${(dist*100).toFixed(2)}%`);
+  }
+
+  const avgDx = totalDx / 21;
+  const avgDy = totalDy / 21;
+  const avgDz = totalDz / 21;
+  const avgDist = totalDist / 21;
+
+  logMsg(`\n=== Summary ===`);
+  logMsg(`Avg 2D distance: ${(avgDist*100).toFixed(2)}%`);
+  logMsg(`Max 2D distance: ${(maxDist*100).toFixed(2)}%`);
+  logMsg(`Mean X offset: ${(avgDx*100).toFixed(3)}% (systematic shift?)`);
+  logMsg(`Mean Y offset: ${(avgDy*100).toFixed(3)}% (systematic shift?)`);
+  logMsg(`Mean Z offset: ${(avgDz*100).toFixed(3)}%`);
+
+  // Check for scaling differences
+  // Compare the spread of landmarks (bounding box)
+  let microMinX = 1, microMaxX = 0, microMinY = 1, microMaxY = 0;
+  let mpMinX = 1, mpMaxX = 0, mpMinY = 1, mpMaxY = 0;
+  for (let i = 0; i < 21; i++) {
+    const m = microResult.landmarks[i];
+    const p = mpLandmarks[i];
+    microMinX = Math.min(microMinX, m.x); microMaxX = Math.max(microMaxX, m.x);
+    microMinY = Math.min(microMinY, m.y); microMaxY = Math.max(microMaxY, m.y);
+    mpMinX = Math.min(mpMinX, p.x); mpMaxX = Math.max(mpMaxX, p.x);
+    mpMinY = Math.min(mpMinY, p.y); mpMaxY = Math.max(mpMaxY, p.y);
+  }
+
+  const microSpanX = microMaxX - microMinX;
+  const microSpanY = microMaxY - microMinY;
+  const mpSpanX = mpMaxX - mpMinX;
+  const mpSpanY = mpMaxY - mpMinY;
+
+  logMsg(`\n=== Scale Analysis ===`);
+  logMsg(`micro X span: ${(microSpanX*100).toFixed(2)}%, MP X span: ${(mpSpanX*100).toFixed(2)}%, ratio: ${(microSpanX/mpSpanX).toFixed(3)}`);
+  logMsg(`micro Y span: ${(microSpanY*100).toFixed(2)}%, MP Y span: ${(mpSpanY*100).toFixed(2)}%, ratio: ${(microSpanY/mpSpanY).toFixed(3)}`);
+
+  // Center offset
+  const microCX = (microMinX + microMaxX) / 2;
+  const microCY = (microMinY + microMaxY) / 2;
+  const mpCX = (mpMinX + mpMaxX) / 2;
+  const mpCY = (mpMinY + mpMaxY) / 2;
+  logMsg(`micro center: (${(microCX*100).toFixed(2)}%, ${(microCY*100).toFixed(2)}%)`);
+  logMsg(`MP center: (${(mpCX*100).toFixed(2)}%, ${(mpCY*100).toFixed(2)}%)`);
+  logMsg(`Center offset: (${((microCX-mpCX)*100).toFixed(2)}%, ${((microCY-mpCY)*100).toFixed(2)}%)`);
+
+  // Check correlation (how well do they match after removing offset+scale?)
+  // Compute best-fit linear transform: micro = a*mp + b
+  let sumMPx = 0, sumMPy = 0, sumMicroX = 0, sumMicroY = 0;
+  let sumMPxMicroX = 0, sumMPyMicroY = 0, sumMPx2 = 0, sumMPy2 = 0;
+  for (let i = 0; i < 21; i++) {
+    sumMPx += mpLandmarks[i].x; sumMPy += mpLandmarks[i].y;
+    sumMicroX += microResult.landmarks[i].x; sumMicroY += microResult.landmarks[i].y;
+    sumMPxMicroX += mpLandmarks[i].x * microResult.landmarks[i].x;
+    sumMPyMicroY += mpLandmarks[i].y * microResult.landmarks[i].y;
+    sumMPx2 += mpLandmarks[i].x ** 2;
+    sumMPy2 += mpLandmarks[i].y ** 2;
+  }
+  const n = 21;
+  const scaleX = (n * sumMPxMicroX - sumMPx * sumMicroX) / (n * sumMPx2 - sumMPx ** 2);
+  const offsetX = (sumMicroX - scaleX * sumMPx) / n;
+  const scaleY = (n * sumMPyMicroY - sumMPy * sumMicroY) / (n * sumMPy2 - sumMPy ** 2);
+  const offsetY = (sumMicroY - scaleY * sumMPy) / n;
+
+  logMsg(`\n=== Linear Regression: micro = scale * mp + offset ===`);
+  logMsg(`X: scale=${scaleX.toFixed(4)}, offset=${offsetX.toFixed(4)}`);
+  logMsg(`Y: scale=${scaleY.toFixed(4)}, offset=${offsetY.toFixed(4)}`);
+
+  // Compute residual error after linear transform
+  let residualDist = 0;
+  for (let i = 0; i < 21; i++) {
+    const predX = scaleX * mpLandmarks[i].x + offsetX;
+    const predY = scaleY * mpLandmarks[i].y + offsetY;
+    const rdx = microResult.landmarks[i].x - predX;
+    const rdy = microResult.landmarks[i].y - predY;
+    residualDist += Math.sqrt(rdx*rdx + rdy*rdy);
+  }
+  logMsg(`Avg residual after linear transform: ${(residualDist/21*100).toFixed(2)}%`);
+  logMsg(`(If this is much smaller than avg distance ${(avgDist*100).toFixed(2)}%, then it's mainly a scale/offset issue)`);
+
+  // Also try: what if we rescale the landmarks by a different factor?
+  logMsg(`\n=== Trying different output scale factors ===`);
+  for (const scale of [224, 240, 255, 256, 257, 288]) {
+    // Recompute landmarks with different scale
+    // Current: landmarks = raw / 256. If correct scale is 'scale', then:
+    // correct = raw / scale = (landmarks * 256) / scale
+    const factor = 256.0 / scale;
+    let testDist = 0;
+    for (let i = 0; i < 21; i++) {
+      const tx = microResult.landmarks[i].x * factor;
+      const ty = microResult.landmarks[i].y * factor;
+      const dx = tx - mpLandmarks[i].x;
+      const dy = ty - mpLandmarks[i].y;
+      testDist += Math.sqrt(dx*dx + dy*dy);
+    }
+    logMsg(`  scale=${scale}: avg dist=${(testDist/21*100).toFixed(2)}%`);
+  }
+
+  // Dump raw model output for debugging
+  logMsg(`\n=== Raw micro-handpose output (before /256) ===`);
+  for (let i = 0; i < 21; i++) {
+    const m = microResult.landmarks[i];
+    logMsg(`  ${LANDMARK_NAMES[i].padEnd(12)} raw=(${(m.x*256).toFixed(1)}, ${(m.y*256).toFixed(1)}, ${(m.z*256).toFixed(1)})`);
+  }
+
+  status.textContent = 'Done! Check results below.';
+
+  // Build results table
+  let html = '<h3>Per-Landmark Comparison</h3><table>';
+  html += '<tr><th>#</th><th>Name</th><th>micro x</th><th>micro y</th><th>MP x</th><th>MP y</th><th>dx%</th><th>dy%</th><th>dist%</th></tr>';
+  for (const d of diffs) {
+    const cls = d.dist < 0.02 ? 'good' : d.dist < 0.05 ? 'warn' : 'bad';
+    html += `<tr>
+      <td>${d.i}</td><td>${LANDMARK_NAMES[d.i]}</td>
+      <td>${d.m.x.toFixed(4)}</td><td>${d.m.y.toFixed(4)}</td>
+      <td>${d.p.x.toFixed(4)}</td><td>${d.p.y.toFixed(4)}</td>
+      <td class="${Math.abs(d.dx) > 0.03 ? 'bad' : ''}">${(d.dx*100).toFixed(2)}</td>
+      <td class="${Math.abs(d.dy) > 0.03 ? 'bad' : ''}">${(d.dy*100).toFixed(2)}</td>
+      <td class="${cls}">${(d.dist*100).toFixed(2)}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  document.getElementById('results').innerHTML = html;
+}
+
+run().catch(e => {
+  status.textContent = 'Error: ' + e.message;
+  console.error(e);
+  logMsg('ERROR: ' + e.stack);
+});
+</script>
+</body>
+</html>
