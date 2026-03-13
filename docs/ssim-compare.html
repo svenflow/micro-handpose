@@ -178,7 +178,7 @@
 
         // Run micro-handpose
         statusEl.textContent = 'Loading micro-handpose...';
-        const { createHandpose } = await import('./dist/index.js?v=ssim');
+        const { createHandpose } = await import('./dist/index.js?v=full_model');
         const handpose = await createHandpose({
           weightsUrl: 'weights',
           scoreThreshold: 0.1,
@@ -199,7 +199,23 @@
           'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
         );
 
-        const mpHandLandmarker = await HandLandmarker.createFromOptions(wasmFileset, {
+        // Run MediaPipe GPU first (the one Nikhil wants to compare against)
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+        });
+        addLog('MediaPipe GPU loaded');
+
+        statusEl.textContent = 'Running MediaPipe GPU...';
+        const mpGpuResults = mpGpu.detect(img);
+        addLog(`MediaPipe GPU: ${mpGpuResults.landmarks?.length || 0} hand(s) detected`);
+
+        // Also run MediaPipe CPU for comparison
+        const mpCpu = await HandLandmarker.createFromOptions(wasmFileset, {
           baseOptions: {
             modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
             delegate: 'CPU',
@@ -207,11 +223,27 @@
           runningMode: 'IMAGE',
           numHands: 2,
         });
-        addLog('MediaPipe loaded');
+        addLog('MediaPipe CPU loaded');
 
-        statusEl.textContent = 'Running MediaPipe...';
-        const mpResults = mpHandLandmarker.detect(img);
-        addLog(`MediaPipe: ${mpResults.landmarks?.length || 0} hand(s) detected`);
+        statusEl.textContent = 'Running MediaPipe CPU...';
+        const mpCpuResults = mpCpu.detect(img);
+        addLog(`MediaPipe CPU: ${mpCpuResults.landmarks?.length || 0} hand(s) detected`);
+
+        // Use GPU results as primary comparison target
+        const mpResults = mpGpuResults;
+        addLog(`\n=== Using MediaPipe GPU as reference ===`);
+
+        // Compare MediaPipe GPU vs CPU to see if THEY differ
+        if (mpGpuResults.landmarks?.length > 0 && mpCpuResults.landmarks?.length > 0) {
+          addLog(`\n=== MediaPipe GPU vs CPU internal consistency ===`);
+          let gpuCpuDist = 0;
+          for (let i = 0; i < 21; i++) {
+            const g = mpGpuResults.landmarks[0][i];
+            const c = mpCpuResults.landmarks[0][i];
+            gpuCpuDist += Math.sqrt((g.x - c.x) ** 2 + (g.y - c.y) ** 2);
+          }
+          addLog(`  MP GPU vs CPU avg dist: ${(gpuCpuDist / 21).toFixed(6)} (${((gpuCpuDist / 21) * 100).toFixed(4)}%)`);
+        }
 
         const W = 500, H = 500;
 
