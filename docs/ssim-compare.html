@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>SSIM: micro-handpose vs MediaPipe overlay</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; }
+    .row { display: flex; gap: 20px; flex-wrap: wrap; align-items: start; }
+    .box { background: #222; padding: 15px; border-radius: 8px; margin: 10px 0; }
+    canvas { border: 1px solid #444; }
+    #log { white-space: pre-wrap; font-size: 12px; max-height: 600px; overflow-y: auto; background: #111; padding: 10px; border-radius: 5px; }
+    .status { font-size: 16px; padding: 8px 12px; border-radius: 5px; margin: 8px 0; }
+    .status.ok { background: #143; color: #3f8; }
+    .status.err { background: #421; color: #f84; }
+    .status.working { background: #331; color: #fe8; }
+    h2 { color: #8af; margin-top: 0; }
+    .ssim-score { font-size: 48px; font-weight: bold; text-align: center; padding: 20px; }
+    .ssim-score.good { color: #3f8; }
+    .ssim-score.mid { color: #fe8; }
+    .ssim-score.bad { color: #f84; }
+  </style>
+</head>
+<body>
+  <h1>SSIM: micro-handpose vs MediaPipe Hand Overlay</h1>
+  <p>Renders hand skeleton overlay from both on the same image, computes SSIM between the two.</p>
+
+  <div class="box">
+    <div id="status" class="status working">Loading...</div>
+    <div id="ssim-display" class="ssim-score" style="display:none"></div>
+  </div>
+
+  <div class="box">
+    <div class="row">
+      <div>
+        <h3>micro-handpose overlay</h3>
+        <canvas id="micro-canvas" width="500" height="500"></canvas>
+      </div>
+      <div>
+        <h3>MediaPipe overlay</h3>
+        <canvas id="mp-canvas" width="500" height="500"></canvas>
+      </div>
+      <div>
+        <h3>Difference (amplified 5x)</h3>
+        <canvas id="diff-canvas" width="500" height="500"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="box">
+    <h2>Per-landmark distance + SSIM details</h2>
+    <div id="log"></div>
+  </div>
+
+  <script type="module">
+    const log = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+    const ssimDisplay = document.getElementById('ssim-display');
+
+    function addLog(msg) {
+      log.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],
+      [0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],
+      [5,9],[9,13],[13,17],
+    ];
+
+    const NAMES = [
+      'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+      'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+      'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+      'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+      'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+    ];
+
+    function drawHand(ctx, landmarks, w, h, color, lineWidth = 3, dotSize = 5) {
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = lineWidth;
+      ctx.globalAlpha = 1.0;
+
+      for (const [a, b] of CONNECTIONS) {
+        const la = landmarks[a];
+        const lb = landmarks[b];
+        if (!la || !lb) continue;
+        ctx.beginPath();
+        ctx.moveTo(la.x * w, la.y * h);
+        ctx.lineTo(lb.x * w, lb.y * h);
+        ctx.stroke();
+      }
+
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i];
+        if (!lm) continue;
+        ctx.beginPath();
+        ctx.arc(lm.x * w, lm.y * h, i === 0 ? dotSize + 2 : dotSize, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    /**
+     * Compute SSIM between two ImageData objects.
+     * Uses the standard SSIM formula with 8x8 windows.
+     */
+    function computeSSIM(imgData1, imgData2) {
+      const w = imgData1.width;
+      const h = imgData1.height;
+      const d1 = imgData1.data;
+      const d2 = imgData2.data;
+
+      // Convert to grayscale arrays
+      const g1 = new Float32Array(w * h);
+      const g2 = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        g1[i] = (0.299 * d1[i*4] + 0.587 * d1[i*4+1] + 0.114 * d1[i*4+2]) / 255;
+        g2[i] = (0.299 * d2[i*4] + 0.587 * d2[i*4+1] + 0.114 * d2[i*4+2]) / 255;
+      }
+
+      const L = 1.0; // dynamic range
+      const k1 = 0.01, k2 = 0.03;
+      const c1 = (k1 * L) ** 2;
+      const c2 = (k2 * L) ** 2;
+
+      const windowSize = 8;
+      let ssimSum = 0;
+      let count = 0;
+
+      for (let y = 0; y <= h - windowSize; y += 4) {
+        for (let x = 0; x <= w - windowSize; x += 4) {
+          let sum1 = 0, sum2 = 0, sum11 = 0, sum22 = 0, sum12 = 0;
+          const n = windowSize * windowSize;
+
+          for (let dy = 0; dy < windowSize; dy++) {
+            for (let dx = 0; dx < windowSize; dx++) {
+              const idx = (y + dy) * w + (x + dx);
+              const v1 = g1[idx];
+              const v2 = g2[idx];
+              sum1 += v1;
+              sum2 += v2;
+              sum11 += v1 * v1;
+              sum22 += v2 * v2;
+              sum12 += v1 * v2;
+            }
+          }
+
+          const mu1 = sum1 / n;
+          const mu2 = sum2 / n;
+          const sigma1sq = sum11 / n - mu1 * mu1;
+          const sigma2sq = sum22 / n - mu2 * mu2;
+          const sigma12 = sum12 / n - mu1 * mu2;
+
+          const ssim = ((2 * mu1 * mu2 + c1) * (2 * sigma12 + c2)) /
+                       ((mu1 * mu1 + mu2 * mu2 + c1) * (sigma1sq + sigma2sq + c2));
+          ssimSum += ssim;
+          count++;
+        }
+      }
+
+      return ssimSum / count;
+    }
+
+    async function run() {
+      try {
+        // Load test image
+        statusEl.textContent = 'Loading test image...';
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = new URLSearchParams(location.search).get('img') || 'hand_nikhil.jpg';
+        });
+        addLog(`Image loaded: ${img.width}x${img.height}`);
+
+        // Run micro-handpose
+        statusEl.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=ssim');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.1,
+        });
+        addLog('micro-handpose loaded');
+
+        statusEl.textContent = 'Running micro-handpose...';
+        const microResults = await handpose.detect(img);
+        addLog(`micro-handpose: ${microResults.length} hand(s) detected`);
+
+        // Run MediaPipe
+        statusEl.textContent = 'Loading MediaPipe...';
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+
+        const mpHandLandmarker = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'CPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+        });
+        addLog('MediaPipe loaded');
+
+        statusEl.textContent = 'Running MediaPipe...';
+        const mpResults = mpHandLandmarker.detect(img);
+        addLog(`MediaPipe: ${mpResults.landmarks?.length || 0} hand(s) detected`);
+
+        const W = 500, H = 500;
+
+        // Draw micro overlay
+        const microCtx = document.getElementById('micro-canvas').getContext('2d');
+        microCtx.drawImage(img, 0, 0, W, H);
+        if (microResults.length > 0) {
+          drawHand(microCtx, microResults[0].landmarks, W, H, '#ffffff');
+        }
+
+        // Draw MediaPipe overlay
+        const mpCtx = document.getElementById('mp-canvas').getContext('2d');
+        mpCtx.drawImage(img, 0, 0, W, H);
+        if (mpResults.landmarks?.length > 0) {
+          drawHand(mpCtx, mpResults.landmarks[0], W, H, '#ffffff');
+        }
+
+        // Compute SSIM between the two overlay canvases
+        const microImgData = microCtx.getImageData(0, 0, W, H);
+        const mpImgData = mpCtx.getImageData(0, 0, W, H);
+        const ssim = computeSSIM(microImgData, mpImgData);
+
+        addLog(`\n=== SSIM ===`);
+        addLog(`SSIM between overlay canvases: ${ssim.toFixed(6)}`);
+
+        // Show SSIM score
+        ssimDisplay.style.display = 'block';
+        ssimDisplay.textContent = `SSIM: ${ssim.toFixed(4)}`;
+        if (ssim >= 0.95) {
+          ssimDisplay.className = 'ssim-score good';
+        } else if (ssim >= 0.85) {
+          ssimDisplay.className = 'ssim-score mid';
+        } else {
+          ssimDisplay.className = 'ssim-score bad';
+        }
+
+        // Draw difference image (amplified)
+        const diffCtx = document.getElementById('diff-canvas').getContext('2d');
+        const diffImgData = diffCtx.createImageData(W, H);
+        const amp = 5;
+        for (let i = 0; i < W * H; i++) {
+          const dr = Math.abs(microImgData.data[i*4] - mpImgData.data[i*4]) * amp;
+          const dg = Math.abs(microImgData.data[i*4+1] - mpImgData.data[i*4+1]) * amp;
+          const db = Math.abs(microImgData.data[i*4+2] - mpImgData.data[i*4+2]) * amp;
+          diffImgData.data[i*4] = Math.min(255, dr);
+          diffImgData.data[i*4+1] = Math.min(255, dg);
+          diffImgData.data[i*4+2] = Math.min(255, db);
+          diffImgData.data[i*4+3] = 255;
+        }
+        diffCtx.putImageData(diffImgData, 0, 0);
+
+        // Per-landmark comparison
+        if (microResults.length > 0 && mpResults.landmarks?.length > 0) {
+          const microLm = microResults[0].landmarks;
+          const mpLm = mpResults.landmarks[0];
+
+          addLog(`\n=== PER-LANDMARK DISTANCE ===`);
+          addLog(`${'#'.padEnd(3)} ${'Name'.padEnd(12)} ${'dist'.padEnd(9)} micro_xy        mp_xy`);
+
+          let totalDist = 0;
+          let maxDist = 0;
+          let maxIdx = 0;
+
+          for (let i = 0; i < 21; i++) {
+            const m = microLm[i];
+            const p = mpLm[i];
+            const dist = Math.sqrt((m.x - p.x) ** 2 + (m.y - p.y) ** 2);
+            totalDist += dist;
+            if (dist > maxDist) { maxDist = dist; maxIdx = i; }
+            addLog(`${String(i).padEnd(3)} ${NAMES[i].padEnd(12)} ${dist.toFixed(4).padEnd(9)} (${m.x.toFixed(3)},${m.y.toFixed(3)})  (${p.x.toFixed(3)},${p.y.toFixed(3)})`);
+          }
+
+          const avgDist = totalDist / 21;
+          addLog(`\nAvg distance: ${avgDist.toFixed(4)} (${(avgDist * 100).toFixed(2)}%)`);
+          addLog(`Max distance: ${maxDist.toFixed(4)} at ${NAMES[maxIdx]}`);
+
+          // Compute per-landmark pixel distance for intuition
+          addLog(`\nPixel distances (on 500px canvas):`);
+          addLog(`  Average: ${(avgDist * 500).toFixed(1)}px`);
+          addLog(`  Max: ${(maxDist * 500).toFixed(1)}px at ${NAMES[maxIdx]}`);
+        }
+
+        statusEl.textContent = `✅ Done — SSIM: ${ssim.toFixed(4)}`;
+        statusEl.className = 'status ok';
+
+      } catch (e) {
+        addLog(`ERROR: ${e.message}\n${e.stack}`);
+        statusEl.textContent = `❌ ${e.message}`;
+        statusEl.className = 'status err';
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
