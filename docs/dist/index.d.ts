@@ -140,6 +140,16 @@ interface Tensor {
     shape: number[];
     rawF16?: ArrayBufferLike;
 }
+interface WeightsMetadata {
+    keys: string[];
+    shapes: number[][];
+    offsets: number[];
+    dtype?: 'float32' | 'float16';
+}
+/**
+ * Load weights from JSON metadata + binary buffer
+ */
+declare function loadWeightsFromBuffer(metadata: WeightsMetadata, buffer: ArrayBuffer): Map<string, Tensor>;
 
 /**
  * Palm Detection WebGPU Model
@@ -254,4 +264,4 @@ interface CropPipeline {
  */
 declare function createCropPipeline(device: GPUDevice): CropPipeline;
 
-export { type CompiledPalmModel, type CropPipeline, type FullHandpose, type FullHandposeResult, type HandROI, type Handpose, type HandposeOptions, type HandposeResult, type Landmark, type PalmDetection, type PalmDetectionOutput, type PalmDetector, type PalmDetectorOptions, compilePalmModel, computeCropTransform, createCropPipeline, createFullHandpose, createHandpose, createPalmDetector, projectLandmarksToOriginal };
+export { type CompiledPalmModel, type CropPipeline, type FullHandpose, type FullHandposeResult, type HandROI, type Handpose, type HandposeOptions, type HandposeResult, type Landmark, type PalmDetection, type PalmDetectionOutput, type PalmDetector, type PalmDetectorOptions, compilePalmModel, computeCropTransform, createCropPipeline, createFullHandpose, createHandpose, createPalmDetector, loadWeightsFromBuffer, projectLandmarksToOriginal };

@@ -19,6 +19,7 @@
  */
 
 export { createHandpose, createFullHandpose } from './handpose.js';
+export { loadWeightsFromBuffer } from './model.js';
 export { compilePalmModel } from './palm_model.js';
 export { createPalmDetector, computeCropTransform, projectLandmarksToOriginal } from './palm_detection.js';
 export { createCropPipeline } from './crop_shader.js';
