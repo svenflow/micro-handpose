@@ -471,12 +471,69 @@
 
     /* --- RESPONSIVE --- */
     @media (max-width: 600px) {
-      .hero { padding: 120px 0 60px; }
+      .hero { padding: 100px 0 48px; }
+      .hero h1 { font-size: 36px; }
+      .hero .tagline { font-size: 15px; margin-bottom: 28px; }
       .install-box { font-size: 12px; padding: 10px 12px; }
-      .features-grid { grid-template-columns: repeat(2, 1fr); }
+
+      /* Nav: hide text links, keep logo */
+      nav .links { gap: 12px; }
+      nav .links a { font-size: 12px; }
+
+      /* Model toggle: wrap buttons */
+      .model-toggle {
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      .toggle-group {
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      .toggle-btn { padding: 7px 12px; font-size: 11px; }
+      .compare-btn { margin-left: 0; font-size: 11px; padding: 6px 12px; }
+
+      /* Demo stats: 2x2 grid */
       .demo-stats { flex-wrap: wrap; }
-      .demo-stat { min-width: 50%; }
-      .toggle-btn { padding: 7px 14px; font-size: 12px; }
+      .demo-stat { min-width: 50%; box-sizing: border-box; }
+      .demo-stat .value { font-size: 15px; }
+      .demo-stat .label { font-size: 10px; }
+
+      /* Features: 2 col */
+      .features-grid { grid-template-columns: repeat(2, 1fr); }
+      .feature { padding: 20px 16px; }
+      .feature .stat { font-size: 24px; }
+      .feature .desc { font-size: 12px; }
+
+      /* Code block: smaller text */
+      .code-block pre { padding: 16px; font-size: 11px; }
+
+      /* Compare table */
+      .compare-header h3 { font-size: 11px; }
+      .compare-table { font-size: 11px; }
+      .compare-table th, .compare-table td { padding: 6px 8px; }
+
+      /* Size comparison table */
+      .features-section table { font-size: 11px !important; }
+      .features-section table th,
+      .features-section table td { padding: 8px 10px !important; }
+
+      /* Sections: tighter spacing */
+      .demo-section, .features-section, .code-section { padding: 24px 0 48px; }
+
+      /* Footer */
+      .footer-links { gap: 16px; }
+      .footer-links a { font-size: 13px; }
+    }
+
+    /* Extra small (iPhone SE etc) */
+    @media (max-width: 380px) {
+      .container { padding: 0 16px; }
+      nav .links a:nth-child(3),
+      nav .links a:nth-child(4) { display: none; }
+      .hero h1 { font-size: 30px; }
+      .toggle-group { gap: 1px; }
+      .toggle-btn { padding: 6px 8px; font-size: 10px; }
     }
   </style>
 </head>
