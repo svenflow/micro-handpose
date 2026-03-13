@@ -54,18 +54,62 @@ try {
   ctx.fillStyle = '#888';
   ctx.fillRect(0, 0, 256, 256);
   const result = await hp.detect(canvas);
-  L('   result: ' + JSON.stringify(result));
+  L('   result: ' + (result ? 'hand detected (score=' + result.score.toFixed(3) + ')' : 'null (no hand — expected for gray canvas)'));
 
-  L('8. Benchmarking (5 runs)...');
-  const times = [];
+  // Quick sanity check: 5 runs
+  L('8. Quick benchmark (5 runs)...');
+  const qtimes = [];
   for (let i = 0; i < 5; i++) {
     const t0 = performance.now();
     await hp.detect(canvas);
-    times.push((performance.now() - t0).toFixed(1));
+    qtimes.push((performance.now() - t0).toFixed(1));
   }
-  L('   times: ' + times.join(', ') + ' ms');
+  L('   times: ' + qtimes.join(', ') + ' ms');
+
+  // Detailed benchmark with more iterations to overcome Safari 1ms timer precision
+  L('9. Detailed benchmark (100 runs, batched timing)...');
+
+  // Warmup
+  for (let i = 0; i < 10; i++) await hp.detect(canvas);
+
+  // Measure total time for batches of 10 to get sub-ms precision
+  const batchSizes = [1, 10, 50];
+  for (const batchSize of batchSizes) {
+    const batchTimes = [];
+    const numBatches = Math.ceil(100 / batchSize);
+    for (let b = 0; b < numBatches; b++) {
+      const t0 = performance.now();
+      for (let i = 0; i < batchSize; i++) {
+        await hp.detect(canvas);
+      }
+      batchTimes.push(performance.now() - t0);
+    }
+    const totalMs = batchTimes.reduce((a, b) => a + b, 0);
+    const totalRuns = numBatches * batchSize;
+    const avgMs = totalMs / totalRuns;
+    batchTimes.sort((a, b) => a - b);
+    const medianBatch = batchTimes[Math.floor(batchTimes.length / 2)];
+    L('   batch=' + batchSize + ': avg=' + avgMs.toFixed(2) + 'ms/run, median_batch=' + (medianBatch / batchSize).toFixed(2) + 'ms/run, total=' + totalMs.toFixed(0) + 'ms/' + totalRuns + 'runs');
+  }
+
+  // 10. Diagnostic benchmark (if available)
+  L('10. Diagnostic benchmark (GPU vs readback breakdown)...');
+  try {
+    const diag = await hp.benchmarkDiagnostic(canvas);
+    L('    GPU only:       median=' + diag.gpuOnly.median.toFixed(2) + 'ms, min=' + diag.gpuOnly.min.toFixed(2) + 'ms');
+    L('    mapAsync:       median=' + diag.mapAsyncOnly.median.toFixed(2) + 'ms, min=' + diag.mapAsyncOnly.min.toFixed(2) + 'ms');
+    L('    mapAsync(noWait): median=' + diag.mapAsyncNoWait.median.toFixed(2) + 'ms, min=' + diag.mapAsyncNoWait.min.toFixed(2) + 'ms');
+    L('    Total (e2e):    median=' + diag.total.median.toFixed(2) + 'ms, min=' + diag.total.min.toFixed(2) + 'ms');
+    L('    Pipelined:      median=' + diag.pipelined.median.toFixed(2) + 'ms, min=' + diag.pipelined.min.toFixed(2) + 'ms');
+    if (diag.renderReadback) {
+      L('    Render readback: median=' + diag.renderReadback.median.toFixed(2) + 'ms, min=' + diag.renderReadback.min.toFixed(2) + 'ms');
+    }
+  } catch (e) {
+    L('    benchmarkDiagnostic error: ' + e.message);
+  }
 
   L('\n=== ALL OK ===');
+  L('Timer precision: ' + performance.now().toString().split('.')[1]?.length + ' decimal places');
 } catch (e) {
   L('\nFATAL: ' + e.message);
   L('Stack: ' + (e.stack || 'no stack'));
