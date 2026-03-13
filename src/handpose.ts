@@ -462,8 +462,19 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
         });
       }
 
-      // Project landmarks back to original image coordinates
-      const originalLandmarks = projectLandmarksToOriginal(cropLandmarks, roi);
+      // Project landmarks back to original image coordinates.
+      // The crop is square in pixel space (using refDim = min(srcW, srcH)),
+      // but the ROI coords are in squashed [0,1] space from palm detection.
+      // For non-square sources, we need to adjust the ROI extents to reflect
+      // the actual normalized span of the square pixel crop.
+      const refDim = Math.min(srcWidth, srcHeight);
+      const cropPixelSize = roi.width * refDim; // square crop side in pixels
+      const projROI = {
+        ...roi,
+        width: cropPixelSize / srcWidth,   // actual X span in normalized coords
+        height: cropPixelSize / srcHeight,  // actual Y span in normalized coords
+      };
+      const originalLandmarks = projectLandmarksToOriginal(cropLandmarks, projROI);
 
       // Get the palm detection score from detectRaw for this ROI
       // (For simplicity, we use the landmark model's confidence score)
