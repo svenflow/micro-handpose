@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>workgroup size test</title>
+<style>body{background:#111;color:#eee;font-family:monospace;padding:16px;font-size:13px;white-space:pre-wrap;}</style>
+</head><body>
+<div id="log">Testing workgroup sizes...\n</div>
+<script type="module">
+const log = document.getElementById('log');
+function L(msg) { log.textContent += msg + '\n'; window.scrollTo(0, document.body.scrollHeight); }
+
+const adapter = await navigator.gpu.requestAdapter();
+const device = await adapter.requestDevice();
+L('maxComputeWorkgroupSizeX: ' + adapter.limits.maxComputeWorkgroupSizeX);
+L('maxComputeInvocationsPerWorkgroup: ' + adapter.limits.maxComputeInvocationsPerWorkgroup);
+L('');
+
+const sizes = [1, 4, 16, 32, 64, 128, 192, 224, 256, 288, 320, 384, 512, 1024];
+for (const wgSize of sizes) {
+  try {
+    const shader = device.createShaderModule({ code: `
+      @group(0) @binding(0) var<storage, read_write> out: array<f32>;
+      @compute @workgroup_size(${wgSize})
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
+        out[lid.x] = f32(lid.x + 1u);
+      }
+    `});
+    const info = await shader.getCompilationInfo();
+    if (info.messages.some(m => m.type === 'error')) {
+      L('wg=' + wgSize + ': ❌ compile error');
+      continue;
+    }
+    const buf = device.createBuffer({ size: wgSize * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const rbuf = device.createBuffer({ size: wgSize * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const layout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }] });
+    const pipe = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module: shader, entryPoint: 'main' } });
+    const bg = device.createBindGroup({ layout, entries: [{ binding: 0, resource: { buffer: buf } }] });
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipe);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    enc.copyBufferToBuffer(buf, 0, rbuf, 0, wgSize * 4);
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    await rbuf.mapAsync(GPUMapMode.READ);
+    const data = new Float32Array(rbuf.getMappedRange());
+    // Check first, middle and last
+    const first = data[0], mid = data[Math.floor(wgSize/2)], last = data[wgSize-1];
+    const ok = first === 1.0 && last === wgSize;
+    L('wg=' + wgSize + ': ' + (ok ? '✅' : '❌') + ' first=' + first + ' mid=' + mid + ' last=' + last + ' (expected ' + 1 + ', ' + (Math.floor(wgSize/2)+1) + ', ' + wgSize + ')');
+    rbuf.unmap();
+    buf.destroy(); rbuf.destroy();
+  } catch (e) {
+    L('wg=' + wgSize + ': ❌ error: ' + e.message);
+  }
+}
+
+// Also test with shared memory (workgroup var) like our fused shader
+L('');
+L('=== With shared memory (var<workgroup>) ===');
+for (const wgSize of [64, 128, 256, 288]) {
+  try {
+    const shader = device.createShaderModule({ code: `
+      var<workgroup> shared: array<f32, ${wgSize}>;
+      @group(0) @binding(0) var<storage, read_write> out: array<f32>;
+      @compute @workgroup_size(${wgSize})
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
+        shared[lid.x] = f32(lid.x + 1u);
+        workgroupBarrier();
+        out[lid.x] = shared[lid.x] * 2.0;
+      }
+    `});
+    const info = await shader.getCompilationInfo();
+    if (info.messages.some(m => m.type === 'error')) {
+      L('wg=' + wgSize + ' shared: ❌ compile error');
+      continue;
+    }
+    const buf = device.createBuffer({ size: wgSize * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const rbuf = device.createBuffer({ size: wgSize * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const layout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }] });
+    const pipe = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module: shader, entryPoint: 'main' } });
+    const bg = device.createBindGroup({ layout, entries: [{ binding: 0, resource: { buffer: buf } }] });
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipe);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    enc.copyBufferToBuffer(buf, 0, rbuf, 0, wgSize * 4);
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    await rbuf.mapAsync(GPUMapMode.READ);
+    const data = new Float32Array(rbuf.getMappedRange());
+    const first = data[0], last = data[wgSize-1];
+    const ok = first === 2.0 && last === wgSize * 2;
+    L('wg=' + wgSize + ' shared: ' + (ok ? '✅' : '❌') + ' first=' + first + ' last=' + last + ' (expected ' + 2 + ', ' + (wgSize*2) + ')');
+    rbuf.unmap();
+    buf.destroy(); rbuf.destroy();
+  } catch (e) {
+    L('wg=' + wgSize + ' shared: ❌ error: ' + e.message);
+  }
+}
+
+L('\nDone!');
+L('UA: ' + navigator.userAgent);
+</script></body></html>
