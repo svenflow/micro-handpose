@@ -4,6 +4,9 @@ import { compilePalmModel } from './palm_model.js';
 import { createPalmDetector, computeCropTransform, projectLandmarksToOriginal } from './palm_detection.js';
 import type { HandROI } from './palm_detection.js';
 import type { Handpose, HandposeInput, HandposeOptions, HandposeResult, FullHandpose, FullHandposeResult, Landmark } from './types.js';
+import { toKeypoints } from './types.js';
+import { createLandmarkSmoother } from './filter.js';
+import type { LandmarkSmoother } from './filter.js';
 
 // Default: jsdelivr CDN (auto-mirrors npm packages)
 const DEFAULT_WEIGHTS_BASE = 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@latest/weights';
@@ -143,6 +146,7 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       score,
       handedness: isRight ? 'right' : 'left',
       landmarks: points,
+      keypoints: toKeypoints(points),
     };
   }
 
@@ -210,7 +214,7 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
     palmWeightsUrl,
     scoreThreshold = 0.5,
     palmScoreThreshold = 0.5,
-    maxHands = 2,
+    maxHands = 3,
     forceF32 = false,
   } = options;
 
@@ -276,6 +280,13 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
     scoreThreshold: palmScoreThreshold,
     maxHands,
   });
+
+  // Per-hand smoothers (indexed by detection order, reset when hands are lost)
+  const smoothers: LandmarkSmoother[] = [];
+  for (let i = 0; i < maxHands; i++) {
+    smoothers.push(createLandmarkSmoother());
+  }
+  let prevHandCount = 0;
 
   // Scratch canvases for input conversion and cropping
   let palmScratchCanvas: OffscreenCanvas | null = null;
@@ -476,15 +487,28 @@ export async function createFullHandpose(options: HandposeOptions = {}): Promise
       };
       const originalLandmarks = projectLandmarksToOriginal(cropLandmarks, projROI);
 
-      // Get the palm detection score from detectRaw for this ROI
-      // (For simplicity, we use the landmark model's confidence score)
+      // Apply one euro filter for temporal smoothing (reduces jitter)
+      const handIdx = results.length;
+      const smoothedLandmarks = handIdx < smoothers.length
+        ? smoothers[handIdx]!.apply(originalLandmarks)
+        : originalLandmarks;
+
       results.push({
         score: handScore,
         handedness: isRight ? 'right' : 'left',
-        landmarks: originalLandmarks,
-        palmScore: 0, // TODO: pass through from palm detection
+        landmarks: smoothedLandmarks,
+        keypoints: toKeypoints(smoothedLandmarks),
+        palmScore: 0,
       });
     }
+
+    // Reset smoothers for hands that disappeared
+    if (results.length < prevHandCount) {
+      for (let i = results.length; i < prevHandCount; i++) {
+        if (i < smoothers.length) smoothers[i]!.reset();
+      }
+    }
+    prevHandCount = results.length;
 
     return results;
   }

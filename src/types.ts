@@ -15,6 +15,20 @@ export const LANDMARK_NAMES = [
   'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
 ] as const;
 
+/** Named landmark type — each key is a landmark name */
+export type Keypoints = {
+  [K in (typeof LANDMARK_NAMES)[number]]: Landmark;
+};
+
+/** Build a Keypoints object from an array of 21 landmarks */
+export function toKeypoints(landmarks: Landmark[]): Keypoints {
+  const kp = {} as Record<string, Landmark>;
+  for (let i = 0; i < LANDMARK_NAMES.length; i++) {
+    kp[LANDMARK_NAMES[i]] = landmarks[i]!;
+  }
+  return kp as Keypoints;
+}
+
 /** Detection result for a single hand */
 export interface HandposeResult {
   /** Confidence score (0-1) that a hand is present */
@@ -23,6 +37,8 @@ export interface HandposeResult {
   handedness: 'left' | 'right';
   /** 21 hand landmarks in order (wrist, thumb_cmc, ..., pinky_tip) */
   landmarks: Landmark[];
+  /** Named landmarks for ergonomic access: result.keypoints.thumb_tip */
+  keypoints: Keypoints;
 }
 
 /** Options for creating a handpose detector */
@@ -77,6 +93,8 @@ export interface FullHandposeResult {
   handedness: 'left' | 'right';
   /** 21 hand landmarks in original image coordinates [0,1] */
   landmarks: Landmark[];
+  /** Named landmarks for ergonomic access: result.keypoints.index_tip */
+  keypoints: Keypoints;
   /** Palm detection score */
   palmScore: number;
 }
