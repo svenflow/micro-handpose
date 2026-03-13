@@ -1,306 +1,121 @@
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>micro-handpose deep diagnostic</title>
-<style>body{background:#111;color:#eee;font-family:monospace;padding:16px;font-size:12px;white-space:pre-wrap;word-break:break-all;}
-.ok{color:#34d399;} .fail{color:#f87171;} .warn{color:#fbbf24;}
+<title>micro-handpose iPhone diagnostic</title>
+<style>
+body{background:#000;color:#fff;font-family:monospace;padding:8px;font-size:18px;line-height:1.4;}
+.ok{color:#0f0;font-weight:bold;} .fail{color:#f00;font-weight:bold;} .warn{color:#ff0;}
+h2{font-size:22px;margin:12px 0 4px;border-bottom:1px solid #555;}
 </style>
 </head><body>
-<div id="log">DEEP MODEL DIAGNOSTIC — checking weights, input, and layer outputs
-================================================================
-</div>
-<canvas id="c" width="256" height="256" style="border:1px solid #333;display:block;max-width:256px;"></canvas>
+<div id="log"></div>
 <script type="module">
 const log = document.getElementById('log');
 function L(msg, cls) {
-  if (cls) {
-    const span = document.createElement('span');
-    span.className = cls;
-    span.textContent = msg + '\n';
-    log.appendChild(span);
-  } else {
-    log.textContent += msg + '\n';
-  }
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = msg;
+  log.appendChild(d);
   window.scrollTo(0, document.body.scrollHeight);
 }
 
-function stats(arr) {
-  let min = Infinity, max = -Infinity, sum = 0, nonZero = 0;
-  for (let i = 0; i < arr.length; i++) {
-    const v = arr[i];
-    if (v < min) min = v;
-    if (v > max) max = v;
-    sum += v;
-    if (v !== 0) nonZero++;
-  }
-  return { min, max, mean: sum / arr.length, nonZero, total: arr.length };
-}
-
-function fmtStats(s) {
-  return `min=${s.min.toFixed(4)} max=${s.max.toFixed(4)} mean=${s.mean.toFixed(4)} nonZero=${s.nonZero}/${s.total}`;
-}
-
 try {
-  // 1. Load weights directly
-  L('1. Loading weight files...');
-  const [metaRes, binRes] = await Promise.all([
-    fetch('./weights/weights_f16.json?v=' + Date.now()),
-    fetch('./weights/weights_f16.bin?v=' + Date.now()),
-  ]);
-  const meta = await metaRes.json();
-  const bin = await binRes.arrayBuffer();
-  L('   meta keys: ' + meta.keys.length);
-  L('   binary size: ' + bin.byteLength + ' bytes');
-  L('   dtype: ' + (meta.dtype || 'float32'));
+  L('IPHONE DIAG v3');
+  if (!navigator.gpu) { L('NO WEBGPU', 'fail'); throw new Error('x'); }
 
-  // 2. Check each weight tensor
-  L('\n2. Weight tensor statistics:');
-  const dtype = meta.dtype || 'float32';
-  for (let i = 0; i < meta.keys.length; i++) {
-    const key = meta.keys[i];
-    const shape = meta.shapes[i];
-    const offset = meta.offsets[i];
-    const size = shape.reduce((a, b) => a * b, 1);
+  const adapter = await navigator.gpu.requestAdapter();
+  const hasF16 = adapter.features.has('shader-f16');
+  L('f16=' + hasF16 + ' maxWG=' + adapter.limits.maxComputeInvocationsPerWorkgroup);
 
-    let data;
-    if (dtype === 'float16') {
-      const view = new DataView(bin);
-      data = new Float32Array(size);
-      for (let j = 0; j < size; j++) {
-        const h = view.getUint16(offset + j * 2, true);
-        const sign = (h >> 15) & 0x1;
-        const exp = (h >> 10) & 0x1f;
-        const mant = h & 0x3ff;
-        if (exp === 0) data[j] = (sign ? -1 : 1) * Math.pow(2, -14) * (mant / 1024);
-        else if (exp === 0x1f) data[j] = mant ? NaN : (sign ? -Infinity : Infinity);
-        else data[j] = (sign ? -1 : 1) * Math.pow(2, exp - 15) * (1 + mant / 1024);
-      }
-    } else {
-      data = new Float32Array(bin, offset, size);
-    }
+  const { createHandpose } = await import('./dist/index.js?v=' + Date.now());
 
-    const s = stats(data);
-    const ok = s.nonZero > 0 && isFinite(s.min) && isFinite(s.max);
-    L('   ' + key.padEnd(35) + ' shape=[' + shape.join(',') + '] ' + fmtStats(s), ok ? null : 'fail');
-  }
-
-  // 3. Load hand image and create input
-  L('\n3. Loading hand image...');
+  // Load hand image
   const img = new Image();
   img.crossOrigin = 'anonymous';
   await new Promise((resolve, reject) => {
     img.onload = resolve;
-    img.onerror = () => reject(new Error('Failed to load'));
+    img.onerror = () => reject(new Error('img fail'));
     img.src = './hand_test.jpg?v=' + Date.now();
   });
-  const canvas = document.getElementById('c');
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 256;
   const ctx = canvas.getContext('2d');
-  const size2 = Math.min(img.width, img.height);
-  ctx.drawImage(img, (img.width - size2)/2, (img.height - size2)/2, size2, size2, 0, 0, 256, 256);
+  const sz = Math.min(img.width, img.height);
+  ctx.drawImage(img, (img.width-sz)/2, (img.height-sz)/2, sz, sz, 0, 0, 256, 256);
+  L('IMG OK ' + img.width + 'x' + img.height);
 
-  // Get pixel data
-  const imgData = ctx.getImageData(0, 0, 256, 256);
-  const pixels = imgData.data;
-  L('   pixel stats: R range=[' +
-    Math.min(...Array.from({length:100}, (_, i) => pixels[i*4*655])) + ',' +
-    Math.max(...Array.from({length:100}, (_, i) => pixels[i*4*655])) + ']');
-
-  // Create NCHW float32 input (values in 0-1, like rgba8unorm would give)
-  const input = new Float32Array(3 * 256 * 256);
-  for (let y = 0; y < 256; y++) {
-    for (let x = 0; x < 256; x++) {
-      const pi = (y * 256 + x) * 4;
-      input[0 * 256 * 256 + y * 256 + x] = pixels[pi] / 255;     // R
-      input[1 * 256 * 256 + y * 256 + x] = pixels[pi + 1] / 255; // G
-      input[2 * 256 * 256 + y * 256 + x] = pixels[pi + 2] / 255; // B
-    }
-  }
-  const is = stats(input);
-  L('   input NCHW stats: ' + fmtStats(is));
-
-  // 4. Run model and check output
-  L('\n4. Running model...');
-  const { createHandpose } = await import('./dist/index.js?v=' + Date.now());
-  const hp = await createHandpose({ weightsUrl: './weights/', scoreThreshold: 0 });
-  L('   model created');
-
-  // Test with canvas (the normal path)
-  const result = await hp.detect(canvas);
-  if (result) {
-    L('   score: ' + result.score.toFixed(6));
-    const lStats = stats(new Float32Array(result.landmarks.flatMap(l => [l.x, l.y, l.z])));
-    L('   landmarks stats: ' + fmtStats(lStats));
-    const allZero = result.landmarks.every(l => l.x === 0 && l.y === 0 && l.z === 0);
-    L('   ' + (allZero ? '❌ ALL ZEROS' : '✅ Non-zero output'), allZero ? 'fail' : 'ok');
+  // TEST 1: F16 path
+  L('--- F16 TEST ---', 'warn');
+  const hp16 = await createHandpose({ weightsUrl: './weights/', scoreThreshold: 0 });
+  const r16 = await hp16.detect(canvas);
+  if (!r16) {
+    L('F16: NULL RESULT', 'fail');
   } else {
-    L('   ❌ result is null', 'fail');
+    const allZ = r16.landmarks.every(l => l.x===0 && l.y===0 && l.z===0);
+    const anyNaN = r16.landmarks.some(l => isNaN(l.x));
+    L('F16 score=' + r16.score.toFixed(4) + ' hand=' + r16.handedness);
+    L('F16 lm0: ' + r16.landmarks[0].x.toFixed(3) + ',' + r16.landmarks[0].y.toFixed(3));
+    L('F16 lm10: ' + r16.landmarks[10].x.toFixed(3) + ',' + r16.landmarks[10].y.toFixed(3));
+    if (anyNaN) L('F16: NaN!', 'fail');
+    else if (allZ) L('F16: ALL ZERO', 'fail');
+    else L('F16: WORKS!', 'ok');
   }
-
-  // 5. Manual GPU test: check if input conv produces non-zero output
-  L('\n5. Manual layer-by-layer GPU test...');
-  const adapter = await navigator.gpu.requestAdapter();
-  const hasF16 = adapter.features.has('shader-f16');
-  const device = await adapter.requestDevice({
-    requiredFeatures: hasF16 ? ['shader-f16'] : [],
-  });
-
-  // Pad 256->257
-  const padded = new Float32Array(3 * 257 * 257);
-  for (let c = 0; c < 3; c++) {
-    for (let y = 0; y < 256; y++) {
-      for (let x = 0; x < 256; x++) {
-        padded[c * 257 * 257 + y * 257 + x] = input[c * 256 * 256 + y * 256 + x];
-      }
-    }
+  // Bench f16
+  for (let i = 0; i < 3; i++) await hp16.detect(canvas);
+  const t16 = [];
+  for (let i = 0; i < 10; i++) {
+    const t = performance.now();
+    await hp16.detect(canvas);
+    t16.push(performance.now() - t);
   }
-  L('   padded input stats: ' + fmtStats(stats(padded)));
+  t16.sort((a,b) => a-b);
+  L('F16 median=' + t16[5].toFixed(1) + 'ms min=' + t16[0].toFixed(1) + 'ms');
+  hp16.dispose();
 
-  // Upload input
-  const inputBuf = device.createBuffer({ size: padded.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(inputBuf, 0, padded);
-
-  // Load first conv weights (backbone1.1)
-  const convWIdx = meta.keys.indexOf('backbone1.1.weight');
-  const convBIdx = meta.keys.indexOf('backbone1.1.bias');
-  L('   backbone1.1.weight index: ' + convWIdx + ', shape: ' + JSON.stringify(meta.shapes[convWIdx]));
-
-  let convW, convB;
-  if (dtype === 'float16') {
-    const wSize = meta.shapes[convWIdx].reduce((a,b) => a*b, 1);
-    const bSize = meta.shapes[convBIdx].reduce((a,b) => a*b, 1);
-    const view = new DataView(bin);
-    convW = new Float32Array(wSize);
-    convB = new Float32Array(bSize);
-    for (let j = 0; j < wSize; j++) {
-      const h = view.getUint16(meta.offsets[convWIdx] + j * 2, true);
-      const sign = (h >> 15) & 0x1; const exp = (h >> 10) & 0x1f; const mant = h & 0x3ff;
-      if (exp === 0) convW[j] = (sign ? -1 : 1) * Math.pow(2, -14) * (mant / 1024);
-      else if (exp === 0x1f) convW[j] = mant ? NaN : (sign ? -Infinity : Infinity);
-      else convW[j] = (sign ? -1 : 1) * Math.pow(2, exp - 15) * (1 + mant / 1024);
-    }
-    for (let j = 0; j < bSize; j++) {
-      const h = view.getUint16(meta.offsets[convBIdx] + j * 2, true);
-      const sign = (h >> 15) & 0x1; const exp = (h >> 10) & 0x1f; const mant = h & 0x3ff;
-      if (exp === 0) convB[j] = (sign ? -1 : 1) * Math.pow(2, -14) * (mant / 1024);
-      else if (exp === 0x1f) convB[j] = mant ? NaN : (sign ? -Infinity : Infinity);
-      else convB[j] = (sign ? -1 : 1) * Math.pow(2, exp - 15) * (1 + mant / 1024);
-    }
+  // TEST 2: F32 path
+  L('--- F32 TEST ---', 'warn');
+  const hp32 = await createHandpose({ weightsUrl: './weights/', scoreThreshold: 0, forceF32: true });
+  const r32 = await hp32.detect(canvas);
+  if (!r32) {
+    L('F32: NULL RESULT', 'fail');
   } else {
-    convW = new Float32Array(bin, meta.offsets[convWIdx], meta.shapes[convWIdx].reduce((a,b) => a*b, 1));
-    convB = new Float32Array(bin, meta.offsets[convBIdx], meta.shapes[convBIdx].reduce((a,b) => a*b, 1));
+    const allZ = r32.landmarks.every(l => l.x===0 && l.y===0 && l.z===0);
+    const anyNaN = r32.landmarks.some(l => isNaN(l.x));
+    L('F32 score=' + r32.score.toFixed(4) + ' hand=' + r32.handedness);
+    L('F32 lm0: ' + r32.landmarks[0].x.toFixed(3) + ',' + r32.landmarks[0].y.toFixed(3));
+    L('F32 lm10: ' + r32.landmarks[10].x.toFixed(3) + ',' + r32.landmarks[10].y.toFixed(3));
+    if (anyNaN) L('F32: NaN!', 'fail');
+    else if (allZ) L('F32: ALL ZERO', 'fail');
+    else L('F32: WORKS!', 'ok');
   }
-  L('   conv weight stats: ' + fmtStats(stats(convW)));
-  L('   conv bias stats: ' + fmtStats(stats(convB)));
-
-  // Run input conv on GPU manually
-  const convWBuf = device.createBuffer({ size: convW.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  const convBBuf = device.createBuffer({ size: convB.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  const outBuf = device.createBuffer({ size: 1 * 24 * 128 * 128 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-  const readBuf = device.createBuffer({ size: 1 * 24 * 128 * 128 * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  const uniformBuf = device.createBuffer({ size: 28, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  device.queue.writeBuffer(convWBuf, 0, convW);
-  device.queue.writeBuffer(convBBuf, 0, convB);
-  device.queue.writeBuffer(uniformBuf, 0, new Uint32Array([1, 3, 24, 257, 257, 128, 128]));
-
-  const shaderCode = `
-struct Conv3x3Params { batch:u32, in_channels:u32, out_channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, }
-@group(0)@binding(0) var<storage,read> input:array<f32>;
-@group(0)@binding(1) var<storage,read> weight:array<f32>;
-@group(0)@binding(2) var<storage,read> bias:array<f32>;
-@group(0)@binding(3) var<storage,read_write> output:array<f32>;
-@group(0)@binding(4) var<uniform> params:Conv3x3Params;
-@compute @workgroup_size(8,8,1)
-fn main(@builtin(global_invocation_id) gid:vec3<u32>){
-  let out_x=gid.x; let out_y=gid.y; let oc_batch=gid.z;
-  let oc=oc_batch%params.out_channels; let batch=oc_batch/params.out_channels;
-  if(out_x>=params.out_width||out_y>=params.out_height||batch>=params.batch){return;}
-  var sum:f32=0.0;
-  for(var ic:u32=0u;ic<params.in_channels;ic=ic+1u){ for(var ky:u32=0u;ky<3u;ky=ky+1u){ for(var kx:u32=0u;kx<3u;kx=kx+1u){
-    let in_y=out_y*2u+ky; let in_x=out_x*2u+kx;
-    if(in_y<params.in_height && in_x<params.in_width){
-      let in_idx=batch*params.in_channels*params.in_height*params.in_width+ic*params.in_height*params.in_width+in_y*params.in_width+in_x;
-      let w_idx=oc*params.in_channels*9u+ic*9u+ky*3u+kx;
-      sum=sum+input[in_idx]*weight[w_idx];
-    }
-  } } }
-  sum=sum+bias[oc]; sum=max(0.0,sum);
-  let out_idx=batch*params.out_channels*params.out_height*params.out_width+oc*params.out_height*params.out_width+out_y*params.out_width+out_x;
-  output[out_idx]=sum;
-}`;
-
-  const shader = device.createShaderModule({ code: shaderCode });
-  const layout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
-  });
-  const pipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-    compute: { module: shader, entryPoint: 'main' },
-  });
-  const bg = device.createBindGroup({
-    layout,
-    entries: [
-      { binding: 0, resource: { buffer: inputBuf } },
-      { binding: 1, resource: { buffer: convWBuf } },
-      { binding: 2, resource: { buffer: convBBuf } },
-      { binding: 3, resource: { buffer: outBuf } },
-      { binding: 4, resource: { buffer: uniformBuf } },
-    ],
-  });
-
-  const enc = device.createCommandEncoder();
-  const pass = enc.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bg);
-  pass.dispatchWorkgroups(Math.ceil(128/8), Math.ceil(128/8), 24);
-  pass.end();
-  enc.copyBufferToBuffer(outBuf, 0, readBuf, 0, readBuf.size);
-  device.queue.submit([enc.finish()]);
-  await device.queue.onSubmittedWorkDone();
-  await readBuf.mapAsync(GPUMapMode.READ);
-  const convOutput = new Float32Array(readBuf.getMappedRange()).slice();
-  readBuf.unmap();
-
-  const convStats = stats(convOutput);
-  L('   conv3x3+relu output stats: ' + fmtStats(convStats));
-  L('   ' + (convStats.nonZero > 0 ? '✅ First conv layer produces non-zero output' : '❌ First conv layer outputs ALL ZEROS'), convStats.nonZero > 0 ? 'ok' : 'fail');
-
-  // Sample some output values
-  L('   sample values (channel 0, row 0): [' +
-    Array.from({length: 10}, (_, i) => convOutput[i].toFixed(4)).join(', ') + ']');
-  L('   sample values (channel 12, center): [' +
-    Array.from({length: 5}, (_, i) => convOutput[12*128*128 + 64*128 + 60+i].toFixed(4)).join(', ') + ']');
-
-  // 6. CPU reference: manually compute one output pixel of input conv
-  L('\n6. CPU reference for conv output[0][0][0] (channel 0, y=0, x=0):');
-  let cpuSum = 0;
-  for (let ic = 0; ic < 3; ic++) {
-    for (let ky = 0; ky < 3; ky++) {
-      for (let kx = 0; kx < 3; kx++) {
-        const inY = 0 * 2 + ky; // stride=2, out_y=0
-        const inX = 0 * 2 + kx; // stride=2, out_x=0
-        const inVal = padded[ic * 257 * 257 + inY * 257 + inX];
-        const wIdx = 0 * 3 * 9 + ic * 9 + ky * 3 + kx; // oc=0
-        const wVal = convW[wIdx];
-        cpuSum += inVal * wVal;
-        if (ic === 0) L('   ic=' + ic + ' ky=' + ky + ' kx=' + kx + ' in=' + inVal.toFixed(4) + ' w=' + wVal.toFixed(4) + ' prod=' + (inVal*wVal).toFixed(6));
-      }
-    }
+  // Bench f32
+  for (let i = 0; i < 3; i++) await hp32.detect(canvas);
+  const t32 = [];
+  for (let i = 0; i < 10; i++) {
+    const t = performance.now();
+    await hp32.detect(canvas);
+    t32.push(performance.now() - t);
   }
-  cpuSum += convB[0];
-  const cpuResult = Math.max(0, cpuSum);
-  L('   CPU sum+bias: ' + cpuSum.toFixed(6) + ', after ReLU: ' + cpuResult.toFixed(6));
-  L('   GPU output[0][0][0]: ' + convOutput[0].toFixed(6));
-  L('   ' + (Math.abs(cpuResult - convOutput[0]) < 0.01 ? '✅ CPU matches GPU' : '❌ CPU != GPU: diff=' + (cpuResult - convOutput[0]).toFixed(6)), Math.abs(cpuResult - convOutput[0]) < 0.01 ? 'ok' : 'fail');
+  t32.sort((a,b) => a-b);
+  L('F32 median=' + t32[5].toFixed(1) + 'ms min=' + t32[0].toFixed(1) + 'ms');
 
-  L('\n=== DONE ===', 'ok');
+  // TEST 3: Layer debug (f32 path)
+  L('--- LAYERS ---', 'warn');
+  try {
+    const layers = await hp32.debugLayerOutputs(canvas);
+    for (const lr of layers) {
+      const s = lr.stats;
+      const ok = s.nonZero > 0;
+      const name = lr.layer.length > 25 ? lr.layer.substring(0, 25) : lr.layer;
+      L((ok ? 'OK' : 'ZERO') + ' ' + name + ' nz=' + s.nonZero + '/' + s.total, ok ? 'ok' : 'fail');
+    }
+  } catch(e) {
+    L('ERR: ' + e.message, 'fail');
+  }
+  hp32.dispose();
+
+  L('=== DONE ===', 'ok');
 } catch (e) {
-  L('\nFATAL: ' + e.message, 'fail');
+  L('FATAL: ' + e.message, 'fail');
   L(e.stack || '');
 }
 </script></body></html>
