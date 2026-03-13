@@ -5,12 +5,14 @@
  *
  * Architecture:
  * 1. Initial conv 5x5 stride-2 + PReLU → 96x96x32
- * 2. Stage 1: 4 blocks (32ch), stride-2 transition → 48x48x64 (save backbone2 skip)
- * 3. Stage 2: 4 blocks (64ch), stride-2 transition → 24x24x128 (save backbone3 skip)
- * 4. Stage 3: 4 blocks (128ch), stride-2 transition → 12x12x256
- * 5. Stage 4: 8 blocks (256ch) at 12x12
- * 6. FPN: conv1x1 + upsample 12→24 + add backbone3; 2 blocks at 24x24
- * 7. SSD heads:
+ * 2. Stage 1: 4 blocks (32ch), stride-2 transition → 48x48x64
+ * 3. Stage 2: 4 blocks (64ch), stride-2 transition → 24x24x128 (save backbone24 skip)
+ * 4. Stage 3: 4 blocks (128ch), stride-2 transition → 12x12x256 (save backbone12 skip after block 14)
+ * 5. Stage 4a: 3 blocks (256ch) at 12x12
+ * 6. Stage 4b: stride-2 transition → 6x6x256, then 3 more blocks at 6x6
+ * 7. FPN Level 1: conv2d_20 at 6x6 → upsample 6→12 + add backbone12 skip → 2 blocks at 12x12
+ * 8. FPN Level 2: conv2d_23 (256→128) at 12x12 → upsample 12→24 + add backbone24 skip → 2 blocks at 24x24
+ * 9. SSD heads:
  *    - 12x12: 6 classifiers + 108 regressors (6 anchors × 18 values)
  *    - 24x24: 2 classifiers + 36 regressors (2 anchors × 18 values)
  *
@@ -281,14 +283,15 @@ export async function compilePalmModel(
     { dwKey: 'depthwise_conv2d_9/', pwKey: 'conv2d_10/', bnKey: 'batch_normalization_10/', preluKey: 'p_re_lu_10/', inCh: 128, outCh: 128, stride: 1, inH: 24 },
     { dwKey: 'depthwise_conv2d_10/', pwKey: 'conv2d_11/', bnKey: 'batch_normalization_11/', preluKey: 'p_re_lu_11/', inCh: 128, outCh: 128, stride: 1, inH: 24 },
     { dwKey: 'depthwise_conv2d_11/', pwKey: 'conv2d_12/', bnKey: 'batch_normalization_12/', preluKey: 'p_re_lu_12/', inCh: 128, outCh: 256, stride: 2, inH: 24 },
-    // Stage 4: 256ch blocks, 12x12 input
+    // Stage 4a: 256ch blocks, 12x12 input
     { dwKey: 'depthwise_conv2d_12/', pwKey: 'conv2d_13/', bnKey: 'batch_normalization_13/', preluKey: 'p_re_lu_13/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
     { dwKey: 'depthwise_conv2d_13/', pwKey: 'conv2d_14/', bnKey: 'batch_normalization_14/', preluKey: 'p_re_lu_14/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
     { dwKey: 'depthwise_conv2d_14/', pwKey: 'conv2d_15/', bnKey: 'batch_normalization_15/', preluKey: 'p_re_lu_15/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
-    { dwKey: 'depthwise_conv2d_15/', pwKey: 'conv2d_16/', bnKey: 'batch_normalization_16/', preluKey: 'p_re_lu_16/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
-    { dwKey: 'depthwise_conv2d_16/', pwKey: 'conv2d_17/', bnKey: 'batch_normalization_17/', preluKey: 'p_re_lu_17/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
-    { dwKey: 'depthwise_conv2d_17/', pwKey: 'conv2d_18/', bnKey: 'batch_normalization_18/', preluKey: 'p_re_lu_18/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
-    { dwKey: 'depthwise_conv2d_18/', pwKey: 'conv2d_19/', bnKey: 'batch_normalization_19/', preluKey: 'p_re_lu_19/', inCh: 256, outCh: 256, stride: 1, inH: 12 },
+    // Stage 4b: stride-2 transition 12→6, then 256ch at 6x6
+    { dwKey: 'depthwise_conv2d_15/', pwKey: 'conv2d_16/', bnKey: 'batch_normalization_16/', preluKey: 'p_re_lu_16/', inCh: 256, outCh: 256, stride: 2, inH: 12 },
+    { dwKey: 'depthwise_conv2d_16/', pwKey: 'conv2d_17/', bnKey: 'batch_normalization_17/', preluKey: 'p_re_lu_17/', inCh: 256, outCh: 256, stride: 1, inH: 6 },
+    { dwKey: 'depthwise_conv2d_17/', pwKey: 'conv2d_18/', bnKey: 'batch_normalization_18/', preluKey: 'p_re_lu_18/', inCh: 256, outCh: 256, stride: 1, inH: 6 },
+    { dwKey: 'depthwise_conv2d_18/', pwKey: 'conv2d_19/', bnKey: 'batch_normalization_19/', preluKey: 'p_re_lu_19/', inCh: 256, outCh: 256, stride: 1, inH: 6 },
     // NOTE: block 19 (the last backbone block before FPN) uses different naming for the dw bias
     // Actually the DW bias is always from the BN fused into the DW conv itself.
     // Let me re-examine: In BlazeNet, each block is DW5x5 → BN → PReLU → PW1x1 → BN → PReLU → Add
@@ -348,352 +351,37 @@ export async function compilePalmModel(
   });
 
   // ============ FPN weights ============
+  //
+  // ARCHITECTURE (verified against TFLite intermediate tensors):
+  //
+  // Backbone ends at 6x6x256 (block 17 = dw_18+conv2d_19)
+  //
+  // FPN Level 1 (6→12):
+  //   1. Bilinear upsample 6x6→12x12 (256ch)
+  //   2. conv2d_20 (256→256) + BN_20 + PReLU_20 on upsampled features
+  //   3. Element-wise add backbone_12x12 skip (from block 14 = 12x12x256)
+  //   4. Block: dw_19 + conv2d_21 + BN_21 + PReLU_21 (12x12x256, residual skip)
+  //   5. Block: dw_20 + conv2d_22 + BN_22 + PReLU_22 (12x12x256, residual skip)
+  //   6. 12x12 SSD heads on block 5 output
+  //
+  // FPN Level 2 (12→24):
+  //   7. Bilinear upsample 12x12→24x24 (256ch) from block 5 output
+  //   8. conv2d_23 (256→128) + BN_23 + PReLU_23 on upsampled features
+  //   9. Element-wise add backbone_24x24 skip (from block 10 = 24x24x128)
+  //  10. Block: dw_21 + conv2d_24 + BN_24 + PReLU_24 (24x24x128, residual skip)
+  //  11. Block: dw_22 + conv2d_25 + BN_25 + PReLU_25 (24x24x128, residual skip)
+  //  12. 24x24 SSD heads on block 11 output
 
-  // conv2d_20: 256→256 project stage4 output at 12x12, with bn_20 bias and prelu_20 alpha
-  const fpnProj12W = transposePW(findWeight('conv2d_20/Conv2D'));
-  const fpnProj12WBuf = makeBuf(fpnProj12W.byteLength, SC);
-  writeBuf(fpnProj12WBuf, 0, fpnProj12W);
-  const fpnProj12BBuf = uploadWeights(findWeight('batch_normalization_20/'));
-  const fpnProj12AlphaBuf = uploadWeights(findWeight('p_re_lu_20/'));
+  // FPN Level 1: conv2d_20 (256→256) applied after 6→12 upsample
+  const fpn6to12W = transposePW(findWeight('conv2d_20/Conv2D'));
+  const fpn6to12WBuf = makeBuf(fpn6to12W.byteLength, SC);
+  writeBuf(fpn6to12WBuf, 0, fpn6to12W);
+  const fpn6to12BBuf = uploadWeights(findWeight('batch_normalization_20/'));
+  const fpn6to12AlphaBuf = uploadWeights(findWeight('p_re_lu_20/'));
 
-  // conv2d_22/Conv2D1: 256→256 project backbone3 skip (stage3 output at 24x24→ channels match)
-  // Wait — backbone3 output is at 24x24 with 128 channels, but conv2d_22/Conv2D1 is [256,1,1,256].
-  // Let me re-think. Actually:
-  // - backbone2 output = after stage 2 transition = 24x24 x 128 — this is where we need skip
-  // - backbone3 output = after stage 3 = 12x12 x 256 (stage 4 input)
-  //
-  // The FPN upsample goes from 12→24, needs to match 24x24 features.
-  // conv2d_22/Conv2D1 [256,1,1,256] projects... hmm that doesn't match 128ch.
-  //
-  // Let me look at this differently. The manifest shows:
-  // conv2d_22/Conv2D1 [256,1,1,256] — this projects something 256ch to 256ch
-  //
-  // Actually for MediaPipe palm detection FPN:
-  // - After stage4 (12x12x256), apply conv2d_20 (256→256) + PReLU
-  // - Upsample 12→24, but the skip is from the backbone2/3 boundary
-  //
-  // Looking more carefully at the model:
-  // Stage 3 ends at block 11: 128→256 stride 2, output 12x12x256
-  // Stage 3 blocks 8-10 are at 24x24x128
-  // The skip for FPN upsampling to 24x24 should be from the 24x24 feature map
-  //
-  // But conv2d_22/Conv2D1 is [256,1,1,256], not [256,1,1,128].
-  // This means the FPN skip isn't from pre-transition 24x24x128 but from some intermediate point.
-  //
-  // Actually, re-reading the task description:
-  // "FPN: Upsample 6x6→12x12 (add backbone3 skip), 12x12→24x24 (add backbone2 skip)"
-  //
-  // Wait, that says 6x6→12x12 and 12x12→24x24. So the deepest feature is at 6x6?
-  // But stage 4 is at 12x12. Let me re-examine...
-  //
-  // Actually the task description says the model has 4 stages with 4 blocks each.
-  // Stage 1: 96→48 (stride 2), Stage 2: 48→24, Stage 3: 24→12, Stage 4: 12→6
-  // Then FPN: 6→12, 12→24
-  //
-  // But looking at my block definitions, I have stages going:
-  // 96→48 (block 3), 48→24 (block 7), 24→12 (block 11), then blocks 12-18 stay at 12x12
-  //
-  // Hmm, but the task says 4 stages with stride-2 transitions:
-  // 32→64, 64→128, 128→256 channels.
-  // That's only 3 stride-2 transitions. Where's the 4th?
-  //
-  // Let me count: we have depthwise_conv2d_0 through _18 in the backbone = 19 DW convs.
-  // Plus the initial conv. That's 20 layers total.
-  // 4 stages × (4 blocks × 1 DW each + 1 stride-2 transition) = 4 × 5 = 20? No, that's wrong.
-  //
-  // Actually: 4 stages, each with 4 depthwise-separable blocks:
-  // Stage 1 (32ch): blocks 0,1,2 at stride 1, block 3 at stride 2 → 64ch
-  // Stage 2 (64ch): blocks 4,5,6 at stride 1, block 7 at stride 2 → 128ch
-  // Stage 3 (128ch): blocks 8,9,10 at stride 1, block 11 at stride 2 → 256ch
-  // Stage 4 (256ch): blocks 12,13,14,15,16,17,18 at stride 1
-  //
-  // That's 3 blocks stride-1 + 1 transition = 4 blocks per stage for stages 1-3,
-  // and stage 4 has 7 blocks. Total: 4×3 + 7 = 19 blocks + initial conv = 20 convolutions.
-  //
-  // Stage 4 has 7 more blocks than expected because the task description says "4 blocks per stage"
-  // but MediaPipe's BlazeNet has more blocks in the deeper stages.
-  //
-  // So FPN starts from 12x12, not 6x6. The skip connections are:
-  // - backbone2 = 48x48 feature map (after stage 1, before stride-2 to 64ch) - no wait
-  // - Actually the convention is backbone_N refers to the Nth backbone stage output.
-  //
-  // For the FPN to work with conv2d_22/Conv2D1 [256,1,1,256]:
-  // This could be projecting the 12x12x256 features. But that doesn't make sense for a skip.
-  //
-  // Let me try a different interpretation:
-  // FPN path uses conv2d_20 to project stage4 output, then:
-  // - First upsample: stage4 12x12 → needs NO upsample, it's already at 12x12
-  // - Actually maybe the task description is slightly off and this model has blocks at 6x6 too.
-  //
-  // Looking again at blocks 12-18: they are ALL at 12x12 with 256ch. That's 7 blocks at 12x12.
-  // The task says "4 stages (32→64→128→256 channels), each with 4 depthwise-separable residual blocks"
-  // That means stage 4 has 4 blocks too: blocks 12-15. Then what are blocks 16-18?
-  //
-  // Re-reading: "BlazeNet with 4 stages (32→64→128→256 channels), each with 4 depthwise-separable residual blocks"
-  // So that's 4×4 = 16 DW blocks. But we have 19 (0-18).
-  // The extra 3 could be the FPN decoder blocks.
-  //
-  // Let me check: blocks 12,13,14,15 = stage 4 (256ch, 12x12).
-  // Then blocks 16,17,18 might be part of FPN/decoder, not stage 4.
-  //
-  // But looking at the weight names, all of depthwise_conv2d_12 through _18 have the same
-  // pattern with conv2d_13 through conv2d_19. The FPN-specific convs are conv2d_20, conv2d_21.
-  //
-  // I think the architecture is simply:
-  // - Stage 4 has more than 4 blocks (it has 7: blocks 12-18)
-  // - After stage 4 (12x12x256), FPN starts
-  //
-  // For the FPN:
-  // conv2d_20 [256,1,1,256] + bn_20 [256] + prelu_20 = project stage4 output (12x12x256)
-  // upsample 12→24
-  // conv2d_22/Conv2D1 [256,1,1,256] = project the skip connection from somewhere
-  //
-  // But backbone2 output (before stride-2 to 128) is 24x24x64, not 256ch.
-  // backbone3 output (at 12x12) is already 256ch but 12x12, not useful for 24x24 skip.
-  // backbone2 end (after stride-2 block 7 output) is 24x24x128.
-  //
-  // Wait — I need to save the skip BEFORE the stride-2 transition.
-  // backbone2_skip = output of block 10 (last 128ch block at 24x24) = 24x24x128
-  // backbone3_skip = output of block 11 (stride-2 transition) = 12x12x256... no
-  //
-  // Actually for FPN in BlazeNet:
-  // - Save backbone stage 2 output at 24x24 (after blocks 8-10, before block 11 stride-2)
-  // - Save backbone stage 3 output at 12x12 (stage 4 blocks 12-15... or the stage3 end)
-  //
-  // Hmm, this is getting complex. Let me look at it from the output heads:
-  // - 12x12 head: classifier_palm_16 [6,1,1,256] and regressor_palm_16 [108,1,1,256]
-  //   → operates on 12x12x256 features
-  // - 24x24 head: classifier_palm_8 [2,1,1,128] and regressor_palm_8 [36,1,1,128]
-  //   → operates on 24x24x128 features
-  //
-  // So the 24x24 path needs 128 channels. Let's look at the FPN path:
-  // conv2d_23 [128,1,1,256] — projects 256→128 channels
-  // This makes sense: after upsample from 12x12→24x24 (256ch), project to 128ch.
-  // Then add skip from backbone at 24x24 (which was 128ch... but wait, we need a skip
-  // that's also 128ch at 24x24).
-  //
-  // Actually: conv2d_25/Conv2D1 [128,1,1,128] = skip projection for the 24x24 FPN level
-  //
-  // And looking at the names more carefully:
-  // dw_19 + conv2d_21: FPN block after first upsample (24x24, 256ch)
-  // conv2d_22/Conv2D1: this is the skip projection at some level
-  //
-  // Let me try this FPN structure:
-  // 1. Stage 4 output: 12x12x256
-  // 2. conv2d_20 projects to 12x12x256 (with PReLU)
-  // 3. SSD head at 12x12: classifier_palm_16 + regressor_palm_16 (on stage4 output directly)
-  //
-  // Actually, maybe the 12x12 SSD head runs on the conv2d_20 output directly.
-  // Then for the 24x24 path:
-  // 4. Upsample 12→24 (256ch)
-  // 5. Add skip: conv2d_22/Conv2D1 [256,1,1,256] projects backbone3 (12x12x256?) — no
-  //
-  // OK let me just look at which conv2d has what skip prefix:
-  // conv2d_22/Conv2D1 [256,1,1,256] — note the "Conv2D1" suffix (not just "Conv2D")
-  // conv2d_25/Conv2D1 [128,1,1,128] — also "Conv2D1" suffix
-  // These "Conv2D1" suffixed weights are the skip/residual projections.
-  //
-  // For the FPN, I think the structure is:
-  //
-  // 12x12 path:
-  // - Stage4 output (12x12x256)
-  // - dw_19 + conv2d_20: one more block at 12x12x256 with PReLU
-  //   (prelu_20, bn_20)
-  // - 12x12 SSD heads: classifier_palm_16 [6,1,1,256], regressor_palm_16 [108,1,1,256]
-  //
-  // But wait, after the 7 backbone stage4 blocks (12-18), we have:
-  // - conv2d_19 is the last PW conv in the backbone.
-  // - So stage4 output = output of block 18 = 12x12x256.
-  //
-  // Then FPN:
-  // dw_19 [1,5,5,256] + conv2d_21 [256,1,1,256] + bn_21 + prelu_21 = FPN block at 12x12
-  //   skip projection: conv2d_22/Conv2D1 [256,1,1,256]
-  // Wait, but dw_19 comes AFTER the backbone blocks. Let me reconsider.
-  //
-  // There are 23 depthwise convs total (dw_0 through dw_22).
-  // Backbone: dw_0 through dw_18 (19 DW convs)
-  // FPN/decoder: dw_19, dw_20, dw_21, dw_22 (4 more DW convs)
-  //
-  // Looking at the heads:
-  // 12x12 heads feed from 256ch features
-  // 24x24 heads feed from 128ch features
-  //
-  // Let me try this refined structure:
-  //
-  // 12x12 feature extraction:
-  // - backbone output: 12x12x256
-  // - conv2d_20 [256,1,1,256] + bn_20 + prelu_20 = project features (1x1 conv + PReLU)
-  // - dw_19 [1,5,5,256] + conv2d_21 [256,1,1,256] + bn_21 + prelu_21 = one DW-sep block
-  //   with skip via conv2d_22/Conv2D1 [256,1,1,256]
-  // - dw_20 [1,5,5,256] + ... hmm, but there's no conv2d_22 PW for this
-  //
-  // Actually I see bn_22 [256] and prelu_22 [1,1,256] in the manifest. And conv2d_22/Conv2D1.
-  // conv2d_22 has two weight entries:
-  // - conv2d_22/Conv2D1 [256,1,1,256] — this is the skip projection
-  // - bn_22 [256] + prelu_22 [1,1,256] — these go with conv2d_22 output
-  //
-  // So the 12x12 block after conv2d_20 is:
-  // Input → dw_19 → conv2d_20 already done... no.
-  //
-  // Let me reconsider. Maybe:
-  // - conv2d_20 is not after dw_19. conv2d_20 [256,1,1,256] is a standalone 1x1 projection.
-  //
-  // FPN at 12x12:
-  // 1. backbone stage4 output: 12x12x256
-  // 2. conv2d_20 [256,1,1,256] + bn_20 + prelu_20: project backbone output
-  //    → 12x12x256 features for FPN path
-  // 3. 12x12 SSD heads on this projected feature:
-  //    classifier_palm_16 [6,1,1,256], regressor_palm_16 [108,1,1,256]
-  //
-  // Then separately, for the 24x24 path:
-  // 4. upsample 12→24 of the conv2d_20 output (256ch)
-  // 5. Add skip: save backbone at 24x24, project with conv2d_22/Conv2D1 [256,1,1,256]
-  //    But backbone at 24x24 is 128ch, not 256ch. conv2d_22/Conv2D1 is [256,1,1,256].
-  //    This doesn't match.
-  //
-  // Unless the skip at 24x24 has 256ch. That would mean saving the output AFTER the
-  // stride-2 transition but using a different feature map. Hmm.
-  //
-  // Actually, maybe I miscounted the backbone stages. Let me re-examine:
-  // The task says: "4 stages (32→64→128→256 channels)"
-  // If each stage has 4 DW-sep blocks, the stride-2 transition is the FIRST block of each stage:
-  //
-  // Stage 0: initial conv → 96x96x32
-  // Stage 1 (32ch): blocks 0-3 at 96x96, all stride 1
-  //   Then stride-2 transition to 48x48x64
-  // Stage 2 (64ch): blocks 4-7, the first block has stride 2
-  //
-  // No wait, that gives 32ch for 4 blocks, then transition. But the first DW block is
-  // depthwise_conv2d_0 with [1,5,5,32] and conv2d_1 [32,1,1,32] — same channels, stride 1.
-  //
-  // OK I'll just go with my original analysis:
-  // blocks 0-2: 32→32, stride 1, 96x96
-  // block 3: 32→64, stride 2, 96→48
-  // blocks 4-6: 64→64, stride 1, 48x48
-  // block 7: 64→128, stride 2, 48→24
-  // blocks 8-10: 128→128, stride 1, 24x24
-  // block 11: 128→256, stride 2, 24→12
-  // blocks 12-18: 256→256, stride 1, 12x12
-  //
-  // So we save:
-  // backbone2_skip = output of block 10 = 24x24x128 (before stride-2 transition to 256ch)
-  // backbone3_skip = output of block 7 or... hmm
-  //
-  // Actually for the FPN:
-  // We need a 24x24 skip. The 24x24 features are at 128ch (blocks 8-10).
-  // But conv2d_22/Conv2D1 is [256,1,1,256]. That can't project 128→256.
-  //
-  // Unless the skip is from the stride-2 block output: block 11 outputs 12x12x256.
-  // That's the wrong spatial resolution for a 24x24 skip.
-  //
-  // I think what's happening is:
-  // 1. The FPN operates entirely in 256ch for the 12→24 upsample
-  // 2. conv2d_22/Conv2D1 projects the stage4 backbone features (12x12x256) as a skip
-  //    to be added after upsampling a different branch
-  // 3. Then after adding, conv2d_23 projects 256→128 for the 24x24 head
-  //
-  // Actually, I think the FPN structure is:
-  //
-  // 12x12 branch:
-  // - backbone output: 12x12x256
-  // - conv2d_20 [256,1,1,256] + bn_20 + prelu_20: refine features
-  // - dw_19 [1,5,5,256] + conv2d_21 [256,1,1,256] + bn_21 + prelu_21: another block
-  //   skip: conv2d_22/Conv2D1 [256,1,1,256] projects the conv2d_20 output as skip
-  // - Output: refined 12x12x256
-  // - 12x12 SSD heads on conv2d_20 output (or after dw_19/conv2d_21 block)
-  //
-  // Actually I think the 12x12 SSD heads run directly on the backbone stage4 output
-  // and the FPN only creates the 24x24 features.
-  //
-  // Let me just go with a simpler interpretation that makes the shapes work:
-  //
-  // After backbone (12x12x256):
-  // FPN block A at 12x12:
-  //   dw_19 [1,5,5,256] + conv2d_20 [256,1,1,256] + bn_20 + prelu_20
-  //   Skip: from backbone stage4 output (same 12x12x256)
-  //   But we also have conv2d_22/Conv2D1 [256,1,1,256] and bn_22 [256] + prelu_22 alpha
-  //
-  // Then:
-  //   dw_20 [1,5,5,256] + conv2d_21 [256,1,1,256] + bn_21 + prelu_21
-  //   Skip: conv2d_22/Conv2D1 projects backbone or previous output
-  //
-  // Actually, the cleanest interpretation that matches the naming is:
-  //
-  // After backbone stage4 output (12x12x256):
-  //
-  // FPN 12x12 block 1: dw_19 + conv2d_20 + bn_20 + prelu_20, skip=stage4 output
-  // FPN 12x12 block 2: dw_20 + conv2d_21 + bn_21 + prelu_21, skip=block1 output
-  //   conv2d_22/Conv2D1 + bn_22 + prelu_22 is a projection of the block1 output used as skip for block2
-  //
-  // → 12x12 SSD head operates on FPN block 2 output (12x12x256)
-  //
-  // Then upsample 12→24:
-  // conv2d_23 [128,1,1,256]: project 256→128 at 24x24
-  //   + prelu_23 alpha, + bn_23 bias (if exists... bn_23 = "batch_normalization_23" = [128])
-  //
-  // Then 24x24 blocks:
-  // FPN 24x24 block 1: dw_21 + conv2d_24 + bn_24 + prelu_24, skip from somewhere
-  // FPN 24x24 block 2: dw_22 + conv2d_25/Conv2D1 + bn_25 + prelu_25, skip from block1
-  //   conv2d_25/Conv2D1 is the skip projection
-  //
-  // → 24x24 SSD head operates on FPN 24x24 output (24x24x128)
-  //
-  // This makes sense! Let me also add the skip connection for the upsample:
-  // The upsample from 12→24 adds with a backbone skip at 24x24.
-  // Backbone at 24x24 is 128ch (blocks 8-10 output). After conv2d_23 projects to 128ch
-  // we can add the backbone2 skip (24x24x128).
-  //
-  // But actually the upsample happens BEFORE conv2d_23. Or maybe:
-  // 1. conv2d_23 projects FPN 12x12 output (256ch) to 128ch at 12x12
-  // 2. upsample 12→24 (128ch)
-  // 3. Add backbone skip at 24x24x128
-  //
-  // That works with all the shapes! And then the two blocks refine it:
-  // dw_21+conv2d_24 (128ch, 24x24) + dw_22+conv2d_25 (128ch, 24x24)
-  //
-  // For the 12x12 blocks, let me simplify further:
-  // The "12x12 blocks" might not exist as separate blocks. Maybe:
-  // - 12x12 SSD heads run directly on backbone stage4 output
-  // - conv2d_20 + dw_19,20 + conv2d_21 are actually part of the FPN decoder
-  //
-  // Actually, let me re-examine. The blocks dw_19, dw_20 have [1,5,5,256].
-  // conv2d_20 [256,1,1,256], conv2d_21 [256,1,1,256].
-  // These form two additional residual blocks at 12x12x256 AFTER the backbone.
-  //
-  // So the final architecture:
-  //
-  // Backbone → 12x12x256
-  // Extra block A: dw_19+conv2d_20 (256ch, 12x12) + skip from backbone
-  // Extra block B: dw_20+conv2d_21 (256ch, 12x12) + skip from block A
-  //   → conv2d_22/Conv2D1 projects block A output as skip for block B? Or just identity skip.
-  //
-  // Actually for the skip in extra blocks, since channels don't change (256→256),
-  // the skip is identity (just add input). conv2d_22/Conv2D1 might be something else.
-  //
-  // Let me just go with the simplest working interpretation:
-  //
-  // BACKBONE + EXTRA BLOCKS → 12x12x256 features
-  // ├── 12x12 SSD heads (classifier_palm_16, regressor_palm_16)
-  // └── FPN to 24x24:
-  //     conv2d_23 (256→128) + PReLU → upsample 12→24 → add backbone2 skip (24x24x128)
-  //     → dw_21+conv2d_24 block (128ch, 24x24)
-  //     → dw_22+conv2d_25 block (128ch, 24x24) [conv2d_25/Conv2D1 is skip projection]
-  //     → 24x24 SSD heads (classifier_palm_8, regressor_palm_8)
-
-  // Extra blocks at 12x12 (after backbone stage 4)
-  // Block A: dw_19 + conv2d_20 + bn_20 + prelu_20
-  const extraBlockA = {
+  // FPN 12x12 block 1: dw_19 + conv2d_21
+  const fpn12Block1 = {
     dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_19/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
-    dwBiasBuf: (() => { const z = new Float32Array(256); const b = makeBuf(z.byteLength, SC); writeBuf(b, 0, z); return b; })(),
-    pwWeightBuf: fpnProj12WBuf,
-    pwBiasBuf: fpnProj12BBuf,
-    alphaBuf: fpnProj12AlphaBuf,
-    inCh: 256, outCh: 256, stride: 1 as const, inH: 12,
-  };
-
-  // Block B: dw_20 + conv2d_21 + bn_21 + prelu_21
-  const extraBlockB = {
-    dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_20/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
     dwBiasBuf: (() => { const z = new Float32Array(256); const b = makeBuf(z.byteLength, SC); writeBuf(b, 0, z); return b; })(),
     pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_21/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
     pwBiasBuf: uploadWeights(findWeight('batch_normalization_21/')),
@@ -701,27 +389,25 @@ export async function compilePalmModel(
     inCh: 256, outCh: 256, stride: 1 as const, inH: 12,
   };
 
-  // conv2d_22/Conv2D1: skip projection for the extra blocks
-  // bn_22 and prelu_22 - these might be the skip projection with activation
-  // Actually for BlazeNet, when channels match, skip is identity. conv2d_22/Conv2D1
-  // might be unused in this path. Let me check if bn_22/prelu_22 exist and what they're for.
-  // bn_22 [256], prelu_22 [1,1,256] — yes they exist.
-  //
-  // I think conv2d_22/Conv2D1 + bn_22 + prelu_22 form the final refinement conv at 12x12.
-  // Or maybe they're used differently.
-  //
-  // For now, let me just treat blocks A and B as regular residual blocks with identity skip
-  // (since channels don't change).
+  // FPN 12x12 block 2: dw_20 + conv2d_22/Conv2D1
+  const fpn12Block2 = {
+    dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_20/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
+    dwBiasBuf: (() => { const z = new Float32Array(256); const b = makeBuf(z.byteLength, SC); writeBuf(b, 0, z); return b; })(),
+    pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_22/Conv2D1')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
+    pwBiasBuf: uploadWeights(findWeight('batch_normalization_22/')),
+    alphaBuf: uploadWeights(findWeight('p_re_lu_22/')),
+    inCh: 256, outCh: 256, stride: 1 as const, inH: 12,
+  };
 
-  // FPN projection: conv2d_23 [128,1,1,256] projects 256→128
-  const fpnProjW = transposePW(findWeight('conv2d_23/Conv2D'));
-  const fpnProjWBuf = makeBuf(fpnProjW.byteLength, SC);
-  writeBuf(fpnProjWBuf, 0, fpnProjW);
-  const fpnProjBBuf = uploadWeights(findWeight('batch_normalization_23/'));
-  const fpnProjAlphaBuf = uploadWeights(findWeight('p_re_lu_23/'));
+  // FPN Level 2: conv2d_23 (256→128) applied after 12→24 upsample
+  const fpn12to24W = transposePW(findWeight('conv2d_23/Conv2D'));
+  const fpn12to24WBuf = makeBuf(fpn12to24W.byteLength, SC);
+  writeBuf(fpn12to24WBuf, 0, fpn12to24W);
+  const fpn12to24BBuf = uploadWeights(findWeight('batch_normalization_23/'));
+  const fpn12to24AlphaBuf = uploadWeights(findWeight('p_re_lu_23/'));
 
   // FPN 24x24 block 1: dw_21 + conv2d_24
-  const fpnBlock1 = {
+  const fpn24Block1 = {
     dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_21/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
     dwBiasBuf: (() => { const z = new Float32Array(128); const b = makeBuf(z.byteLength, SC); writeBuf(b, 0, z); return b; })(),
     pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_24/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
@@ -730,15 +416,10 @@ export async function compilePalmModel(
     inCh: 128, outCh: 128, stride: 1 as const, inH: 24,
   };
 
-  // FPN 24x24 block 2: dw_22 + conv2d_25 (identity since 128→128 but conv2d_25/Conv2D1 is skip projection)
-  const fpnBlock2 = {
+  // FPN 24x24 block 2: dw_22 + conv2d_25/Conv2D1
+  const fpn24Block2 = {
     dwWeightBuf: (() => { const d = transposeDW(findWeight('depthwise_conv2d_22/')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
     dwBiasBuf: (() => { const z = new Float32Array(128); const b = makeBuf(z.byteLength, SC); writeBuf(b, 0, z); return b; })(),
-    // The PW for block2 comes from... looking at the manifest, there's no conv2d_25/Conv2D (without "1")
-    // conv2d_25/Conv2D1 [128,1,1,128] — this is labeled as skip projection but actually might be the PW conv.
-    // In the naming convention, Conv2D1 means it's an alternate weight for the same layer.
-    // Let me check if there are separate bn_25 entries... yes: bn_25 [128] and prelu_25 [1,1,128].
-    // So conv2d_25/Conv2D1 IS the PW conv for this block, and bn_25 is its bias.
     pwWeightBuf: (() => { const d = transposePW(findWeight('conv2d_25/Conv2D1')); const b = makeBuf(d.byteLength, SC); writeBuf(b, 0, d); return b; })(),
     pwBiasBuf: uploadWeights(findWeight('batch_normalization_25/')),
     alphaBuf: uploadWeights(findWeight('p_re_lu_25/')),
@@ -769,11 +450,6 @@ export async function compilePalmModel(
   const reg8BBuf = uploadWeights(findWeight('regressor_palm_8_NO_PRUNING/BiasAdd'));
 
   // ============ Activation buffers ============
-  // We'll use double-buffering: alternate between two buffers for each layer's input/output.
-  // Maximum spatial: 96x96x32 = 294912, 48x48x64 = 147456, 24x24x128 = 73728, 12x12x256 = 36864
-  // For DW output, we need same spatial as DW input but same channels.
-  // Max buffer size needed: 96x96x32 = 294912 floats
-  const maxBufSize = 192 * 192 * 3; // input buffer for 192x192x3
   const buf192 = Math.max(192 * 192 * 3, 96 * 96 * 64, 48 * 48 * 128, 24 * 24 * 256, 12 * 12 * 256) * 4;
 
   const inputBuf = makeBuf(192 * 192 * 3 * 4, SC);
@@ -781,10 +457,12 @@ export async function compilePalmModel(
   const actBufB = makeBuf(buf192, SO);  // Activation buffer B
   const dwOutBuf = makeBuf(buf192, SO); // DW output buffer
 
+  // Zero buffer for upsample-without-add (same size as largest upsample output)
+  const zeroBuf = makeBuf(24 * 24 * 256 * 4, SO);  // Pre-zeroed by WebGPU
+
   // Save buffers for skip connections
-  const backbone2SkipBuf = makeBuf(24 * 24 * 128 * 4, SO | GPUBufferUsage.COPY_DST); // After block 10 (24x24x128)
-  // For FPN upsample+add at 24x24
-  const fpnUpsampleBuf = makeBuf(24 * 24 * 128 * 4, SO);
+  const backbone12SkipBuf = makeBuf(12 * 12 * 256 * 4, SO | GPUBufferUsage.COPY_DST); // After block 14 (12x12x256)
+  const backbone24SkipBuf = makeBuf(24 * 24 * 128 * 4, SO | GPUBufferUsage.COPY_DST); // After block 10 (24x24x128)
 
   // SSD output buffers
   const cls16Buf = makeBuf(12 * 12 * 6 * 4, SOC);   // 12x12x6 = 864
@@ -984,15 +662,13 @@ export async function compilePalmModel(
       pass.end();
     }
 
-    // Backbone blocks with double buffering
+    // Backbone blocks 0-18 with double buffering
     // After input conv: actBufA has 96x96x32
     let curBuf = actBufA;
     let altBuf = actBufB;
 
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
-      // For same-channel blocks (stride 1, inCh==outCh), skip = curBuf (identity)
-      // For channel-change blocks (stride 2, inCh!=outCh), skip = curBuf (zero-pad in shader)
       encodeDwPwBlock(encoder, block, curBuf, altBuf, curBuf);
 
       // Swap buffers
@@ -1000,39 +676,68 @@ export async function compilePalmModel(
       curBuf = altBuf;
       altBuf = tmp;
 
-      // Save skip for backbone2 (after block 10 = last 128ch stride-1 block at 24x24)
+      // Save backbone skip connections for FPN
       if (i === 10) {
-        // Copy 24x24x128 from curBuf to backbone2SkipBuf
-        encoder.copyBufferToBuffer(curBuf, 0, backbone2SkipBuf, 0, 24 * 24 * 128 * 4);
+        // After block 10: 24x24x128 — skip for FPN level 2 (12→24)
+        encoder.copyBufferToBuffer(curBuf, 0, backbone24SkipBuf, 0, 24 * 24 * 128 * 4);
+      }
+      if (i === 14) {
+        // After block 14: 12x12x256 — skip for FPN level 1 (6→12)
+        encoder.copyBufferToBuffer(curBuf, 0, backbone12SkipBuf, 0, 12 * 12 * 256 * 4);
       }
     }
 
-    // After backbone: curBuf has 12x12x256
+    // After backbone block 18: curBuf has 6x6x256
 
-    // Extra block A at 12x12
-    encodeDwPwBlock(encoder, extraBlockA, curBuf, altBuf, curBuf);
+    // ============ FPN Level 1: 6→12 ============
+    // Step 1: conv1x1+PReLU (conv2d_20) on 6x6x256 → 6x6x256
+    encodeConv1x1PReLU(encoder, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, 256, 256, 6, 6);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // Extra block B at 12x12
-    encodeDwPwBlock(encoder, extraBlockB, curBuf, altBuf, curBuf);
+    // Step 2: Upsample 6→12 + add backbone12Skip (12x12x256)
+    {
+      const uniform = makeUniform(new Uint32Array([1, 256, 6, 6, 12, 12]));
+      const bg = device.createBindGroup({
+        layout: upsampleAddLayout,
+        entries: [
+          { binding: 0, resource: { buffer: curBuf } },
+          { binding: 1, resource: { buffer: backbone12SkipBuf } },
+          { binding: 2, resource: { buffer: altBuf } },
+          { binding: 3, resource: { buffer: uniform } },
+        ],
+      });
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(upsampleAddPipe);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(ceil(12, 8), ceil(12, 8), 256);
+      pass.end();
+    }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // 12x12 SSD heads (on curBuf = 12x12x256)
+    // Step 3: FPN 12x12 refinement blocks
+    encodeDwPwBlock(encoder, fpn12Block1, curBuf, altBuf, curBuf);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+
+    encodeDwPwBlock(encoder, fpn12Block2, curBuf, altBuf, curBuf);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+
+    // Step 4: 12x12 SSD heads (on curBuf = 12x12x256)
     encodeConv1x1(encoder, curBuf, cls16WBuf, cls16BBuf, cls16Buf, 256, 6, 12, 12);
     encodeConv1x1(encoder, curBuf, reg16WBuf, reg16BBuf, reg16Buf, 256, 108, 12, 12);
 
-    // FPN: project 256→128 + PReLU at 12x12
-    encodeConv1x1PReLU(encoder, curBuf, fpnProjWBuf, fpnProjBBuf, fpnProjAlphaBuf, altBuf, 256, 128, 12, 12);
+    // ============ FPN Level 2: 12→24 ============
+    // Step 5: conv1x1+PReLU (conv2d_23) on 12x12: 256→128
+    encodeConv1x1PReLU(encoder, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, 256, 128, 12, 12);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // Upsample 12→24 + add backbone2 skip (24x24x128)
+    // Step 6: Upsample 12→24 + add backbone24Skip (24x24x128)
     {
       const uniform = makeUniform(new Uint32Array([1, 128, 12, 12, 24, 24]));
       const bg = device.createBindGroup({
         layout: upsampleAddLayout,
         entries: [
           { binding: 0, resource: { buffer: curBuf } },
-          { binding: 1, resource: { buffer: backbone2SkipBuf } },
+          { binding: 1, resource: { buffer: backbone24SkipBuf } },
           { binding: 2, resource: { buffer: altBuf } },
           { binding: 3, resource: { buffer: uniform } },
         ],
@@ -1045,15 +750,14 @@ export async function compilePalmModel(
     }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // FPN 24x24 block 1
-    encodeDwPwBlock(encoder, fpnBlock1, curBuf, altBuf, curBuf);
+    // Step 7: FPN 24x24 refinement blocks
+    encodeDwPwBlock(encoder, fpn24Block1, curBuf, altBuf, curBuf);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // FPN 24x24 block 2
-    encodeDwPwBlock(encoder, fpnBlock2, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(encoder, fpn24Block2, curBuf, altBuf, curBuf);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
 
-    // 24x24 SSD heads (on curBuf = 24x24x128)
+    // Step 8: 24x24 SSD heads (on curBuf = 24x24x128)
     encodeConv1x1(encoder, curBuf, cls8WBuf, cls8BBuf, cls8Buf, 128, 2, 24, 24);
     encodeConv1x1(encoder, curBuf, reg8WBuf, reg8BBuf, reg8Buf, 128, 36, 24, 24);
 
@@ -1226,33 +930,75 @@ export async function compilePalmModel(
       altBuf = tmp;
 
       // Read back after key blocks
-      if (i === 0 || i === 3 || i === 7 || i === 11 || i === 17) {
+      if (i === 0 || i === 3 || i === 7 || i === 11 || i === 14 || i === 15 || i === 18) {
         const outH = block.stride === 2 ? block.inH / 2 : block.inH;
         const size = outH * outH * block.outCh;
         result[`block${i}`] = stats(await debugReadBuffer(curBuf, size));
       }
 
+      // Save backbone skip connections for FPN
       if (i === 10) {
         enc = device.createCommandEncoder();
-        enc.copyBufferToBuffer(curBuf, 0, backbone2SkipBuf, 0, 24 * 24 * 128 * 4);
+        enc.copyBufferToBuffer(curBuf, 0, backbone24SkipBuf, 0, 24 * 24 * 128 * 4);
+        device.queue.submit([enc.finish()]);
+      }
+      if (i === 14) {
+        enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(curBuf, 0, backbone12SkipBuf, 0, 12 * 12 * 256 * 4);
         device.queue.submit([enc.finish()]);
       }
     }
 
-    // Extra blocks
+    // ============ FPN Level 1: 6→12 ============
+
+    // conv1x1+PReLU (conv2d_20) on 6x6x256
     enc = device.createCommandEncoder();
-    encodeDwPwBlock(enc, extraBlockA, curBuf, altBuf, curBuf);
+    encodeConv1x1PReLU(enc, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, 256, 256, 6, 6);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.extraBlockA = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+    result.fpn6to12Conv = stats(await debugReadBuffer(curBuf, 6 * 6 * 256));
 
+    // Upsample 6→12 + add backbone12Skip
     enc = device.createCommandEncoder();
-    encodeDwPwBlock(enc, extraBlockB, curBuf, altBuf, curBuf);
+    {
+      const uniform = makeUniform(new Uint32Array([1, 256, 6, 6, 12, 12]));
+      const bg = device.createBindGroup({
+        layout: upsampleAddLayout,
+        entries: [
+          { binding: 0, resource: { buffer: curBuf } },
+          { binding: 1, resource: { buffer: backbone12SkipBuf } },
+          { binding: 2, resource: { buffer: altBuf } },
+          { binding: 3, resource: { buffer: uniform } },
+        ],
+      });
+      const pass = enc.beginComputePass();
+      pass.setPipeline(upsampleAddPipe);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(ceil(12, 8), ceil(12, 8), 256);
+      pass.end();
+    }
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.extraBlockB = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+    result.fpnUpsample6to12 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
 
-    // SSD head
+    // backbone12 skip check
+    result.backbone12Skip = stats(await debugReadBuffer(backbone12SkipBuf, 12 * 12 * 256));
+
+    // FPN 12x12 block 1 (dw_19 + conv2d_21)
+    enc = device.createCommandEncoder();
+    encodeDwPwBlock(enc, fpn12Block1, curBuf, altBuf, curBuf);
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.fpn12Block1 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+
+    // FPN 12x12 block 2 (dw_20 + conv2d_22)
+    enc = device.createCommandEncoder();
+    encodeDwPwBlock(enc, fpn12Block2, curBuf, altBuf, curBuf);
+    device.queue.submit([enc.finish()]);
+    { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    result.fpn12Block2 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+
+    // 12x12 SSD heads
     enc = device.createCommandEncoder();
     encodeConv1x1(enc, curBuf, cls16WBuf, cls16BBuf, cls16Buf, 256, 6, 12, 12);
     device.queue.submit([enc.finish()]);
@@ -1263,17 +1009,19 @@ export async function compilePalmModel(
     device.queue.submit([enc.finish()]);
     result.reg16 = stats(await debugReadBuffer(reg16Buf, 15552), 500);
 
-    // FPN debug: project 256→128 at 12x12
+    // ============ FPN Level 2: 12→24 ============
+
+    // conv1x1+PReLU (conv2d_23) on 12x12: 256→128
     enc = device.createCommandEncoder();
-    encodeConv1x1PReLU(enc, curBuf, fpnProjWBuf, fpnProjBBuf, fpnProjAlphaBuf, altBuf, 256, 128, 12, 12);
+    encodeConv1x1PReLU(enc, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, 256, 128, 12, 12);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpnProj = stats(await debugReadBuffer(curBuf, 12 * 12 * 128));
+    result.fpn12to24Conv = stats(await debugReadBuffer(curBuf, 12 * 12 * 128));
 
-    // backbone2 skip
-    result.backbone2Skip = stats(await debugReadBuffer(backbone2SkipBuf, 24 * 24 * 128));
+    // backbone24 skip check
+    result.backbone24Skip = stats(await debugReadBuffer(backbone24SkipBuf, 24 * 24 * 128));
 
-    // Upsample 12→24 + add backbone2 skip
+    // Upsample 12→24 + add backbone24Skip
     enc = device.createCommandEncoder();
     {
       const uniform = makeUniform(new Uint32Array([1, 128, 12, 12, 24, 24]));
@@ -1281,7 +1029,7 @@ export async function compilePalmModel(
         layout: upsampleAddLayout,
         entries: [
           { binding: 0, resource: { buffer: curBuf } },
-          { binding: 1, resource: { buffer: backbone2SkipBuf } },
+          { binding: 1, resource: { buffer: backbone24SkipBuf } },
           { binding: 2, resource: { buffer: altBuf } },
           { binding: 3, resource: { buffer: uniform } },
         ],
@@ -1294,21 +1042,21 @@ export async function compilePalmModel(
     }
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpnUpsample = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+    result.fpnUpsample12to24 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
 
-    // FPN block 1
+    // FPN 24x24 block 1 (dw_21 + conv2d_24)
     enc = device.createCommandEncoder();
-    encodeDwPwBlock(enc, fpnBlock1, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(enc, fpn24Block1, curBuf, altBuf, curBuf);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpnBlock1 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+    result.fpn24Block1 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
 
-    // FPN block 2
+    // FPN 24x24 block 2 (dw_22 + conv2d_25)
     enc = device.createCommandEncoder();
-    encodeDwPwBlock(enc, fpnBlock2, curBuf, altBuf, curBuf);
+    encodeDwPwBlock(enc, fpn24Block2, curBuf, altBuf, curBuf);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpnBlock2 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+    result.fpn24Block2 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
 
     // 24x24 SSD heads
     enc = device.createCommandEncoder();
@@ -1328,7 +1076,7 @@ export async function compilePalmModel(
     result.cls16Bias = stats(await debugReadBuffer(cls16BBuf, 6), 6);
     result.cls8Weights = stats(await debugReadBuffer(cls8WBuf, 100), 100);
     result.cls8Bias = stats(await debugReadBuffer(cls8BBuf, 2), 2);
-    result.fpnProjWeights = stats(await debugReadBuffer(fpnProjWBuf, 100), 100);
+    result.fpn6to12Weights = stats(await debugReadBuffer(fpn6to12WBuf, 100), 100);
 
     return result;
   }
