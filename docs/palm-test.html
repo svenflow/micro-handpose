@@ -351,10 +351,17 @@
 
     // Auto-run on load
     window.addEventListener('load', async () => {
-      addLog('Auto-running palm detection test...');
-      await window.testPalmDetection();
-      addLog('Auto-running full pipeline test...');
-      await window.testFullPipeline();
+      try {
+        addLog('WebGPU: ' + (navigator.gpu ? 'available' : 'NOT available'));
+        addLog('Auto-running palm detection test...');
+        await window.testPalmDetection();
+        addLog('Auto-running full pipeline test...');
+        await window.testFullPipeline();
+      } catch (e) {
+        addLog('FATAL: ' + e.message + '\n' + e.stack);
+        document.body.style.color = '#f88';
+        document.body.insertAdjacentHTML('afterbegin', '<div style="background:#800;padding:20px;font-size:18px;">' + e.message + '</div>');
+      }
     });
 
     // ============ Comparison Test ============
