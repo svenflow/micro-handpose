@@ -21,6 +21,7 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   const {
     weightsUrl,
     scoreThreshold = 0.5,
+    forceF32 = false,
   } = options;
 
   // Check WebGPU support
@@ -47,7 +48,7 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   const weights = loadWeightsFromBuffer(metadata, buffer);
 
   // Compile model
-  const model: CompiledModel = await compileModel(weights);
+  const model: CompiledModel = await compileModel(weights, { forceF32 });
 
   // Scratch canvas for converting various input types to ImageBitmap
   let scratchCanvas: OffscreenCanvas | null = null;

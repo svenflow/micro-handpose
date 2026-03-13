@@ -235,6 +235,7 @@ interface LayerDispatchInfo {
  */
 export async function compileModel(
   weights: Map<string, Tensor>,
+  options?: { forceF32?: boolean },
 ): Promise<CompiledModel> {
   if (!navigator.gpu) {
     throw new Error('WebGPU not supported');
@@ -281,7 +282,7 @@ export async function compileModel(
 
   // Use f16 weights if validated AND weights have f16 data
   const firstWeight = weights.values().next().value as Tensor | undefined;
-  const useF16 = f16Works && !!firstWeight?.rawF16;
+  const useF16 = f16Works && !!firstWeight?.rawF16 && !options?.forceF32;
   if (useF16) {
     console.log('[micro-handpose] Using f16 weight storage (shader-f16 validated)');
   } else {

@@ -31,6 +31,8 @@ export interface HandposeOptions {
   weightsUrl?: string;
   /** Minimum confidence score to return a detection (0-1). Default: 0.5 */
   scoreThreshold?: number;
+  /** Force f32 weights even when shader-f16 is available. Default: false */
+  forceF32?: boolean;
 }
 
 /** A handpose detector instance */
