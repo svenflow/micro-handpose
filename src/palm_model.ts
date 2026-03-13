@@ -782,7 +782,7 @@ export async function compilePalmModel(
   const dwOutBuf = makeBuf(buf192, SO); // DW output buffer
 
   // Save buffers for skip connections
-  const backbone2SkipBuf = makeBuf(24 * 24 * 128 * 4, SO); // After block 10 (24x24x128)
+  const backbone2SkipBuf = makeBuf(24 * 24 * 128 * 4, SO | GPUBufferUsage.COPY_DST); // After block 10 (24x24x128)
   // For FPN upsample+add at 24x24
   const fpnUpsampleBuf = makeBuf(24 * 24 * 128 * 4, SO);
 
