@@ -21,6 +21,8 @@ function S(s: string): string {
  * TFLite SAME padding for 5x5 stride-2 on 192:
  *   total_pad = (96-1)*2 + 5 - 192 = 3
  *   pad_top = 1, pad_left = 1
+ *
+ * Uses vec3 dot product for the 3 input channels per kernel position.
  */
 export const PALM_CONV5X5_STRIDE2_PRELU_SHADER = S(`
 struct ConvParams { batch:u32, in_channels:u32, out_channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, }
@@ -37,18 +39,24 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   if(out_x>=params.out_width||out_y>=params.out_height||batch>=params.batch){return;}
   var sum:f32=0.0;
   let in_h=i32(params.in_height); let in_w=i32(params.in_width);
-  for(var ic:u32=0u;ic<params.in_channels;ic=ic+1u){
-    for(var ky:u32=0u;ky<5u;ky=ky+1u){
-      for(var kx:u32=0u;kx<5u;kx=kx+1u){
-        // SAME padding: pad_top=1, pad_left=1
-        let in_y=i32(out_y*2u+ky)-1;
-        let in_x=i32(out_x*2u+kx)-1;
-        if(in_y>=0 && in_y<in_h && in_x>=0 && in_x<in_w){
-          let in_idx=batch*params.in_channels*params.in_height*params.in_width+ic*params.in_height*params.in_width+u32(in_y)*params.in_width+u32(in_x);
-          let w_idx=oc*5u*5u*params.in_channels+ky*5u*params.in_channels+kx*params.in_channels+ic;
-          sum=sum+input[in_idx]*weight[w_idx];
-        }
-      }
+  let in_stride=params.in_height*params.in_width;
+  let in_batch_base=batch*params.in_channels*in_stride;
+  for(var ky:u32=0u;ky<5u;ky=ky+1u){
+    let in_y=i32(out_y*2u+ky)-1;
+    if(in_y<0 || in_y>=in_h){continue;}
+    for(var kx:u32=0u;kx<5u;kx=kx+1u){
+      let in_x=i32(out_x*2u+kx)-1;
+      if(in_x<0 || in_x>=in_w){continue;}
+      let pix_off=u32(in_y)*params.in_width+u32(in_x);
+      // Load all 3 input channels for this pixel into vec3, dot with 3 weights
+      let inp=vec3<f32>(
+        input[in_batch_base+pix_off],
+        input[in_batch_base+in_stride+pix_off],
+        input[in_batch_base+2u*in_stride+pix_off]
+      );
+      let w_off=oc*75u+ky*15u+kx*3u;
+      let w=vec3<f32>(weight[w_off],weight[w_off+1u],weight[w_off+2u]);
+      sum+=dot(inp,w);
     }
   }
   sum=sum+bias[oc];
@@ -101,12 +109,16 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 
 /**
  * Pointwise 1x1 conv + channel-padding skip + PReLU.
+ * Uses vec4 packing for 4x fewer loop iterations and hardware dot() for
+ * deterministic accumulation matching MediaPipe's WebGL matmul shaders.
  *
  * Skip connection uses zero-padding: if oc < in_channels, skip from input;
  * if oc >= in_channels, skip is 0 (the padded channels).
  * When stride==2, skip uses max_pool_2d(2x2) for spatial downsampling.
  *
  * PReLU: result = max(0, pw+skip) + alpha * min(0, pw+skip)
+ *
+ * REQUIRES: in_channels divisible by 4 (true for all palm model blocks: 32,64,128,256)
  */
 export const PALM_POINTWISE_SKIP_PRELU_SHADER = S(`
 struct PointwiseParams { batch:u32, in_channels:u32, out_channels:u32, height:u32, width:u32, channel_pad:u32, stride:u32, in_height:u32, in_width:u32, }
@@ -125,8 +137,23 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   var sum:f32=0.0;
   let dw_base=batch*params.in_channels*params.height*params.width+out_y*params.width+out_x;
   let w_base=oc*params.in_channels; let spatial_stride=params.height*params.width;
-  for(var ic:u32=0u;ic<params.in_channels;ic=ic+1u){
-    sum+=dw_output[dw_base+ic*spatial_stride]*pw_weight[w_base+ic];
+  // vec4 dot product accumulation: 4x fewer iterations, deterministic hardware dot()
+  let ic4=params.in_channels/4u;
+  for(var i:u32=0u;i<ic4;i=i+1u){
+    let ic=i*4u;
+    let inp=vec4<f32>(
+      dw_output[dw_base+ic*spatial_stride],
+      dw_output[dw_base+(ic+1u)*spatial_stride],
+      dw_output[dw_base+(ic+2u)*spatial_stride],
+      dw_output[dw_base+(ic+3u)*spatial_stride]
+    );
+    let w=vec4<f32>(
+      pw_weight[w_base+ic],
+      pw_weight[w_base+ic+1u],
+      pw_weight[w_base+ic+2u],
+      pw_weight[w_base+ic+3u]
+    );
+    sum+=dot(inp,w);
   }
   sum+=pw_bias[oc];
   // Skip connection: zero-pad channels
@@ -160,7 +187,10 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 /**
  * Conv 1x1 shader for SSD output heads and FPN projection.
  * No activation — raw output for classifier/regressor heads.
+ * Uses vec4 dot product accumulation for deterministic precision.
  * Weight: [outCh, 1, 1, inCh], Bias: [outCh]
+ *
+ * REQUIRES: in_channels divisible by 4
  */
 export const PALM_CONV1X1_SHADER = S(`
 struct Conv1x1Params { batch:u32, in_channels:u32, out_channels:u32, height:u32, width:u32, }
@@ -175,10 +205,25 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let oc=oc_batch%params.out_channels; let batch=oc_batch/params.out_channels;
   if(out_x>=params.width||out_y>=params.height||batch>=params.batch){return;}
   var sum:f32=0.0;
-  for(var ic:u32=0u;ic<params.in_channels;ic=ic+1u){
-    let in_idx=batch*params.in_channels*params.height*params.width+ic*params.height*params.width+out_y*params.width+out_x;
-    let w_idx=oc*params.in_channels+ic;
-    sum=sum+input[in_idx]*weight[w_idx];
+  let in_base=batch*params.in_channels*params.height*params.width+out_y*params.width+out_x;
+  let w_base=oc*params.in_channels;
+  let spatial_stride=params.height*params.width;
+  let ic4=params.in_channels/4u;
+  for(var i:u32=0u;i<ic4;i=i+1u){
+    let ic=i*4u;
+    let inp=vec4<f32>(
+      input[in_base+ic*spatial_stride],
+      input[in_base+(ic+1u)*spatial_stride],
+      input[in_base+(ic+2u)*spatial_stride],
+      input[in_base+(ic+3u)*spatial_stride]
+    );
+    let w=vec4<f32>(
+      weight[w_base+ic],
+      weight[w_base+ic+1u],
+      weight[w_base+ic+2u],
+      weight[w_base+ic+3u]
+    );
+    sum+=dot(inp,w);
   }
   sum=sum+bias[oc];
   let out_idx=batch*params.out_channels*params.height*params.width+oc*params.height*params.width+out_y*params.width+out_x;
@@ -216,6 +261,9 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 
 /**
  * Conv 1x1 + PReLU for FPN feature projection.
+ * Uses vec4 dot product accumulation for deterministic precision.
+ *
+ * REQUIRES: in_channels divisible by 4
  */
 export const PALM_CONV1X1_PRELU_SHADER = S(`
 struct Conv1x1Params { batch:u32, in_channels:u32, out_channels:u32, height:u32, width:u32, }
@@ -231,10 +279,25 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let oc=oc_batch%params.out_channels; let batch=oc_batch/params.out_channels;
   if(out_x>=params.width||out_y>=params.height||batch>=params.batch){return;}
   var sum:f32=0.0;
-  for(var ic:u32=0u;ic<params.in_channels;ic=ic+1u){
-    let in_idx=batch*params.in_channels*params.height*params.width+ic*params.height*params.width+out_y*params.width+out_x;
-    let w_idx=oc*params.in_channels+ic;
-    sum=sum+input[in_idx]*weight[w_idx];
+  let in_base=batch*params.in_channels*params.height*params.width+out_y*params.width+out_x;
+  let w_base=oc*params.in_channels;
+  let spatial_stride=params.height*params.width;
+  let ic4=params.in_channels/4u;
+  for(var i:u32=0u;i<ic4;i=i+1u){
+    let ic=i*4u;
+    let inp=vec4<f32>(
+      input[in_base+ic*spatial_stride],
+      input[in_base+(ic+1u)*spatial_stride],
+      input[in_base+(ic+2u)*spatial_stride],
+      input[in_base+(ic+3u)*spatial_stride]
+    );
+    let w=vec4<f32>(
+      weight[w_base+ic],
+      weight[w_base+ic+1u],
+      weight[w_base+ic+2u],
+      weight[w_base+ic+3u]
+    );
+    sum+=dot(inp,w);
   }
   sum=sum+bias[oc];
   let a=alpha[oc];

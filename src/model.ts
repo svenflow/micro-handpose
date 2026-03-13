@@ -70,6 +70,7 @@ export interface CompiledModel {
   device: GPUDevice;
   run: (input: Float32Array) => Promise<HandLandmarksOutput>;
   runFromCanvas: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<HandLandmarksOutput>;
+  runFromGPUBuffer: (inputBuffer: GPUBuffer) => Promise<HandLandmarksOutput>;
   runFromCanvasPipelined: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<HandLandmarksOutput | null>;
   flushPipelined: () => Promise<HandLandmarksOutput | null>;
   benchmark: (iterations?: number) => Promise<{ avgMs: number; fps: number }>;
@@ -1163,6 +1164,46 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     };
   }
 
+  // ============ Run from GPUBuffer (zero-copy GPU crop → inference) ============
+  // Input: GPUBuffer containing CHW float32 [3, 256, 256] already on GPU
+  // Copies to bufRawInput, then runs pad + inference (no CPU roundtrip)
+  async function runFromGPUBuffer(inputBuffer: GPUBuffer): Promise<HandLandmarksOutput> {
+    const encoder = device.createCommandEncoder();
+
+    // Copy CHW data from crop output buffer into bufRawInput
+    encoder.copyBufferToBuffer(inputBuffer, 0, bufRawInput, 0, 3 * 256 * 256 * 4);
+
+    // GPU-side padding: 256x256 -> 257x257
+    {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(padInputPipeline);
+      pass.setBindGroup(0, padBG);
+      pass.dispatchWorkgroups(Math.ceil(256 / 16), Math.ceil(256 / 16), 3);
+      pass.end();
+    }
+
+    // Shared inference (conv → ResModules → output heads → readback)
+    encodeInference(encoder, readbackBuf);
+
+    device.queue.submit([encoder.finish()]);
+
+    // Wait for GPU completion, then map
+    const mapPromise = readbackBuf.mapAsync(GPUMapMode.READ);
+    await device.queue.onSubmittedWorkDone();
+    await mapPromise;
+    const mapped = new Float32Array(readbackBuf.getMappedRange());
+    outputHandflag[0] = mapped[0]!;
+    outputHandedness[0] = mapped[1]!;
+    outputLandmarks.set(mapped.subarray(2, 65));
+    readbackBuf.unmap();
+
+    return {
+      handflag: new Float32Array(outputHandflag),
+      handedness: new Float32Array(outputHandedness),
+      landmarks: new Float32Array(outputLandmarks),
+    };
+  }
+
   // ============ Render-based Readback (bypasses mapAsync) ============
   // Uses render pass to encode floats as RGBA8 pixels, reads via canvas getImageData
   // May be faster than mapAsync on Safari iOS
@@ -1571,7 +1612,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   return {
-    device, run, runFromCanvas, runFromCanvasViaRender, runFromCanvasPipelined, flushPipelined,
+    device, run, runFromCanvas, runFromGPUBuffer, runFromCanvasViaRender, runFromCanvasPipelined, flushPipelined,
     benchmark, benchmarkGPU, benchmarkDiagnostic, debugLayerOutputs,
   } satisfies CompiledModel;
 }

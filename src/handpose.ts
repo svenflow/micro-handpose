@@ -7,6 +7,8 @@ import type { Handpose, HandposeInput, HandposeOptions, HandposeResult, Landmark
 import { toKeypoints } from './types.js';
 import { createLandmarkSmoother } from './filter.js';
 import type { LandmarkSmoother } from './filter.js';
+import { createCropPipeline } from './crop_shader.js';
+import type { CropPipeline } from './crop_shader.js';
 
 // Default: jsdelivr CDN (auto-mirrors npm packages)
 const DEFAULT_WEIGHTS_BASE = 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@latest/weights';
@@ -110,6 +112,45 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   function getCropScratchCanvas(): OffscreenCanvas {
     if (!cropScratchCanvas) cropScratchCanvas = new OffscreenCanvas(256, 256);
     return cropScratchCanvas;
+  }
+
+  // GPU crop resources (lazy-initialized, reused across frames)
+  const cropDevice = landmarkModel.device;
+  let gpuCropPipeline: CropPipeline | null = null;
+  let gpuCropOutputBuffer: GPUBuffer | null = null;
+  let gpuCropSourceTexture: GPUTexture | null = null;
+  let gpuCropSourceWidth = 0;
+  let gpuCropSourceHeight = 0;
+
+  function ensureCropPipeline(): CropPipeline {
+    if (!gpuCropPipeline) {
+      gpuCropPipeline = createCropPipeline(cropDevice);
+    }
+    return gpuCropPipeline;
+  }
+
+  function ensureCropOutputBuffer(): GPUBuffer {
+    if (!gpuCropOutputBuffer) {
+      gpuCropOutputBuffer = cropDevice.createBuffer({
+        size: 3 * 256 * 256 * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+    }
+    return gpuCropOutputBuffer;
+  }
+
+  function ensureCropSourceTexture(width: number, height: number): GPUTexture {
+    if (!gpuCropSourceTexture || gpuCropSourceWidth !== width || gpuCropSourceHeight !== height) {
+      if (gpuCropSourceTexture) gpuCropSourceTexture.destroy();
+      gpuCropSourceTexture = cropDevice.createTexture({
+        size: [width, height],
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      gpuCropSourceWidth = width;
+      gpuCropSourceHeight = height;
+    }
+    return gpuCropSourceTexture;
   }
 
   // Letterbox padding for removing letterbox from detections
@@ -310,15 +351,67 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
 
     const results: HandposeResult[] = [];
 
-    // Step 2: For each detection, remove letterbox → compute ROI → crop → landmark
+    // Step 2: For each detection, remove letterbox → compute ROI → GPU crop → landmark
+    // Upload source image to GPU texture once per frame (reused across all hand crops)
+    const cropPipeline = ensureCropPipeline();
+    const cropOutputBuf = ensureCropOutputBuffer();
+
+    // Upload source to GPU texture (only for types supported by copyExternalImageToTexture)
+    const srcTexture = ensureCropSourceTexture(srcWidth, srcHeight);
+    if (source instanceof ImageData) {
+      // ImageData needs to go through a canvas first
+      const tmp = new OffscreenCanvas(source.width, source.height);
+      const tmpCtx = tmp.getContext('2d')!;
+      tmpCtx.putImageData(source, 0, 0);
+      cropDevice.queue.copyExternalImageToTexture(
+        { source: tmp },
+        { texture: srcTexture },
+        [srcWidth, srcHeight],
+      );
+    } else {
+      cropDevice.queue.copyExternalImageToTexture(
+        { source: source as HTMLCanvasElement | OffscreenCanvas | ImageBitmap | HTMLVideoElement | HTMLImageElement },
+        { texture: srcTexture },
+        [srcWidth, srcHeight],
+      );
+    }
+
     for (const rawDet of rawDetections) {
       // Remove letterbox from detection (letterbox → image normalized coords)
       const det = removeLetterbox(rawDet);
 
       // Compute pixel-based ROI matching MediaPipe's exact pipeline
       const pxROI = detectionToPixelROI(det, srcWidth, srcHeight);
-      const croppedCanvas = cropHandRegion(source, pxROI);
-      const output = await landmarkModel.runFromCanvas(croppedCanvas);
+
+      // Compute affine transform: crop pixel [0,256] → source normalized [0,1]
+      // The crop shader expects: source_x = a * crop_x + b * crop_y + tx
+      //                          source_y = c * crop_x + d * crop_y + ty
+      // where crop coords include +0.5 pixel center offset (handled in shader)
+      const cosR = Math.cos(pxROI.rotation);
+      const sinR = Math.sin(pxROI.rotation);
+      const s = pxROI.sizePx / 256; // scale from crop pixels to source pixels
+
+      // Affine: crop pixel (fx,fy) → source normalized coords via R(-rotation) + scale + translate
+      // fx = px + 0.5 (pixel center, added in shader)
+      // src_norm = R(-rot) * s/srcDim * (fx - 128) + center/srcDim
+      const a = cosR * s / srcWidth;
+      const b = sinR * s / srcWidth;
+      const tx = pxROI.centerXpx / srcWidth - 128 * (a + b);
+      const c = -sinR * s / srcHeight;
+      const d = cosR * s / srcHeight;
+      const ty = pxROI.centerYpx / srcHeight - 128 * (c + d);
+
+      // Run GPU crop shader
+      const encoder = cropDevice.createCommandEncoder();
+      cropPipeline.crop(
+        encoder, srcTexture, cropOutputBuf,
+        [a, b, tx, c, d, ty],
+        srcWidth, srcHeight, 256,
+      );
+      cropDevice.queue.submit([encoder.finish()]);
+
+      // Run landmark inference directly from GPU buffer (no CPU roundtrip)
+      const output = await landmarkModel.runFromGPUBuffer(cropOutputBuf);
       const handScore = output.handflag[0]!;
 
       if (handScore < scoreThreshold) continue;
@@ -326,9 +419,8 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       const isRight = output.handedness[0]! > 0.5;
 
       // Parse landmarks in crop space [0, 1] and project to original image [0, 1]
+      // cosR and sinR already computed above for the affine transform
       const landmarks: Landmark[] = [];
-      const cosR = Math.cos(pxROI.rotation);
-      const sinR = Math.sin(pxROI.rotation);
 
       for (let i = 0; i < 21; i++) {
         const lx = output.landmarks[i * 3]!;     // crop x [0,1]
@@ -378,11 +470,26 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   }
 
   function dispose(): void {
+    if (gpuCropSourceTexture) gpuCropSourceTexture.destroy();
+    if (gpuCropOutputBuffer) gpuCropOutputBuffer.destroy();
+    gpuCropSourceTexture = null;
+    gpuCropOutputBuffer = null;
+    gpuCropPipeline = null;
     landmarkModel.device.destroy();
     palmModel.device.destroy();
     palmScratchCanvas = null;
     cropScratchCanvas = null;
   }
 
-  return { detect, dispose };
+  // Expose internals for debugging
+  const _debug = {
+    palmDetector,
+    palmModel,
+    landmarkModel,
+    removeLetterbox,
+    detectionToPixelROI,
+    cropHandRegion,
+  };
+
+  return { detect, dispose, _debug };
 }

@@ -69,6 +69,9 @@ export interface Handpose {
 
   /** Dispose GPU resources */
   dispose: () => void;
+
+  /** Internal debug access (not part of public API) */
+  _debug?: any;
 }
 
 /** Accepted input types for detection */

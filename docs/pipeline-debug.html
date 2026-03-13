@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head><title>Pipeline Debug</title></head>
+<body style="font-family:monospace;background:#1a1a1a;color:#eee;padding:20px">
+<pre id="log">Loading...</pre>
+<script type="module">
+const log = document.getElementById('log');
+function l(msg) { log.textContent += msg + '\n'; console.log(msg); }
+log.textContent = '';
+
+try {
+  l('Loading image...');
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  await new Promise(r => { img.onload = r; img.src = 'hand_nikhil.jpg'; });
+  l('Image: ' + img.naturalWidth + 'x' + img.naturalHeight);
+
+  l('\nLoading micro-handpose...');
+  const { createHandpose } = await import('./dist/index.js?v=pipeline_debug');
+  const h = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.01, palmScoreThreshold: 0.01 });
+  l('micro-handpose ready');
+
+  const dbg = h._debug;
+  if (!dbg) { l('ERROR: no _debug!'); throw new Error('no debug'); }
+
+  // Step 1: Get raw palm detection
+  l('\n=== STEP 1: Palm Detection ===');
+  const { detections, lbPadX, lbPadY } = await dbg.palmDetector.detectRawWithResize(img, 1500, 2000);
+  l('Letterbox padding: lbPadX=' + lbPadX.toFixed(6) + ' lbPadY=' + lbPadY.toFixed(6));
+  l('Detections: ' + detections.length);
+
+  const det = detections[0];
+  l('Raw detection (letterbox coords):');
+  l('  score: ' + det.score.toFixed(6));
+  l('  box (cx,cy,w,h): ' + det.box.map(v=>v.toFixed(6)).join(', '));
+  for (let k = 0; k < det.keypoints.length; k++) {
+    l('  kp' + k + ': [' + det.keypoints[k].map(v=>v.toFixed(6)).join(', ') + ']');
+  }
+
+  // Step 2: Remove letterbox
+  l('\n=== STEP 2: Remove Letterbox ===');
+  const unlb = dbg.removeLetterbox(det);
+  l('Image-space detection:');
+  l('  box (cx,cy,w,h): ' + unlb.box.map(v=>v.toFixed(6)).join(', '));
+  l('  kp0 (wrist): [' + unlb.keypoints[0].map(v=>v.toFixed(6)).join(', ') + ']');
+  l('  kp2 (midMCP): [' + unlb.keypoints[2].map(v=>v.toFixed(6)).join(', ') + ']');
+
+  // Step 3: ROI computation
+  l('\n=== STEP 3: ROI Computation ===');
+  const roi = dbg.detectionToPixelROI(unlb, 1500, 2000);
+  l('ROI:');
+  l('  center: (' + roi.centerXpx.toFixed(2) + ', ' + roi.centerYpx.toFixed(2) + ')');
+  l('  size: ' + roi.sizePx.toFixed(2) + 'px');
+  l('  rotation: ' + roi.rotation.toFixed(6) + ' rad (' + (roi.rotation*180/Math.PI).toFixed(2) + ' deg)');
+
+  // Step 4: Crop and get landmarks
+  l('\n=== STEP 4: Crop + Landmark ===');
+  const croppedCanvas = dbg.cropHandRegion(img, roi);
+  const output = await dbg.landmarkModel.runFromCanvas(croppedCanvas);
+  l('Handflag: ' + output.handflag[0].toFixed(6));
+  l('Handedness: ' + output.handedness[0].toFixed(6));
+  l('Raw landmarks (crop space, first 5):');
+  for (let i = 0; i < 5; i++) {
+    l('  ' + i + ': x=' + output.landmarks[i*3].toFixed(6) + ' y=' + output.landmarks[i*3+1].toFixed(6) + ' z=' + output.landmarks[i*3+2].toFixed(6));
+  }
+
+  // Step 5: Final projected landmarks
+  l('\n=== STEP 5: Final Landmarks (micro) ===');
+  const results = await h.detect(img);
+  const ml = results[0].landmarks;
+  for (let i = 0; i < 5; i++) {
+    l('  ' + i + ': x=' + ml[i].x.toFixed(6) + ' y=' + ml[i].y.toFixed(6));
+  }
+
+  // Step 6: MediaPipe comparison
+  l('\n=== STEP 6: MediaPipe Comparison ===');
+  const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+  const wasmFileset = await vision.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm');
+  const mp = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task', delegate: 'CPU' },
+    runningMode: 'IMAGE', numHands: 2,
+  });
+  const mpResults = mp.detect(img);
+  const mpl = mpResults.landmarks[0];
+  l('MediaPipe landmarks (first 5):');
+  for (let i = 0; i < 5; i++) {
+    l('  ' + i + ': x=' + mpl[i].x.toFixed(6) + ' y=' + mpl[i].y.toFixed(6));
+  }
+
+  // Step 7: Per-landmark comparison
+  l('\n=== STEP 7: Comparison ===');
+  let totalDist = 0;
+  for (let i = 0; i < 21; i++) {
+    const d = Math.sqrt((ml[i].x - mpl[i].x)**2 + (ml[i].y - mpl[i].y)**2);
+    totalDist += d;
+    l(String(i).padEnd(3) + ': dist=' + d.toFixed(6) + ' micro=(' + ml[i].x.toFixed(4) + ',' + ml[i].y.toFixed(4) + ') mp=(' + mpl[i].x.toFixed(4) + ',' + mpl[i].y.toFixed(4) + ')');
+  }
+  l('\nAvg dist: ' + (totalDist/21).toFixed(6) + ' (' + (totalDist/21*100).toFixed(3) + '%)');
+
+  // Store for access
+  window._debugData = { det, unlb, roi, output, ml, mpl, lbPadX, lbPadY };
+  l('\nDone. Data stored in window._debugData');
+
+} catch(e) {
+  l('ERROR: ' + e.message + '\n' + e.stack);
+}
+</script>
+</body>
+</html>
