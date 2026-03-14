@@ -178,7 +178,7 @@
 
         // Run micro-handpose
         statusEl.textContent = 'Loading micro-handpose...';
-        const { createHandpose } = await import('./dist/index.js?v=full_landmark');
+        const { createHandpose } = await import('./dist/index.js?v=full_landmark_2');
         const handpose = await createHandpose({
           weightsUrl: 'weights',
           scoreThreshold: 0.1,
