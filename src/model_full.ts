@@ -93,7 +93,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 
 // Initial conv 3x3 stride 2 + BN + ReLU6
 // Input: NCHW [1, 3, 224, 224], Output: [1, 24, 112, 112]
-// SAME padding for stride 2: pad = 1 (asymmetric: left/top=0, right/bottom=1 effectively)
+// TFLite SAME padding for stride 2: pad_before=0, pad_after=1 (asymmetric)
 const CONV3X3_S2_BN_RELU6_SHADER = S(`
 struct Params { in_channels:u32, out_channels:u32, in_h:u32, in_w:u32, out_h:u32, out_w:u32, }
 @group(0)@binding(0) var<storage,read> input:array<f32>;
@@ -110,7 +110,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   for(var ic:u32=0u;ic<params.in_channels;ic++){
     for(var ky:u32=0u;ky<3u;ky++){
       for(var kx:u32=0u;kx<3u;kx++){
-        let iy=i32(out_y*2u+ky)-1; let ix=i32(out_x*2u+kx)-1;
+        let iy=i32(out_y*2u+ky); let ix=i32(out_x*2u+kx);
         if(iy>=0 && iy<in_h && ix>=0 && ix<in_w){
           let in_idx=ic*params.in_h*params.in_w+u32(iy)*params.in_w+u32(ix);
           let w_idx=oc*params.in_channels*9u+ic*9u+ky*3u+kx;
@@ -539,6 +539,7 @@ export async function compileFullModel(
   const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
   const SO = GPUBufferUsage.STORAGE;
   const SOC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC;
+  const SOCD = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
   const UC = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
   function makeBuf(size: number, usage: number): GPUBuffer {
     return device.createBuffer({ size: Math.max(size, 4), usage });
@@ -602,14 +603,14 @@ export async function compileFullModel(
   const maxElements = 1152 * 112 * 112; // generous upper bound
   const maxSize = maxElements * 4;
 
-  const bufA = makeBuf(maxSize, SOC);  // primary buffer
-  const bufB = makeBuf(maxSize, SOC);  // secondary buffer
+  const bufA = makeBuf(maxSize, SOCD);  // primary buffer (needs CopySrc+CopyDst for ping-pong + copy)
+  const bufB = makeBuf(maxSize, SOCD);  // secondary buffer
   const bufExpand = makeBuf(maxSize, SO); // expand output / DW input
   const bufDW = makeBuf(maxSize, SO);     // DW output
   const bufResidual = makeBuf(maxSize, SC); // for saving input before block (residual)
 
-  // Input buffer for raw 224x224x3
-  const bufRawInput = makeBuf(3 * 224 * 224 * 4, SC);
+  // Input buffer for raw 224x224x3 (needs CopySrc for copyToBuffer, CopyDst for writeBuffer)
+  const bufRawInput = makeBuf(3 * 224 * 224 * 4, SOCD);
 
   // GAP output: [1, 1152]
   const bufGAP = makeBuf(1152 * 4, SOC);
@@ -621,7 +622,7 @@ export async function compileFullModel(
   const bufHandedness = makeBuf(4, SOC);
 
   // Unified output: [handflag, handedness, landmarks[63]] = 65 floats
-  const bufOutput = makeBuf(65 * 4, SOC);
+  const bufOutput = makeBuf(65 * 4, SOCD);  // needs CopyDst for copyBufferToBuffer dest
   const readbackBuf = makeBuf(65 * 4, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
 
   // Canvas input texture (224x224 rgba8unorm)
@@ -709,7 +710,10 @@ export async function compileFullModel(
     device.queue.writeBuffer(bd.dwB, 0, getWeightData(dwbt) as any);
 
     // DW params: channels, in_h, in_w, out_h, out_w, stride, pad, kernel
-    const dwPad = Math.floor(spec.dwKernel / 2);
+    // TFLite SAME padding: pad_before = floor((kernel - stride) / 2)
+    // For stride=1: symmetric (e.g. k=3→pad=1, k=5→pad=2)
+    // For stride=2: asymmetric (e.g. k=3→pad=0, k=5→pad=1)
+    const dwPad = Math.floor((spec.dwKernel - spec.stride) / 2);
     device.queue.writeBuffer(bd.dwU, 0, new Uint32Array([
       spec.expandCh, inH, inW, outH, outW, spec.stride, dwPad, spec.dwKernel
     ]));
@@ -774,10 +778,12 @@ export async function compileFullModel(
   // Identity_2 = [1, 1] → probably handedness bias
   // Identity_3 = [1, 63] → probably world landmarks bias
 
-  const landmarksWT = requireWeight('conv_landmarks');     // [63, 1152]
-  const worldLandmarksWT = requireWeight('conv_world_landmarks'); // [63, 1152]
-  const handflagWT = requireWeight('conv_handflag');        // [1, 1152]
-  const handednessWT = requireWeight('conv_handedness');    // [1, 1152]
+  // Duplicate keys in manifest: first occurrence = bias, second = weight.
+  // loadFullWeightsFromBuffer names them: base key, then key__1.
+  const landmarksWT = requireWeight('conv_landmarks__1');     // [63, 1152]
+  const worldLandmarksWT = requireWeight('conv_world_landmarks__1'); // [63, 1152]
+  const handflagWT = requireWeight('conv_handflag__1');        // [1, 1152]
+  const handednessWT = requireWeight('conv_handedness__1');    // [1, 1152]
 
   // Biases from Identity keys
   const landmarksBT = requireWeight('Identity');           // [1, 63]
@@ -970,7 +976,10 @@ export async function compileFullModel(
     const mapped = new Float32Array(readbackBuf.getMappedRange());
     outputHandflag[0] = mapped[0]!;
     outputHandedness[0] = mapped[1]!;
-    outputLandmarks.set(mapped.subarray(2, 65));
+    // Normalize landmarks from 224-pixel space to [0,1]
+    for (let i = 0; i < 63; i++) {
+      outputLandmarks[i] = mapped[2 + i]! / 224;
+    }
     readbackBuf.unmap();
 
     return {
@@ -1011,7 +1020,10 @@ export async function compileFullModel(
     const mapped = new Float32Array(readbackBuf.getMappedRange());
     outputHandflag[0] = mapped[0]!;
     outputHandedness[0] = mapped[1]!;
-    outputLandmarks.set(mapped.subarray(2, 65));
+    // Normalize landmarks from 224-pixel space to [0,1]
+    for (let i = 0; i < 63; i++) {
+      outputLandmarks[i] = mapped[2 + i]! / 224;
+    }
     readbackBuf.unmap();
 
     return {
@@ -1038,7 +1050,10 @@ export async function compileFullModel(
     const mapped = new Float32Array(readbackBuf.getMappedRange());
     outputHandflag[0] = mapped[0]!;
     outputHandedness[0] = mapped[1]!;
-    outputLandmarks.set(mapped.subarray(2, 65));
+    // Normalize landmarks from 224-pixel space to [0,1]
+    for (let i = 0; i < 63; i++) {
+      outputLandmarks[i] = mapped[2 + i]! / 224;
+    }
     readbackBuf.unmap();
 
     return {
@@ -1097,8 +1112,54 @@ export async function compileFullModel(
     };
   }
 
-  async function debugLayerOutputs() {
-    return {};
+  async function debugLayerOutputs(source?: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) {
+    // Read back intermediate buffers after running
+    const results: Record<string, any> = {};
+
+    async function readBufStats(buf: GPUBuffer, numFloats: number, label: string) {
+      const byteSize = numFloats * 4;
+      const rb = device.createBuffer({ size: byteSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(buf, 0, rb, 0, byteSize);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await rb.mapAsync(GPUMapMode.READ);
+      const data = new Float32Array(rb.getMappedRange());
+      let min = Infinity, max = -Infinity, nonZero = 0;
+      for (let i = 0; i < data.length; i++) {
+        if (data[i] < min) min = data[i];
+        if (data[i] > max) max = data[i];
+        if (data[i] !== 0) nonZero++;
+      }
+      const sample = Array.from(data.slice(0, 5));
+      rb.unmap();
+      rb.destroy();
+      results[label] = { min, max, nonZero, total: numFloats, sample };
+    }
+
+    // Run inference with synthetic input
+    const input = new Float32Array(3 * 224 * 224);
+    for (let i = 0; i < 224*224; i++) {
+      input[i] = 0.5;
+      input[224*224+i] = 0.3;
+      input[2*224*224+i] = 0.7;
+    }
+    device.queue.writeBuffer(bufRawInput, 0, input as any);
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(bufRawInput, 0, bufA, 0, 3 * 224 * 224 * 4);
+    encodeInference(encoder, readbackBuf);
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+
+    // Read key buffers
+    await readBufStats(bufA, 3 * 224 * 224, 'inputBufA');
+    await readBufStats(bufB, 24 * 112 * 112, 'afterInitConvBufB');
+    await readBufStats(bufGAP, 1152, 'gapOutput');
+    await readBufStats(bufLandmarks, 63, 'landmarks');
+    await readBufStats(bufHandflag, 1, 'handflag');
+    await readBufStats(bufOutput, 65, 'unifiedOutput');
+
+    return results;
   }
 
   return {
