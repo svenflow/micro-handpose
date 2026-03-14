@@ -1,5 +1,6 @@
-import { compileModel, loadWeightsFromBuffer } from './model.js';
+import { loadWeightsFromBuffer } from './model.js';
 import type { CompiledModel, WeightsMetadata } from './model.js';
+import { compileFullModel, loadFullWeightsFromBuffer } from './model_full.js';
 import { compilePalmModel } from './palm_model.js';
 import { createPalmDetector } from './palm_detection.js';
 import type { PalmDetection } from './palm_detection.js';
@@ -45,8 +46,8 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   const base = (weightsUrl ?? DEFAULT_WEIGHTS_BASE).replace(/\/$/, '') + '/';
 
   const [landmarkMetaRes, landmarkBinRes, palmMetaRes, palmBinRes] = await Promise.all([
-    fetch(`${base}weights_f16.json`),
-    fetch(`${base}weights_f16.bin`),
+    fetch(`${base}weights_f16_full.json`),
+    fetch(`${base}weights_f16_full.bin`),
     fetch(`${base}palm_detection_weights.json`),
     fetch(`${base}palm_detection_weights.bin`),
   ]);
@@ -63,26 +64,28 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     palmBinRes.arrayBuffer(),
   ]);
 
-  const landmarkWeights = loadWeightsFromBuffer(landmarkMeta, landmarkBuf);
+  const landmarkWeights = loadFullWeightsFromBuffer(landmarkMeta, landmarkBuf);
   const palmWeights = loadWeightsFromBuffer(palmMeta, palmBuf);
 
-  // Compile landmark model (with f16 self-test)
-  let landmarkModel = await compileModel(landmarkWeights, { forceF32 });
+  // FULL landmark model input size
+  const LANDMARK_SIZE = 224;
 
-  if (!forceF32) {
-    const testCanvas = new OffscreenCanvas(256, 256);
+  // Compile FULL landmark model (EfficientNet-B0, 224x224)
+  let landmarkModel = await compileFullModel(landmarkWeights);
+
+  // f16 self-test (FULL model doesn't have f16 toggle — always f32 BN weights)
+  {
+    const testCanvas = new OffscreenCanvas(LANDMARK_SIZE, LANDMARK_SIZE);
     const testCtx = testCanvas.getContext('2d')!;
     testCtx.fillStyle = '#886644';
-    testCtx.fillRect(0, 0, 256, 256);
+    testCtx.fillRect(0, 0, LANDMARK_SIZE, LANDMARK_SIZE);
     testCtx.fillStyle = '#cc9966';
-    testCtx.fillRect(50, 50, 156, 156);
+    testCtx.fillRect(50, 50, 124, 124);
     const testOutput = await landmarkModel.runFromCanvas(testCanvas);
     const allZero = testOutput.landmarks.every(v => v === 0) &&
                     testOutput.handflag.every(v => v === 0);
     if (allZero) {
-      console.warn('[micro-handpose] f16 model produced all-zero output — recompiling with f32');
-      landmarkModel.device.destroy();
-      landmarkModel = await compileModel(landmarkWeights, { forceF32: true });
+      console.warn('[micro-handpose] FULL model produced all-zero output on self-test');
     }
   }
 
@@ -110,7 +113,7 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   }
 
   function getCropScratchCanvas(): OffscreenCanvas {
-    if (!cropScratchCanvas) cropScratchCanvas = new OffscreenCanvas(256, 256);
+    if (!cropScratchCanvas) cropScratchCanvas = new OffscreenCanvas(LANDMARK_SIZE, LANDMARK_SIZE);
     return cropScratchCanvas;
   }
 
@@ -132,7 +135,7 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   function ensureCropOutputBuffer(): GPUBuffer {
     if (!gpuCropOutputBuffer) {
       gpuCropOutputBuffer = cropDevice.createBuffer({
-        size: 3 * 256 * 256 * 4,
+        size: 3 * LANDMARK_SIZE * LANDMARK_SIZE * 4,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
       });
     }
@@ -264,7 +267,7 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   }
 
   /**
-   * Crop a hand region from the source image and render to 256x256 canvas.
+   * Crop a hand region from the source image and render to LANDMARK_SIZE canvas.
    * Uses pixel-based ROI (center and size in original image pixels).
    * The crop is always SQUARE in pixel space, matching MediaPipe.
    */
@@ -273,13 +276,13 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     pxROI: { centerXpx: number; centerYpx: number; sizePx: number; rotation: number },
   ): OffscreenCanvas {
     const canvas = getCropScratchCanvas();
-    canvas.width = 256;
-    canvas.height = 256;
+    canvas.width = LANDMARK_SIZE;
+    canvas.height = LANDMARK_SIZE;
     const ctx = canvas.getContext('2d')!;
 
-    ctx.clearRect(0, 0, 256, 256);
+    ctx.clearRect(0, 0, LANDMARK_SIZE, LANDMARK_SIZE);
 
-    const s = 256 / pxROI.sizePx;
+    const s = LANDMARK_SIZE / pxROI.sizePx;
     const cosR = Math.cos(pxROI.rotation);
     const sinR = Math.sin(pxROI.rotation);
 
@@ -292,8 +295,9 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     const b = -sinR * s;
     const c = sinR * s;
     const d = cosR * s;
-    const e = -pxROI.centerXpx * a - pxROI.centerYpx * c + 128;
-    const f = -pxROI.centerXpx * b - pxROI.centerYpx * d + 128;
+    const half = LANDMARK_SIZE / 2;
+    const e = -pxROI.centerXpx * a - pxROI.centerYpx * c + half;
+    const f = -pxROI.centerXpx * b - pxROI.centerYpx * d + half;
 
     ctx.setTransform(a, b, c, d, e, f);
 
@@ -326,7 +330,7 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     if (source instanceof HTMLImageElement) {
       return [source.naturalWidth, source.naturalHeight];
     }
-    return [256, 256];
+    return [LANDMARK_SIZE, LANDMARK_SIZE];
   }
 
   async function detect(source: HandposeInput): Promise<HandposeResult[]> {
@@ -383,13 +387,13 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       // Compute pixel-based ROI matching MediaPipe's exact pipeline
       const pxROI = detectionToPixelROI(det, srcWidth, srcHeight);
 
-      // Compute affine transform: crop pixel [0,256] → source normalized [0,1]
+      // Compute affine transform: crop pixel [0,LANDMARK_SIZE] → source normalized [0,1]
       // The crop shader expects: source_x = a * crop_x + b * crop_y + tx
       //                          source_y = c * crop_x + d * crop_y + ty
       // where crop coords include +0.5 pixel center offset (handled in shader)
       const cosR = Math.cos(pxROI.rotation);
       const sinR = Math.sin(pxROI.rotation);
-      const s = pxROI.sizePx / 256; // scale from crop pixels to source pixels
+      const s = pxROI.sizePx / LANDMARK_SIZE; // scale from crop pixels to source pixels
 
       // Affine: crop pixel (fx,fy) → source normalized coords via R(+rotation) + scale + translate
       // The canvas crop applied R(-rotation) to go source→crop.
@@ -397,19 +401,20 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       // R(θ) = [[cos, -sin], [sin, cos]]
       // src_x = cos(r)/s * crop_x - sin(r)/s * crop_y + ...  (in pixel space)
       // Then normalize by dividing by srcWidth/srcHeight
+      const halfLM = LANDMARK_SIZE / 2;
       const a = cosR * s / srcWidth;
       const b = -sinR * s / srcWidth;
-      const tx = pxROI.centerXpx / srcWidth - 128 * (a + b);
+      const tx = pxROI.centerXpx / srcWidth - halfLM * (a + b);
       const c = sinR * s / srcHeight;
       const d = cosR * s / srcHeight;
-      const ty = pxROI.centerYpx / srcHeight - 128 * (c + d);
+      const ty = pxROI.centerYpx / srcHeight - halfLM * (c + d);
 
       // Run GPU crop shader
       const encoder = cropDevice.createCommandEncoder();
       cropPipeline.crop(
         encoder, srcTexture, cropOutputBuf,
         [a, b, tx, c, d, ty],
-        srcWidth, srcHeight, 256,
+        srcWidth, srcHeight, LANDMARK_SIZE,
       );
       cropDevice.queue.submit([encoder.finish()]);
 
@@ -430,7 +435,7 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
         const ly = output.landmarks[i * 3 + 1]!; // crop y [0,1]
         const lz = output.landmarks[i * 3 + 2]!;
 
-        // Project from 256x256 crop back to original image pixels
+        // Project from LANDMARK_SIZE crop back to original image pixels
         // Crop [0,1] → centered [-0.5,0.5] → scale by physical size → inverse rotate → add center
         const dx = (lx - 0.5) * pxROI.sizePx;
         const dy = (ly - 0.5) * pxROI.sizePx;
