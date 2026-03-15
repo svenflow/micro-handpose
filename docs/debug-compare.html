@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug: micro vs MediaPipe WebGPU pipeline</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; max-width: 1800px; }
+    .box { background: #222; padding: 15px; border-radius: 8px; margin: 10px 0; }
+    .row { display: flex; gap: 15px; flex-wrap: wrap; align-items: start; }
+    canvas { border: 1px solid #444; }
+    #log { white-space: pre-wrap; font-size: 11px; max-height: 800px; overflow-y: auto; background: #111; padding: 10px; border-radius: 5px; }
+    .status { font-size: 14px; padding: 6px 12px; border-radius: 5px; margin: 5px 0; }
+    .status.ok { background: #143; color: #3f8; }
+    .status.err { background: #421; color: #f84; }
+    .status.working { background: #331; color: #fe8; }
+    h2 { color: #8af; margin: 8px 0; font-size: 14px; }
+    h3 { font-size: 12px; margin: 4px 0; color: #aaa; }
+    table { border-collapse: collapse; font-size: 11px; }
+    td, th { border: 1px solid #444; padding: 3px 6px; }
+    th { background: #333; }
+    .good { color: #3f8; }
+    .mid { color: #fe8; }
+    .bad { color: #f84; }
+  </style>
+</head>
+<body>
+  <h1>Debug: micro-handpose vs MediaPipe WebGPU</h1>
+  <div class="box">
+    <div id="status" class="status working">Loading...</div>
+  </div>
+
+  <div class="box">
+    <h2>Stage 1: Palm Detection Comparison</h2>
+    <div id="palm-log"></div>
+  </div>
+
+  <div class="box">
+    <h2>Stage 2: Crop ROI Comparison</h2>
+    <div class="row">
+      <div><h3>micro crop (224x224)</h3><canvas id="micro-crop" width="224" height="224"></canvas></div>
+      <div><h3>MediaPipe crop (approx)</h3><canvas id="mp-crop" width="224" height="224"></canvas></div>
+      <div><h3>Crop diff (10x)</h3><canvas id="crop-diff" width="224" height="224"></canvas></div>
+    </div>
+    <div id="crop-log"></div>
+  </div>
+
+  <div class="box">
+    <h2>Stage 3: Raw Landmark Output (crop space [0,1])</h2>
+    <div class="row">
+      <div><h3>micro overlay on crop</h3><canvas id="micro-crop-lm" width="224" height="224"></canvas></div>
+      <div><h3>MediaPipe overlay on image</h3><canvas id="mp-overlay" width="400" height="400"></canvas></div>
+    </div>
+    <div id="landmark-table"></div>
+  </div>
+
+  <div class="box">
+    <h2>Stage 4: Projected Landmarks (image space [0,1])</h2>
+    <div class="row">
+      <div><h3>micro on image</h3><canvas id="micro-img" width="400" height="400"></canvas></div>
+      <div><h3>MediaPipe on image</h3><canvas id="mp-img" width="400" height="400"></canvas></div>
+      <div><h3>Both overlaid</h3><canvas id="both-img" width="400" height="400"></canvas></div>
+    </div>
+    <div id="projected-table"></div>
+  </div>
+
+  <div class="box">
+    <h2>Full Log</h2>
+    <div id="log"></div>
+  </div>
+
+  <script type="module">
+    const log = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+
+    function addLog(msg, target) {
+      const el = target ? document.getElementById(target) : log;
+      if (el) { el.textContent = (el.textContent || '') + msg + '\n'; }
+      console.log(msg);
+    }
+
+    const NAMES = [
+      'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+      'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+      'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+      'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+      'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+    ];
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17],
+    ];
+
+    function drawHand(ctx, landmarks, w, h, color, lineWidth=2, dotSize=3) {
+      ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = lineWidth;
+      for (const [a, b] of CONNECTIONS) {
+        const la = landmarks[a], lb = landmarks[b];
+        if (!la || !lb) continue;
+        ctx.beginPath();
+        ctx.moveTo(la.x * w, la.y * h);
+        ctx.lineTo(lb.x * w, lb.y * h);
+        ctx.stroke();
+      }
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i]; if (!lm) continue;
+        ctx.beginPath();
+        ctx.arc(lm.x * w, lm.y * h, dotSize, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    async function run() {
+      try {
+        // Load test image
+        statusEl.textContent = 'Loading test image...';
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve; img.onerror = reject;
+          img.src = new URLSearchParams(location.search).get('img') || 'hand_nikhil.jpg';
+        });
+        addLog(`Image: ${img.width}x${img.height}`);
+
+        // ============ LOAD MICRO-HANDPOSE ============
+        statusEl.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=debug3');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.01,
+          palmScoreThreshold: 0.01,
+        });
+        addLog('micro-handpose loaded');
+
+        // Get internal palm detector for raw access
+        const { palmDetector, removeLetterbox, detectionToPixelROI, landmarkModel } = handpose._debug;
+
+        // Run palm detection
+        statusEl.textContent = 'Running micro palm detection...';
+        const { detections: microPalmRaw, lbPadX, lbPadY } = await palmDetector.detectRawWithResize(img, img.width, img.height);
+        addLog(`micro palm: ${microPalmRaw.length} detections (lbPad: ${lbPadX.toFixed(4)}, ${lbPadY.toFixed(4)})`);
+
+        if (microPalmRaw.length > 0) {
+          const rawDet = microPalmRaw[0];
+          addLog(`  raw box: [${rawDet.box.map(v => v.toFixed(4)).join(', ')}]`, 'palm-log');
+          addLog(`  raw score: ${rawDet.score.toFixed(4)}`, 'palm-log');
+          addLog(`  raw keypoints:`, 'palm-log');
+          for (let k = 0; k < rawDet.keypoints.length; k++) {
+            addLog(`    kp${k}: (${rawDet.keypoints[k][0].toFixed(4)}, ${rawDet.keypoints[k][1].toFixed(4)})`, 'palm-log');
+          }
+
+          const det = removeLetterbox(rawDet);
+          addLog(`\n  after letterbox removal:`, 'palm-log');
+          addLog(`  box: [${det.box.map(v => v.toFixed(4)).join(', ')}]`, 'palm-log');
+          for (let k = 0; k < det.keypoints.length; k++) {
+            addLog(`    kp${k}: (${det.keypoints[k][0].toFixed(4)}, ${det.keypoints[k][1].toFixed(4)})`, 'palm-log');
+          }
+
+          const pxROI = detectionToPixelROI(det, img.width, img.height);
+          addLog(`\n  ROI (pixels): center=(${pxROI.centerXpx.toFixed(1)}, ${pxROI.centerYpx.toFixed(1)}) size=${pxROI.sizePx.toFixed(1)} rot=${(pxROI.rotation * 180 / Math.PI).toFixed(1)}°`, 'palm-log');
+        }
+
+        // Run full micro pipeline
+        statusEl.textContent = 'Running micro-handpose detect...';
+        const microResults = await handpose.detect(img);
+        addLog(`micro detect: ${microResults.length} hand(s)`);
+
+        // ============ LOAD MEDIAPIPE ============
+        statusEl.textContent = 'Loading MediaPipe...';
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+        });
+        addLog('MediaPipe GPU loaded');
+
+        statusEl.textContent = 'Running MediaPipe GPU...';
+        const mpResults = mpGpu.detect(img);
+        addLog(`MediaPipe GPU: ${mpResults.landmarks?.length || 0} hand(s)`);
+
+        // Also run CPU for reference
+        const mpCpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'CPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+        });
+        const mpCpuResults = mpCpu.detect(img);
+        addLog(`MediaPipe CPU: ${mpCpuResults.landmarks?.length || 0} hand(s)`);
+
+        // ============ COMPARE LANDMARKS ============
+        if (microResults.length > 0 && mpResults.landmarks?.length > 0) {
+          const microLm = microResults[0].landmarks;
+          const mpLm = mpResults.landmarks[0];
+          const mpCpuLm = mpCpuResults.landmarks?.[0];
+
+          // Draw on image canvases
+          const W = 400, H = 400;
+
+          // micro on image
+          const microImgCtx = document.getElementById('micro-img').getContext('2d');
+          microImgCtx.drawImage(img, 0, 0, W, H);
+          drawHand(microImgCtx, microLm, W, H, '#ff4444');
+
+          // mp on image
+          const mpImgCtx = document.getElementById('mp-img').getContext('2d');
+          mpImgCtx.drawImage(img, 0, 0, W, H);
+          drawHand(mpImgCtx, mpLm, W, H, '#44ff44');
+
+          // both overlaid
+          const bothCtx = document.getElementById('both-img').getContext('2d');
+          bothCtx.drawImage(img, 0, 0, W, H);
+          drawHand(bothCtx, microLm, W, H, '#ff4444', 2, 4);
+          drawHand(bothCtx, mpLm, W, H, '#44ff44', 2, 4);
+          // label
+          bothCtx.font = '14px monospace';
+          bothCtx.fillStyle = '#ff4444';
+          bothCtx.fillText('RED = micro', 10, 20);
+          bothCtx.fillStyle = '#44ff44';
+          bothCtx.fillText('GREEN = MediaPipe GPU', 10, 38);
+
+          // mp overlay
+          const mpOvCtx = document.getElementById('mp-overlay').getContext('2d');
+          mpOvCtx.drawImage(img, 0, 0, W, H);
+          drawHand(mpOvCtx, mpLm, W, H, '#ffffff');
+
+          // Per-landmark comparison table
+          let tableHtml = '<table><tr><th>#</th><th>Name</th><th>micro (x,y)</th><th>MP GPU (x,y)</th><th>MP CPU (x,y)</th><th>micro→GPU dist</th><th>GPU→CPU dist</th></tr>';
+          let totalDist = 0, totalGpuCpu = 0;
+          for (let i = 0; i < 21; i++) {
+            const m = microLm[i];
+            const p = mpLm[i];
+            const c = mpCpuLm?.[i];
+            const dist = Math.sqrt((m.x - p.x)**2 + (m.y - p.y)**2);
+            const gcDist = c ? Math.sqrt((p.x - c.x)**2 + (p.y - c.y)**2) : 0;
+            totalDist += dist;
+            totalGpuCpu += gcDist;
+            const cls = dist < 0.005 ? 'good' : dist < 0.015 ? 'mid' : 'bad';
+            tableHtml += `<tr><td>${i}</td><td>${NAMES[i]}</td>`;
+            tableHtml += `<td>(${m.x.toFixed(4)}, ${m.y.toFixed(4)})</td>`;
+            tableHtml += `<td>(${p.x.toFixed(4)}, ${p.y.toFixed(4)})</td>`;
+            tableHtml += `<td>${c ? `(${c.x.toFixed(4)}, ${c.y.toFixed(4)})` : 'N/A'}</td>`;
+            tableHtml += `<td class="${cls}">${(dist*100).toFixed(3)}%</td>`;
+            tableHtml += `<td>${(gcDist*100).toFixed(3)}%</td>`;
+            tableHtml += `</tr>`;
+          }
+          tableHtml += `<tr style="font-weight:bold"><td></td><td>AVG</td><td></td><td></td><td></td>`;
+          tableHtml += `<td class="${totalDist/21 < 0.005 ? 'good' : totalDist/21 < 0.015 ? 'mid' : 'bad'}">${(totalDist/21*100).toFixed(3)}%</td>`;
+          tableHtml += `<td>${(totalGpuCpu/21*100).toFixed(3)}%</td>`;
+          tableHtml += `</tr></table>`;
+          document.getElementById('projected-table').innerHTML = tableHtml;
+
+          addLog(`\nAvg micro→GPU: ${(totalDist/21*100).toFixed(3)}%`);
+          addLog(`Avg GPU→CPU: ${(totalGpuCpu/21*100).toFixed(3)}%`);
+          addLog(`Ratio: micro is ${(totalDist/totalGpuCpu).toFixed(1)}x further from GPU than CPU is`);
+
+          // ============ DEEP DIVE: Compare handedness and score ============
+          addLog(`\nmicro score: ${microResults[0].score.toFixed(4)}, handedness: ${microResults[0].handedness}`);
+          addLog(`MP GPU handedness: ${mpResults.handedness?.[0]?.[0]?.categoryName}`);
+
+          // ============ Check if both found same hand ============
+          // Check handedness match
+          const microRight = microResults[0].handedness === 'right';
+          const mpRight = mpResults.handedness?.[0]?.[0]?.categoryName === 'Right';
+          addLog(`Handedness match: ${microRight === mpRight ? 'YES' : 'NO - MISMATCH!'}`);
+        }
+
+        statusEl.textContent = '✅ Done';
+        statusEl.className = 'status ok';
+
+      } catch (e) {
+        addLog(`ERROR: ${e.message}\n${e.stack}`);
+        statusEl.textContent = `❌ ${e.message}`;
+        statusEl.className = 'status err';
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
