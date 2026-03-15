@@ -71,7 +71,9 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   const LANDMARK_SIZE = 224;
 
   // Compile FULL landmark model (EfficientNet-B0, 224x224)
-  let landmarkModel = await compileFullModel(landmarkWeights);
+  // Force f32 — the FULL model shaders don't properly handle f16 weight reads
+  // (f32*f16 type mismatch in WGSL). TODO: add f32() casts to enable f16 weights
+  let landmarkModel = await compileFullModel(landmarkWeights, { forceF32: true });
 
   // f16 self-test (FULL model doesn't have f16 toggle — always f32 BN weights)
   {
