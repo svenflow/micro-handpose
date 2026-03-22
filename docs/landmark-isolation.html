@@ -419,26 +419,22 @@
               statsA.push({ label, hand: h, comp: compA });
             }
 
+            // === Find best matching raw palm detection for this MP hand ===
+            const sx = 1 / (1 - 2 * lbPadX);
+            const sy = 1 / (1 - 2 * lbPadY);
+            let bestDetIdx = 0;
+            let bestDetDist = Infinity;
+            for (let d = 0; d < rawDets.length; d++) {
+              const det = rawDets[d];
+              const wristX = (det.keypoints[0][0] - lbPadX) * sx;
+              const wristY = (det.keypoints[0][1] - lbPadY) * sy;
+              const dist = Math.sqrt((wristX - mpLm[0].x) ** 2 + (wristY - mpLm[0].y) ** 2);
+              if (dist < bestDetDist) { bestDetDist = dist; bestDetIdx = d; }
+            }
+
             // === METHOD B: Our box + MP's keypoints for rotation ===
-            // Find our raw detection that best matches this MP hand
             let compB = null;
-            if (rawDets.length > 0) {
-              // Remove letterbox from our detections
-              const sx = 1 / (1 - 2 * lbPadX);
-              const sy = 1 / (1 - 2 * lbPadY);
-
-              let bestDetIdx = 0;
-              let bestDetDist = Infinity;
-              for (let d = 0; d < rawDets.length; d++) {
-                const det = rawDets[d];
-                // Remove letterbox from wrist keypoint
-                const wristX = (det.keypoints[0][0] - lbPadX) * sx;
-                const wristY = (det.keypoints[0][1] - lbPadY) * sy;
-                const dist = Math.sqrt((wristX - mpLm[0].x) ** 2 + (wristY - mpLm[0].y) ** 2);
-                if (dist < bestDetDist) { bestDetDist = dist; bestDetIdx = d; }
-              }
-
-              if (bestDetDist < 0.15) {
+            if (rawDets.length > 0 && bestDetDist < 0.15) {
                 const rawDet = rawDets[bestDetIdx];
                 // Remove letterbox
                 const det = {
@@ -473,7 +469,6 @@
                 const lmB = projectLandmarks(outputB.landmarks, roiB, imgW, imgH);
                 compB = compareLandmarks(lmB, mpLm);
                 statsB.push({ label, hand: h, comp: compB });
-              }
             }
 
             // === METHOD C: Crop derived entirely from MP's landmarks ===
@@ -528,25 +523,14 @@
 
             resultsDiv.appendChild(card);
 
-            // Draw our crop (Method A) — need to get it from our pipeline
+            // Draw our crop (Method A) — use the matched detection
             const cvCropA = card.querySelector('.cv-cropA');
             if (rawDets.length > 0 && bestDetDist < 0.15) {
-              // Re-use the closest detection
-              const sxx = 1 / (1 - 2 * lbPadX);
-              const syy = 1 / (1 - 2 * lbPadY);
-              let bestDI = 0, bestDD = Infinity;
-              for (let d = 0; d < rawDets.length; d++) {
-                const det = rawDets[d];
-                const wx = (det.keypoints[0][0] - lbPadX) * sxx;
-                const wy = (det.keypoints[0][1] - lbPadY) * syy;
-                const dd = Math.sqrt((wx - mpLm[0].x) ** 2 + (wy - mpLm[0].y) ** 2);
-                if (dd < bestDD) { bestDD = dd; bestDI = d; }
-              }
-              const rawD = rawDets[bestDI];
+              const rawD = rawDets[bestDetIdx];
               const detA = {
                 score: rawD.score,
-                box: [(rawD.box[0] - lbPadX) * sxx, (rawD.box[1] - lbPadY) * syy, rawD.box[2] * sxx, rawD.box[3] * syy],
-                keypoints: rawD.keypoints.map(([kx, ky]) => [(kx - lbPadX) * sxx, (ky - lbPadY) * syy]),
+                box: [(rawD.box[0] - lbPadX) * sx, (rawD.box[1] - lbPadY) * sy, rawD.box[2] * sx, rawD.box[3] * sy],
+                keypoints: rawD.keypoints.map(([kx, ky]) => [(kx - lbPadX) * sx, (ky - lbPadY) * sy]),
               };
               const roiA = debug.detectionToPixelROI(detA, imgW, imgH);
               const cropA = cropHandCanvas(img, roiA);
