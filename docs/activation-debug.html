@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Activation-Level Debug: micro-handpose vs MediaPipe</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'SF Mono', 'Menlo', 'Monaco', monospace; background: #111; color: #ddd; padding: 20px; font-size: 13px; }
+h1 { color: #fff; font-size: 18px; margin-bottom: 8px; }
+h2 { color: #aaf; font-size: 15px; margin: 16px 0 8px 0; cursor: pointer; user-select: none; }
+h2:hover { color: #ccf; }
+h2::before { content: '\25BC '; font-size: 11px; }
+h2.collapsed::before { content: '\25B6 '; }
+.section { margin-bottom: 24px; border: 1px solid #333; border-radius: 6px; padding: 12px; background: #1a1a1a; }
+.section-body { overflow: hidden; transition: max-height 0.3s; }
+.section-body.collapsed { max-height: 0 !important; padding: 0; overflow: hidden; }
+.status { padding: 8px 12px; background: #222; border-radius: 4px; margin-bottom: 12px; }
+.status.loading { border-left: 3px solid #ff0; color: #ff0; }
+.status.done { border-left: 3px solid #0f0; color: #0f0; }
+.status.error { border-left: 3px solid #f00; color: #f00; }
+canvas { border: 1px solid #444; border-radius: 4px; margin: 4px; background: #000; }
+.canvas-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 8px 0; }
+.canvas-label { font-size: 11px; color: #888; text-align: center; }
+.canvas-box { display: inline-flex; flex-direction: column; align-items: center; }
+table { border-collapse: collapse; margin: 8px 0; width: 100%; max-width: 900px; }
+th, td { border: 1px solid #333; padding: 4px 8px; text-align: right; font-size: 12px; }
+th { background: #222; color: #aaa; text-align: center; }
+.good { color: #4f4; }
+.warn { color: #ff0; }
+.bad { color: #f44; }
+.val { color: #8cf; }
+.label { color: #aaa; text-align: left; }
+pre { background: #0a0a0a; padding: 8px; border-radius: 4px; overflow-x: auto; font-size: 12px; line-height: 1.5; margin: 4px 0; white-space: pre-wrap; }
+.summary-bar { display: flex; gap: 16px; align-items: center; margin: 12px 0; padding: 10px 16px; background: #1a1a2a; border-radius: 6px; border: 1px solid #336; }
+.summary-bar .metric { text-align: center; }
+.summary-bar .metric .value { font-size: 22px; font-weight: bold; }
+.summary-bar .metric .name { font-size: 11px; color: #888; }
+.cumulative { margin: 8px 0; padding: 8px; background: #1a1a1a; border-radius: 4px; border: 1px solid #333; }
+.cumulative .bar { height: 20px; border-radius: 3px; margin: 2px 0; display: flex; align-items: center; padding-left: 6px; font-size: 11px; color: #fff; }
+#controls { margin-bottom: 16px; }
+#controls input { background: #222; border: 1px solid #444; color: #ddd; padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 13px; width: 300px; }
+#controls button { background: #336; border: 1px solid #448; color: #ddd; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-family: inherit; margin-left: 8px; }
+#controls button:hover { background: #448; }
+</style>
+</head>
+<body>
+
+<h1>Activation-Level Debug: micro-handpose vs MediaPipe WebGPU</h1>
+<div id="controls">
+  Image: <input id="imgInput" type="text" placeholder="hand_nikhil.jpg">
+  <button onclick="run()">Run</button>
+</div>
+<div id="globalStatus" class="status loading">Initializing...</div>
+
+<div id="summarySection" class="summary-bar" style="display:none">
+  <div class="metric"><div class="value" id="sumAvgDist">-</div><div class="name">Avg Landmark Dist (%)</div></div>
+  <div class="metric"><div class="value" id="sumMaxDist">-</div><div class="name">Max Landmark Dist (%)</div></div>
+  <div class="metric"><div class="value" id="sumWorst">-</div><div class="name">Worst Landmark</div></div>
+  <div class="metric"><div class="value" id="sumPalmDist">-</div><div class="name">Palm Box Dist (%)</div></div>
+</div>
+
+<!-- Cumulative Error -->
+<div id="cumulativeSection" class="section" style="display:none">
+  <h2 onclick="toggle(this)">Cumulative Error by Stage</h2>
+  <div class="section-body" id="cumulativeBody"></div>
+</div>
+
+<!-- Stage 1: Palm Detection -->
+<div id="stage1" class="section" style="display:none">
+  <h2 onclick="toggle(this)">Stage 1: Palm Detection</h2>
+  <div class="section-body" id="stage1Body"></div>
+</div>
+
+<!-- Stage 2: Crop ROI -->
+<div id="stage2" class="section" style="display:none">
+  <h2 onclick="toggle(this)">Stage 2: Crop ROI</h2>
+  <div class="section-body" id="stage2Body"></div>
+</div>
+
+<!-- Stage 3: Landmark Model Input -->
+<div id="stage3" class="section" style="display:none">
+  <h2 onclick="toggle(this)">Stage 3: Landmark Model Input (Crop)</h2>
+  <div class="section-body" id="stage3Body"></div>
+</div>
+
+<!-- Stage 4: Raw Landmark Output -->
+<div id="stage4" class="section" style="display:none">
+  <h2 onclick="toggle(this)">Stage 4: Raw Landmark Output (Crop Space)</h2>
+  <div class="section-body" id="stage4Body"></div>
+</div>
+
+<!-- Stage 5: Final Landmarks -->
+<div id="stage5" class="section" style="display:none">
+  <h2 onclick="toggle(this)">Stage 5: Final Landmarks (Image Space)</h2>
+  <div class="section-body" id="stage5Body"></div>
+</div>
+
+<script type="module">
+
+// ---- Helpers ----
+const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip','index_mcp','index_pip','index_dip','index_tip','middle_mcp','middle_pip','middle_dip','middle_tip','ring_mcp','ring_pip','ring_dip','ring_tip','pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
+const CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+const PALM_KP_NAMES = ['wrist','index_mcp','middle_mcp','ring_mcp','pinky_mcp','thumb_cmc','thumb_tip'];
+
+function colorForError(pct) {
+  if (pct < 0.5) return '#4f4';
+  if (pct < 1.5) return '#ff0';
+  return '#f44';
+}
+
+function classForError(pct) {
+  if (pct < 0.5) return 'good';
+  if (pct < 1.5) return 'warn';
+  return 'bad';
+}
+
+function fmt(v, digits=6) { return v == null ? 'N/A' : v.toFixed(digits); }
+
+function makeCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return c;
+}
+
+function drawImageFit(ctx, img, maxW, maxH) {
+  const scale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight);
+  const w = img.naturalWidth * scale;
+  const h = img.naturalHeight * scale;
+  ctx.drawImage(img, 0, 0, w, h);
+  return { w, h, scale };
+}
+
+function drawBox(ctx, cx, cy, bw, bh, color, scale) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.strokeRect((cx - bw/2) * scale, (cy - bh/2) * scale, bw * scale, bh * scale);
+}
+
+function drawKeypoints(ctx, kps, w, h, color, radius=4) {
+  ctx.fillStyle = color;
+  for (const kp of kps) {
+    ctx.beginPath();
+    ctx.arc(kp[0] * w, kp[1] * h, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawLandmarks(ctx, landmarks, w, h, color, radius=3) {
+  // connections
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.globalAlpha = 0.6;
+  for (const [a, b] of CONNECTIONS) {
+    const la = landmarks[a], lb = landmarks[b];
+    if (!la || !lb) continue;
+    ctx.beginPath();
+    ctx.moveTo(la.x * w, la.y * h);
+    ctx.lineTo(lb.x * w, lb.y * h);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // points
+  ctx.fillStyle = color;
+  for (const lm of landmarks) {
+    ctx.beginPath();
+    ctx.arc(lm.x * w, lm.y * h, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawROI(ctx, roi, imgW, imgH, dispW, dispH, color) {
+  const sx = dispW / imgW;
+  const sy = dispH / imgH;
+  const cx = roi.centerXpx * sx;
+  const cy = roi.centerYpx * sy;
+  const half = roi.sizePx / 2;
+  const cos = Math.cos(roi.rotation);
+  const sin = Math.sin(roi.rotation);
+  // Draw rotated rectangle
+  const corners = [[-half,-half],[half,-half],[half,half],[-half,half]];
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < 4; i++) {
+    const [dx, dy] = corners[i];
+    const px = cx + (cos * dx - sin * dy) * sx;
+    const py = cy + (sin * dx + cos * dy) * sy;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  // center cross
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function canvasBox(canvas, label) {
+  const div = document.createElement('div');
+  div.className = 'canvas-box';
+  div.appendChild(canvas);
+  const lbl = document.createElement('div');
+  lbl.className = 'canvas-label';
+  lbl.textContent = label;
+  div.appendChild(lbl);
+  return div;
+}
+
+function toggle(h2) {
+  h2.classList.toggle('collapsed');
+  const body = h2.nextElementSibling;
+  body.classList.toggle('collapsed');
+}
+
+// ---- URL params ----
+const params = new URLSearchParams(location.search);
+const imgInputEl = document.getElementById('imgInput');
+imgInputEl.value = params.get('img') || 'hand_nikhil.jpg';
+
+// ---- Main ----
+window.run = run;
+
+async function run() {
+  const gs = document.getElementById('globalStatus');
+
+  // Reset all sections
+  for (const id of ['stage1','stage2','stage3','stage4','stage5','cumulativeSection','summarySection']) {
+    document.getElementById(id).style.display = 'none';
+  }
+  for (const id of ['stage1Body','stage2Body','stage3Body','stage4Body','stage5Body','cumulativeBody']) {
+    document.getElementById(id).innerHTML = '';
+  }
+
+  const imgSrc = imgInputEl.value.trim() || 'hand_nikhil.jpg';
+
+  try {
+    // ---- Load image ----
+    gs.className = 'status loading';
+    gs.textContent = 'Loading image: ' + imgSrc + '...';
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('Image failed: ' + imgSrc)); img.src = imgSrc; });
+    const imgW = img.naturalWidth;
+    const imgH = img.naturalHeight;
+
+    // ---- Load micro-handpose ----
+    gs.textContent = 'Loading micro-handpose...';
+    const { createHandpose } = await import('./dist/index.js?v=actdbg2');
+    const handpose = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.01, palmScoreThreshold: 0.01 });
+    const dbg = handpose._debug;
+
+    // ---- Load MediaPipe ----
+    gs.textContent = 'Loading MediaPipe WebGPU...';
+    const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+    const { HandLandmarker, FilesetResolver } = vision;
+    const wasmFileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm');
+    const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+        delegate: 'GPU',
+      },
+      runningMode: 'IMAGE',
+      numHands: 2,
+    });
+
+    gs.textContent = 'Running pipelines...';
+
+    // ================================================================
+    // STAGE 1: Palm Detection
+    // ================================================================
+    gs.textContent = 'Stage 1: Palm Detection...';
+
+    // micro palm detection
+    const { detections: rawDetections, lbPadX, lbPadY } = await dbg.palmDetector.detectRawWithResize(img, imgW, imgH);
+    if (rawDetections.length === 0) {
+      gs.className = 'status error';
+      gs.textContent = 'No palm detected by micro-handpose!';
+      return;
+    }
+    const rawDet = rawDetections[0];
+    const microDet = dbg.removeLetterbox(rawDet);
+
+    // MediaPipe full pipeline to get landmarks (we'll use these throughout)
+    const mpResults = mpGpu.detect(img);
+    if (!mpResults.landmarks || mpResults.landmarks.length === 0) {
+      gs.className = 'status error';
+      gs.textContent = 'No hand detected by MediaPipe!';
+      return;
+    }
+    const mpLandmarks = mpResults.landmarks[0].map(lm => ({ x: lm.x, y: lm.y, z: lm.z }));
+
+    // Infer MP palm box from its landmarks (bounding box of all 21 landmarks)
+    const mpXs = mpLandmarks.map(l => l.x);
+    const mpYs = mpLandmarks.map(l => l.y);
+    const mpMinX = Math.min(...mpXs), mpMaxX = Math.max(...mpXs);
+    const mpMinY = Math.min(...mpYs), mpMaxY = Math.max(...mpYs);
+    const mpBoxCx = (mpMinX + mpMaxX) / 2;
+    const mpBoxCy = (mpMinY + mpMaxY) / 2;
+    const mpBoxW = mpMaxX - mpMinX;
+    const mpBoxH = mpMaxY - mpMinY;
+
+    // Show Stage 1
+    document.getElementById('stage1').style.display = '';
+    const s1 = document.getElementById('stage1Body');
+
+    // Palm detection values
+    let s1html = '<pre>';
+    s1html += 'Letterbox padding: lbPadX=' + fmt(lbPadX) + '  lbPadY=' + fmt(lbPadY) + '\n';
+    s1html += 'Raw detections: ' + rawDetections.length + '\n\n';
+    s1html += '--- Micro Palm Detection (image-normalized) ---\n';
+    s1html += 'Score:  ' + fmt(microDet.score) + '\n';
+    s1html += 'Box:    cx=' + fmt(microDet.box[0]) + '  cy=' + fmt(microDet.box[1]) + '  w=' + fmt(microDet.box[2]) + '  h=' + fmt(microDet.box[3]) + '\n';
+    for (let k = 0; k < microDet.keypoints.length; k++) {
+      s1html += 'KP' + k + ' (' + (PALM_KP_NAMES[k]||'?').padEnd(12) + '): [' + fmt(microDet.keypoints[k][0]) + ', ' + fmt(microDet.keypoints[k][1]) + ']\n';
+    }
+    s1html += '\n--- MediaPipe (inferred from landmarks bounding box) ---\n';
+    s1html += 'Box:    cx=' + fmt(mpBoxCx) + '  cy=' + fmt(mpBoxCy) + '  w=' + fmt(mpBoxW) + '  h=' + fmt(mpBoxH) + '\n';
+    s1html += 'Wrist:       [' + fmt(mpLandmarks[0].x) + ', ' + fmt(mpLandmarks[0].y) + ']\n';
+    s1html += 'Middle MCP:  [' + fmt(mpLandmarks[9].x) + ', ' + fmt(mpLandmarks[9].y) + ']\n';
+
+    // Palm box distance
+    const palmBoxDist = Math.sqrt((microDet.box[0] - mpBoxCx)**2 + (microDet.box[1] - mpBoxCy)**2) * 100;
+    s1html += '\n--- Comparison ---\n';
+    s1html += 'Palm center distance: <span class="' + classForError(palmBoxDist) + '">' + fmt(palmBoxDist, 3) + '%</span>\n';
+    // Wrist comparison (micro palm kp0 vs MP landmark 0)
+    const wristDist = Math.sqrt((microDet.keypoints[0][0] - mpLandmarks[0].x)**2 + (microDet.keypoints[0][1] - mpLandmarks[0].y)**2) * 100;
+    s1html += 'Wrist keypoint dist:  <span class="' + classForError(wristDist) + '">' + fmt(wristDist, 3) + '%</span>\n';
+    // Middle MCP (micro palm kp2 vs MP landmark 9)
+    const mmcpDist = Math.sqrt((microDet.keypoints[2][0] - mpLandmarks[9].x)**2 + (microDet.keypoints[2][1] - mpLandmarks[9].y)**2) * 100;
+    s1html += 'Middle MCP dist:      <span class="' + classForError(mmcpDist) + '">' + fmt(mmcpDist, 3) + '%</span>\n';
+    s1html += '</pre>';
+    s1.innerHTML = s1html;
+
+    // Draw palm boxes on image
+    const DISP_MAX = 400;
+    const dispScale = Math.min(DISP_MAX / imgW, DISP_MAX / imgH);
+    const dispW = Math.round(imgW * dispScale);
+    const dispH = Math.round(imgH * dispScale);
+
+    const palmCanvas = makeCanvas(dispW, dispH);
+    const pctx = palmCanvas.getContext('2d');
+    pctx.drawImage(img, 0, 0, dispW, dispH);
+    // micro box (cyan)
+    drawBox(pctx, microDet.box[0] * dispW, microDet.box[1] * dispH, microDet.box[2] * dispW, microDet.box[3] * dispH, '#0ff', 1);
+    // micro keypoints (cyan)
+    drawKeypoints(pctx, microDet.keypoints, dispW, dispH, '#0ff', 3);
+    // MP inferred box (magenta)
+    drawBox(pctx, mpBoxCx * dispW, mpBoxCy * dispH, mpBoxW * dispW, mpBoxH * dispH, '#f0f', 1);
+    // MP wrist + middle MCP (magenta)
+    drawKeypoints(pctx, [[mpLandmarks[0].x, mpLandmarks[0].y], [mpLandmarks[9].x, mpLandmarks[9].y]], dispW, dispH, '#f0f', 3);
+
+    const row1 = document.createElement('div');
+    row1.className = 'canvas-row';
+    row1.appendChild(canvasBox(palmCanvas, 'Palm Detection (cyan=micro, magenta=MP)'));
+    s1.appendChild(row1);
+
+    // ================================================================
+    // STAGE 2: Crop ROI
+    // ================================================================
+    gs.textContent = 'Stage 2: Crop ROI...';
+    document.getElementById('stage2').style.display = '';
+    const s2 = document.getElementById('stage2Body');
+
+    const microROI = dbg.detectionToPixelROI(microDet, imgW, imgH);
+
+    // Infer MP ROI from landmarks: center = midpoint of wrist and middle_mcp, size from bounding box
+    const mpWrist = mpLandmarks[0];
+    const mpMidMCP = mpLandmarks[9];
+    const mpInfCx = (mpWrist.x + mpMidMCP.x) / 2 * imgW;
+    const mpInfCy = (mpWrist.y + mpMidMCP.y) / 2 * imgH;
+    const mpInfRot = Math.PI / 2 - Math.atan2(-(mpMidMCP.y - mpWrist.y), mpMidMCP.x - mpWrist.x);
+    // Estimate size: use span of all landmarks * padding
+    const mpSpanPx = Math.max(mpBoxW * imgW, mpBoxH * imgH) * 1.5;
+
+    let s2html = '<pre>';
+    s2html += '--- Micro ROI ---\n';
+    s2html += 'Center:   (' + fmt(microROI.centerXpx, 2) + ', ' + fmt(microROI.centerYpx, 2) + ') px\n';
+    s2html += 'Size:     ' + fmt(microROI.sizePx, 2) + ' px\n';
+    s2html += 'Rotation: ' + fmt(microROI.rotation, 4) + ' rad (' + fmt(microROI.rotation * 180/Math.PI, 2) + ' deg)\n';
+    s2html += '\n--- MediaPipe (inferred from landmarks) ---\n';
+    s2html += 'Center:   (' + fmt(mpInfCx, 2) + ', ' + fmt(mpInfCy, 2) + ') px\n';
+    s2html += 'Size:     ~' + fmt(mpSpanPx, 2) + ' px (estimated)\n';
+    s2html += 'Rotation: ' + fmt(mpInfRot, 4) + ' rad (' + fmt(mpInfRot * 180/Math.PI, 2) + ' deg)\n';
+    s2html += '\n--- Comparison ---\n';
+    const roiCenterDist = Math.sqrt((microROI.centerXpx - mpInfCx)**2 + (microROI.centerYpx - mpInfCy)**2);
+    const roiCenterPct = roiCenterDist / Math.max(imgW, imgH) * 100;
+    s2html += 'Center distance:   ' + fmt(roiCenterDist, 2) + ' px (<span class="' + classForError(roiCenterPct) + '">' + fmt(roiCenterPct, 3) + '%</span>)\n';
+    const rotDiffDeg = Math.abs(microROI.rotation - mpInfRot) * 180/Math.PI;
+    s2html += 'Rotation diff:     ' + fmt(rotDiffDeg, 2) + ' deg\n';
+    s2html += '</pre>';
+    s2.innerHTML = s2html;
+
+    // Draw ROI on image
+    const roiCanvas = makeCanvas(dispW, dispH);
+    const rctx = roiCanvas.getContext('2d');
+    rctx.drawImage(img, 0, 0, dispW, dispH);
+    drawROI(rctx, microROI, imgW, imgH, dispW, dispH, '#0ff');
+    drawROI(rctx, { centerXpx: mpInfCx, centerYpx: mpInfCy, sizePx: mpSpanPx, rotation: mpInfRot }, imgW, imgH, dispW, dispH, '#f0f');
+
+    const row2 = document.createElement('div');
+    row2.className = 'canvas-row';
+    row2.appendChild(canvasBox(roiCanvas, 'ROI (cyan=micro, magenta=MP inferred)'));
+    s2.appendChild(row2);
+
+    // ================================================================
+    // STAGE 3: Landmark Model Input (Crop)
+    // ================================================================
+    gs.textContent = 'Stage 3: Crop region...';
+    document.getElementById('stage3').style.display = '';
+    const s3 = document.getElementById('stage3Body');
+
+    const cropCanvas = dbg.cropHandRegion(img, microROI);
+    // Convert OffscreenCanvas to visible canvas
+    const cropVis = makeCanvas(224, 224);
+    const cctx = cropVis.getContext('2d');
+    const cropBitmap = cropCanvas.transferToImageBitmap();
+    cctx.drawImage(cropBitmap, 0, 0);
+
+    // Get pixel data for analysis
+    const cropPixels = cctx.getImageData(0, 0, 224, 224);
+
+    let s3html = '<pre>';
+    s3html += '--- Micro Crop (224x224) ---\n';
+    // Sample some pixel values for debugging
+    const samplePoints = [[112,112],[56,56],[168,168],[112,56],[112,168]];
+    s3html += 'Sample pixel RGB values (center and corners):\n';
+    for (const [sx, sy] of samplePoints) {
+      const idx = (sy * 224 + sx) * 4;
+      s3html += '  (' + sx + ',' + sy + '): R=' + cropPixels.data[idx] + ' G=' + cropPixels.data[idx+1] + ' B=' + cropPixels.data[idx+2] + '\n';
+    }
+    // Compute crop stats
+    let rSum=0, gSum=0, bSum=0, nonBlack=0;
+    for (let i = 0; i < cropPixels.data.length; i += 4) {
+      rSum += cropPixels.data[i];
+      gSum += cropPixels.data[i+1];
+      bSum += cropPixels.data[i+2];
+      if (cropPixels.data[i] > 0 || cropPixels.data[i+1] > 0 || cropPixels.data[i+2] > 0) nonBlack++;
+    }
+    const totalPx = 224*224;
+    s3html += 'Mean RGB: (' + (rSum/totalPx).toFixed(1) + ', ' + (gSum/totalPx).toFixed(1) + ', ' + (bSum/totalPx).toFixed(1) + ')\n';
+    s3html += 'Non-black pixels: ' + nonBlack + '/' + totalPx + ' (' + (nonBlack/totalPx*100).toFixed(1) + '%)\n';
+    s3html += '\n(MediaPipe crop not directly accessible — comparing final outputs instead)\n';
+    s3html += '</pre>';
+    s3.innerHTML = s3html;
+
+    // Need to re-create crop since we transferred the bitmap
+    const cropCanvas2 = dbg.cropHandRegion(img, microROI);
+    const cropVis2 = makeCanvas(224, 224);
+    const cctx2 = cropVis2.getContext('2d');
+    const cropBitmap2 = cropCanvas2.transferToImageBitmap();
+    cctx2.drawImage(cropBitmap2, 0, 0);
+
+    const row3 = document.createElement('div');
+    row3.className = 'canvas-row';
+    row3.appendChild(canvasBox(cropVis2, 'Micro crop (224x224)'));
+    s3.appendChild(row3);
+
+    // ================================================================
+    // STAGE 4: Raw Landmark Output (crop space)
+    // ================================================================
+    gs.textContent = 'Stage 4: Raw landmarks...';
+    document.getElementById('stage4').style.display = '';
+    const s4 = document.getElementById('stage4Body');
+
+    // Run landmark model on crop
+    const cropCanvas3 = dbg.cropHandRegion(img, microROI);
+    const output = await dbg.landmarkModel.runFromCanvas(cropCanvas3);
+
+    // Parse raw crop-space landmarks
+    const microCropLandmarks = [];
+    for (let i = 0; i < 21; i++) {
+      microCropLandmarks.push({
+        x: output.landmarks[i * 3],
+        y: output.landmarks[i * 3 + 1],
+        z: output.landmarks[i * 3 + 2],
+      });
+    }
+
+    // Project micro crop-space landmarks to image space (same math as handpose.ts)
+    const cosR = Math.cos(microROI.rotation);
+    const sinR = Math.sin(microROI.rotation);
+    const microImageLandmarks = microCropLandmarks.map(lm => {
+      const dx = (lm.x - 0.5) * microROI.sizePx;
+      const dy = (lm.y - 0.5) * microROI.sizePx;
+      const origXpx = cosR * dx - sinR * dy + microROI.centerXpx;
+      const origYpx = sinR * dx + cosR * dy + microROI.centerYpx;
+      return { x: origXpx / imgW, y: origYpx / imgH, z: lm.z };
+    });
+
+    // Back-project MP image landmarks into micro's crop space for fair comparison
+    const mpInCropSpace = mpLandmarks.map(lm => {
+      const px = lm.x * imgW - microROI.centerXpx;
+      const py = lm.y * imgH - microROI.centerYpx;
+      // Apply R(-rotation) to go from image to crop
+      const cx = (cosR * px + sinR * py) / microROI.sizePx + 0.5;
+      const cy = (-sinR * px + cosR * py) / microROI.sizePx + 0.5;
+      return { x: cx, y: cy, z: lm.z };
+    });
+
+    let s4html = '<pre>';
+    s4html += 'Handflag score: ' + fmt(output.handflag[0]) + '\n';
+    s4html += 'Handedness:     ' + fmt(output.handedness[0]) + ' (' + (output.handedness[0] > 0.5 ? 'right' : 'left') + ')\n\n';
+    s4html += '</pre>';
+
+    // Table: raw crop-space comparison
+    s4html += '<table><tr><th>#</th><th>Name</th><th colspan="2">Micro (crop)</th><th colspan="2">MP (back-proj)</th><th>Dist (crop)</th></tr>';
+    let cropDistSum = 0;
+    const cropDists = [];
+    for (let i = 0; i < 21; i++) {
+      const mc = microCropLandmarks[i];
+      const mp = mpInCropSpace[i];
+      const d = Math.sqrt((mc.x - mp.x)**2 + (mc.y - mp.y)**2) * 100; // as % of crop
+      cropDists.push(d);
+      cropDistSum += d;
+      const cls = classForError(d);
+      s4html += '<tr><td>' + i + '</td><td class="label">' + NAMES[i] + '</td>';
+      s4html += '<td class="val">' + fmt(mc.x, 4) + '</td><td class="val">' + fmt(mc.y, 4) + '</td>';
+      s4html += '<td class="val">' + fmt(mp.x, 4) + '</td><td class="val">' + fmt(mp.y, 4) + '</td>';
+      s4html += '<td class="' + cls + '">' + fmt(d, 3) + '%</td></tr>';
+    }
+    s4html += '<tr><th colspan="6">Average</th><th class="' + classForError(cropDistSum/21) + '">' + fmt(cropDistSum/21, 3) + '%</th></tr>';
+    s4html += '</table>';
+
+    // Draw crop-space landmarks on crop image
+    const cropLmCanvas = makeCanvas(224, 224);
+    const clctx = cropLmCanvas.getContext('2d');
+    const cropCanvas4 = dbg.cropHandRegion(img, microROI);
+    const cropBitmap4 = cropCanvas4.transferToImageBitmap();
+    clctx.drawImage(cropBitmap4, 0, 0);
+    // micro landmarks (cyan)
+    drawLandmarks(clctx, microCropLandmarks, 224, 224, '#0ff', 3);
+    // MP back-projected (magenta)
+    drawLandmarks(clctx, mpInCropSpace, 224, 224, '#f0f', 3);
+
+    s4.innerHTML = s4html;
+    const row4 = document.createElement('div');
+    row4.className = 'canvas-row';
+    row4.appendChild(canvasBox(cropLmCanvas, 'Crop-space landmarks (cyan=micro, magenta=MP)'));
+    s4.appendChild(row4);
+
+    // ================================================================
+    // STAGE 5: Final Landmarks (image space)
+    // ================================================================
+    gs.textContent = 'Stage 5: Final landmarks...';
+    document.getElementById('stage5').style.display = '';
+    const s5 = document.getElementById('stage5Body');
+
+    // Also run full micro pipeline
+    const microResults = await handpose.detect(img);
+    const microFinal = microResults.length > 0 ? microResults[0].landmarks : microImageLandmarks;
+
+    // Per-landmark distance table
+    let s5html = '<table><tr><th>#</th><th>Name</th><th colspan="2">Micro (img)</th><th colspan="2">MediaPipe</th><th>Dist (%)</th><th>Dist (px)</th></tr>';
+    let totalDist = 0;
+    let maxDist = 0;
+    let maxDistIdx = 0;
+    const imgDiag = Math.sqrt(imgW**2 + imgH**2);
+    const lmDists = [];
+
+    for (let i = 0; i < 21; i++) {
+      const ml = microFinal[i];
+      const mp = mpLandmarks[i];
+      const dNorm = Math.sqrt((ml.x - mp.x)**2 + (ml.y - mp.y)**2);
+      const dPct = dNorm * 100;
+      const dPx = dNorm * imgDiag;
+      lmDists.push(dPct);
+      totalDist += dPct;
+      if (dPct > maxDist) { maxDist = dPct; maxDistIdx = i; }
+      const cls = classForError(dPct);
+      s5html += '<tr><td>' + i + '</td><td class="label">' + NAMES[i] + '</td>';
+      s5html += '<td class="val">' + fmt(ml.x, 4) + '</td><td class="val">' + fmt(ml.y, 4) + '</td>';
+      s5html += '<td class="val">' + fmt(mp.x, 4) + '</td><td class="val">' + fmt(mp.y, 4) + '</td>';
+      s5html += '<td class="' + cls + '">' + fmt(dPct, 3) + '%</td>';
+      s5html += '<td class="' + cls + '">' + fmt(dPx, 1) + '</td></tr>';
+    }
+    const avgDist = totalDist / 21;
+    s5html += '<tr><th colspan="6">Average</th><th class="' + classForError(avgDist) + '">' + fmt(avgDist, 3) + '%</th><th></th></tr>';
+    s5html += '<tr><th colspan="6">Max (' + NAMES[maxDistIdx] + ')</th><th class="' + classForError(maxDist) + '">' + fmt(maxDist, 3) + '%</th><th></th></tr>';
+    s5html += '</table>';
+
+    // Draw final landmarks on image
+    const finalCanvas = makeCanvas(dispW, dispH);
+    const fctx = finalCanvas.getContext('2d');
+    fctx.drawImage(img, 0, 0, dispW, dispH);
+    drawLandmarks(fctx, microFinal, dispW, dispH, '#0ff', 3);
+    drawLandmarks(fctx, mpLandmarks, dispW, dispH, '#f0f', 3);
+
+    // Error lines between corresponding landmarks
+    fctx.strokeStyle = '#ff4';
+    fctx.lineWidth = 1;
+    fctx.globalAlpha = 0.5;
+    for (let i = 0; i < 21; i++) {
+      fctx.beginPath();
+      fctx.moveTo(microFinal[i].x * dispW, microFinal[i].y * dispH);
+      fctx.lineTo(mpLandmarks[i].x * dispW, mpLandmarks[i].y * dispH);
+      fctx.stroke();
+    }
+    fctx.globalAlpha = 1;
+
+    s5.innerHTML = s5html;
+    const row5 = document.createElement('div');
+    row5.className = 'canvas-row';
+    row5.appendChild(canvasBox(finalCanvas, 'Final landmarks (cyan=micro, magenta=MP, yellow=error)'));
+    s5.appendChild(row5);
+
+    // ================================================================
+    // Summary
+    // ================================================================
+    document.getElementById('summarySection').style.display = '';
+    const sumAvg = document.getElementById('sumAvgDist');
+    const sumMax = document.getElementById('sumMaxDist');
+    const sumWorst = document.getElementById('sumWorst');
+    const sumPalm = document.getElementById('sumPalmDist');
+
+    sumAvg.textContent = fmt(avgDist, 3);
+    sumAvg.style.color = colorForError(avgDist);
+    sumMax.textContent = fmt(maxDist, 3);
+    sumMax.style.color = colorForError(maxDist);
+    sumWorst.textContent = NAMES[maxDistIdx];
+    sumWorst.style.color = colorForError(maxDist);
+    sumPalm.textContent = fmt(palmBoxDist, 3);
+    sumPalm.style.color = colorForError(palmBoxDist);
+
+    // ================================================================
+    // Cumulative Error by Stage
+    // ================================================================
+    document.getElementById('cumulativeSection').style.display = '';
+    const cumBody = document.getElementById('cumulativeBody');
+
+    // Stage errors:
+    // 1. Palm detection: wrist + middleMCP keypoint error
+    const palmError = (wristDist + mmcpDist) / 2;
+    // 2. ROI: center distance as %
+    const roiError = roiCenterPct;
+    // 3. Crop: we can't directly measure this separate from model — use crop-space avg as proxy
+    const cropModelError = cropDistSum / 21;
+    // 4. Final: avg landmark dist
+    const finalError = avgDist;
+
+    const stages = [
+      { name: 'Palm Detection (kp avg)', error: palmError },
+      { name: 'ROI Center', error: roiError },
+      { name: 'Landmark Model (crop-space avg)', error: cropModelError },
+      { name: 'Final (image-space avg)', error: finalError },
+    ];
+
+    let cumHtml = '<pre>';
+    const maxBarWidth = 500;
+    const maxErr = Math.max(...stages.map(s => s.error), 0.01);
+    for (const st of stages) {
+      const barW = Math.max(2, (st.error / maxErr) * maxBarWidth);
+      const col = colorForError(st.error);
+      cumHtml += '<span style="color:' + col + '">' + fmt(st.error, 3).padStart(8) + '%</span>  ';
+      cumHtml += '<span style="display:inline-block;width:' + barW + 'px;height:14px;background:' + col + ';border-radius:2px;vertical-align:middle"></span> ';
+      cumHtml += st.name + '\n';
+    }
+    cumHtml += '\nInterpretation:\n';
+    // Find where the biggest jump is
+    if (palmError > 1.0) {
+      cumHtml += '  <span class="bad">Palm detection keypoints are off by ' + fmt(palmError, 2) + '% — error starts at palm detection stage.</span>\n';
+    } else if (roiError > 1.0 && roiError > palmError * 2) {
+      cumHtml += '  <span class="warn">ROI computation amplifies palm detection error significantly.</span>\n';
+    }
+    if (cropModelError > palmError * 1.5 && cropModelError > 0.5) {
+      cumHtml += '  <span class="warn">Landmark model introduces additional ' + fmt(cropModelError - palmError, 2) + '% error beyond palm detection.</span>\n';
+    }
+    if (finalError < 0.5) {
+      cumHtml += '  <span class="good">Overall error is very low — pipelines match well.</span>\n';
+    } else if (finalError < 1.5) {
+      cumHtml += '  <span class="warn">Moderate divergence — check the stage with the biggest bar above.</span>\n';
+    } else {
+      cumHtml += '  <span class="bad">Significant divergence — pipelines produce notably different results.</span>\n';
+    }
+    cumHtml += '</pre>';
+    cumBody.innerHTML = cumHtml;
+
+    // ---- Done ----
+    gs.className = 'status done';
+    gs.textContent = 'Done. Image: ' + imgW + 'x' + imgH + ' | Avg landmark dist: ' + fmt(avgDist, 3) + '% | Max: ' + fmt(maxDist, 3) + '% (' + NAMES[maxDistIdx] + ')';
+
+    // Store for console access
+    window._debugData = {
+      rawDet, microDet, microROI, output, microCropLandmarks, microImageLandmarks, microFinal,
+      mpLandmarks, mpInCropSpace, lmDists, cropDists, imgW, imgH,
+    };
+    console.log('Debug data stored in window._debugData');
+
+  } catch (e) {
+    gs.className = 'status error';
+    gs.textContent = 'ERROR: ' + e.message;
+    console.error(e);
+  }
+}
+
+// Auto-run on load
+run();
+
+</script>
+</body>
+</html>
