@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Batch Compare: micro-handpose vs MediaPipe WebGPU (10 images)</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; margin: 0; }
+    h1 { color: #8af; margin-bottom: 5px; }
+    .subtitle { color: #888; margin-bottom: 20px; font-size: 13px; }
+
+    /* Summary banner */
+    #summary-banner {
+      background: #1a1a2e; border: 2px solid #333; border-radius: 10px;
+      padding: 20px; margin-bottom: 20px; display: none;
+    }
+    #summary-banner h2 { color: #8af; margin: 0 0 12px 0; font-size: 16px; }
+    .summary-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+    }
+    .summary-stat {
+      background: #222; padding: 12px; border-radius: 8px; text-align: center;
+    }
+    .summary-stat .label { font-size: 11px; color: #888; margin-bottom: 4px; }
+    .summary-stat .value { font-size: 28px; font-weight: bold; }
+    .summary-stat .value.good { color: #3f8; }
+    .summary-stat .value.mid { color: #fe8; }
+    .summary-stat .value.bad { color: #f84; }
+
+    /* Progress */
+    #progress-bar {
+      background: #222; border-radius: 8px; padding: 15px; margin-bottom: 20px;
+    }
+    #progress-bar .bar {
+      height: 6px; background: #333; border-radius: 3px; overflow: hidden; margin-top: 8px;
+    }
+    #progress-bar .fill {
+      height: 100%; background: #8af; transition: width 0.3s;
+    }
+
+    /* Image result cards */
+    .image-card {
+      background: #1a1a1a; border: 1px solid #333; border-radius: 10px;
+      padding: 16px; margin-bottom: 16px;
+    }
+    .image-card.pass { border-color: #3f8; }
+    .image-card.fail { border-color: #f84; }
+    .image-card.nohand { border-color: #666; }
+
+    .card-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .card-header h3 { margin: 0; font-size: 14px; color: #ccc; }
+    .card-badge {
+      padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: bold;
+    }
+    .card-badge.pass { background: #143; color: #3f8; }
+    .card-badge.fail { background: #421; color: #f84; }
+    .card-badge.nohand { background: #333; color: #888; }
+
+    .card-visuals {
+      display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px;
+    }
+    .card-visuals > div { text-align: center; }
+    .card-visuals canvas { border: 1px solid #333; border-radius: 4px; }
+    .card-visuals .label { font-size: 10px; color: #888; margin-bottom: 4px; }
+
+    /* Landmark table */
+    .lm-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .lm-table td, .lm-table th { border: 1px solid #333; padding: 3px 6px; }
+    .lm-table th { background: #222; color: #aaa; font-weight: normal; }
+    .lm-table .good { color: #3f8; }
+    .lm-table .mid { color: #fe8; }
+    .lm-table .bad { color: #f84; }
+    .lm-table tr.avg-row { font-weight: bold; background: #1a1a2e; }
+
+    /* Collapsible */
+    .collapsible { cursor: pointer; user-select: none; }
+    .collapsible::before { content: '▶ '; font-size: 10px; }
+    .collapsible.open::before { content: '▼ '; }
+    .collapse-content { display: none; margin-top: 8px; }
+    .collapse-content.open { display: block; }
+
+    /* Aggregate table */
+    #aggregate-table { margin-top: 16px; }
+    #aggregate-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    #aggregate-table td, #aggregate-table th { border: 1px solid #333; padding: 5px 8px; }
+    #aggregate-table th { background: #222; }
+
+    .status-line { font-size: 13px; color: #888; }
+  </style>
+</head>
+<body>
+  <h1>🖐️ Batch Compare: micro-handpose vs MediaPipe WebGPU</h1>
+  <p class="subtitle">Runs both pipelines on 10 images, compares landmark outputs. Both use WebGPU on the same GPU.</p>
+
+  <div id="progress-bar">
+    <div class="status-line" id="progress-status">Initializing...</div>
+    <div class="bar"><div class="fill" id="progress-fill" style="width: 0%"></div></div>
+  </div>
+
+  <div id="summary-banner"></div>
+  <div id="results"></div>
+
+  <script type="module">
+    // ============ CONFIG ============
+    const TEST_IMAGES = [
+      { file: 'test-hands/hand_01.jpg', label: 'Hand Reaching' },
+      { file: 'test-hands/hand_02.jpg', label: 'Hands Showing' },
+      { file: 'test-hands/hand_03.jpg', label: 'Open Hands' },
+      { file: 'test-hands/hand_04.jpg', label: 'Child Hand' },
+      { file: 'test-hands/hand_05.jpg', label: 'Hand Square' },
+      { file: 'test-hands/hand_06.jpg', label: 'Hand Reaching 2' },
+      { file: 'test-hands/hand_07.jpg', label: 'Pointing Finger' },
+      { file: 'test-hands/hand_08.jpg', label: 'Hand Gesture' },
+      { file: 'test-hands/hand_09.jpg', label: 'Nikhil' },
+      { file: 'test-hands/hand_10.jpg', label: 'Test Hand' },
+    ];
+
+    const NAMES = [
+      'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+      'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+      'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+      'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+      'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+    ];
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17],
+    ];
+
+    const CANVAS_SIZE = 300;
+
+    // ============ DRAWING ============
+    function drawHand(ctx, landmarks, w, h, color, lineWidth = 2, dotSize = 3) {
+      ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = lineWidth;
+      for (const [a, b] of CONNECTIONS) {
+        const la = landmarks[a], lb = landmarks[b];
+        if (!la || !lb) continue;
+        ctx.beginPath();
+        ctx.moveTo(la.x * w, la.y * h);
+        ctx.lineTo(lb.x * w, lb.y * h);
+        ctx.stroke();
+      }
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i]; if (!lm) continue;
+        ctx.beginPath();
+        ctx.arc(lm.x * w, lm.y * h, dotSize, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawImageOnCanvas(canvas, img) {
+      const ctx = canvas.getContext('2d');
+      // Fit image maintaining aspect ratio
+      const scale = Math.min(canvas.width / img.naturalWidth, canvas.height / img.naturalHeight);
+      const w = img.naturalWidth * scale;
+      const h = img.naturalHeight * scale;
+      const x = (canvas.width - w) / 2;
+      const y = (canvas.height - h) / 2;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, x, y, w, h);
+      return { x, y, w, h, scale };
+    }
+
+    function drawHandScaled(ctx, landmarks, fit, color, lineWidth = 2, dotSize = 3) {
+      // Transform normalized [0,1] landmarks to fit within the drawn image region
+      const scaled = landmarks.map(lm => ({
+        x: (fit.x + lm.x * fit.w) / CANVAS_SIZE,
+        y: (fit.y + lm.y * fit.h) / CANVAS_SIZE,
+        z: lm.z,
+      }));
+      drawHand(ctx, scaled, CANVAS_SIZE, CANVAS_SIZE, color, lineWidth, dotSize);
+    }
+
+    // ============ LANDMARK COMPARISON ============
+    function compareLandmarks(microLm, mpLm) {
+      const dists = [];
+      for (let i = 0; i < 21; i++) {
+        const m = microLm[i], p = mpLm[i];
+        const dist = Math.sqrt((m.x - p.x) ** 2 + (m.y - p.y) ** 2);
+        dists.push({ idx: i, name: NAMES[i], dist, micro: m, mp: p });
+      }
+      const avg = dists.reduce((s, d) => s + d.dist, 0) / 21;
+      const max = Math.max(...dists.map(d => d.dist));
+      const maxIdx = dists.findIndex(d => d.dist === max);
+      return { dists, avg, max, maxName: NAMES[maxIdx] };
+    }
+
+    function matchHands(microResults, mpLandmarks) {
+      // Match hands between micro and MediaPipe by closest wrist position
+      if (!microResults.length || !mpLandmarks?.length) return [];
+
+      const pairs = [];
+      const usedMp = new Set();
+
+      for (const micro of microResults) {
+        let bestDist = Infinity, bestIdx = -1;
+        for (let j = 0; j < mpLandmarks.length; j++) {
+          if (usedMp.has(j)) continue;
+          const mw = micro.landmarks[0]; // wrist
+          const pw = mpLandmarks[j][0];
+          const d = Math.sqrt((mw.x - pw.x) ** 2 + (mw.y - pw.y) ** 2);
+          if (d < bestDist) { bestDist = d; bestIdx = j; }
+        }
+        if (bestIdx >= 0) {
+          usedMp.add(bestIdx);
+          pairs.push({ microLm: micro.landmarks, mpLm: mpLandmarks[bestIdx], score: micro.score });
+        }
+      }
+      return pairs;
+    }
+
+    // ============ BUILD LANDMARK TABLE HTML ============
+    function buildLandmarkTable(comparison) {
+      let html = '<table class="lm-table"><tr><th>#</th><th>Landmark</th><th>micro (x,y)</th><th>MP GPU (x,y)</th><th>Distance</th><th>%</th></tr>';
+      for (const d of comparison.dists) {
+        const pct = d.dist * 100;
+        const cls = pct < 0.5 ? 'good' : pct < 1.5 ? 'mid' : 'bad';
+        html += `<tr>
+          <td>${d.idx}</td><td>${d.name}</td>
+          <td>(${d.micro.x.toFixed(4)}, ${d.micro.y.toFixed(4)})</td>
+          <td>(${d.mp.x.toFixed(4)}, ${d.mp.y.toFixed(4)})</td>
+          <td class="${cls}">${d.dist.toFixed(5)}</td>
+          <td class="${cls}">${pct.toFixed(3)}%</td>
+        </tr>`;
+      }
+      const avgPct = comparison.avg * 100;
+      const avgCls = avgPct < 0.5 ? 'good' : avgPct < 1.5 ? 'mid' : 'bad';
+      html += `<tr class="avg-row"><td></td><td>AVERAGE</td><td></td><td></td>
+        <td class="${avgCls}">${comparison.avg.toFixed(5)}</td>
+        <td class="${avgCls}">${avgPct.toFixed(3)}%</td></tr>`;
+      html += '</table>';
+      return html;
+    }
+
+    // ============ MAIN ============
+    const progressStatus = document.getElementById('progress-status');
+    const progressFill = document.getElementById('progress-fill');
+    const resultsDiv = document.getElementById('results');
+    const summaryBanner = document.getElementById('summary-banner');
+
+    function setProgress(pct, msg) {
+      progressFill.style.width = pct + '%';
+      progressStatus.textContent = msg;
+    }
+
+    async function loadImage(src) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      return new Promise((resolve, reject) => {
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`Failed to load: ${src}`));
+        img.src = src;
+      });
+    }
+
+    async function run() {
+      try {
+        // ============ STEP 1: Load libraries ============
+        setProgress(5, 'Loading micro-handpose...');
+        const { createHandpose } = await import('./dist/index.js?v=batch1');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.1,
+        });
+
+        setProgress(15, 'Loading MediaPipe...');
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 4,
+        });
+
+        setProgress(25, 'Both pipelines loaded. Starting batch comparison...');
+
+        // ============ STEP 2: Process each image ============
+        const allResults = [];
+        const perLandmarkErrors = Array.from({ length: 21 }, () => []);
+
+        for (let i = 0; i < TEST_IMAGES.length; i++) {
+          const { file, label } = TEST_IMAGES[i];
+          const pct = 25 + (i / TEST_IMAGES.length) * 70;
+          setProgress(pct, `Processing ${i + 1}/${TEST_IMAGES.length}: ${label}...`);
+
+          let img;
+          try {
+            img = await loadImage(file);
+          } catch (e) {
+            allResults.push({ label, file, error: 'Image load failed', handsDetected: false });
+            continue;
+          }
+
+          // Run both pipelines
+          const microResults = await handpose.detect(img);
+          const mpResults = mpGpu.detect(img);
+          const mpLandmarks = mpResults.landmarks || [];
+
+          // Build card
+          const card = document.createElement('div');
+          card.className = 'image-card';
+
+          const microCount = microResults.length;
+          const mpCount = mpLandmarks.length;
+
+          if (microCount === 0 && mpCount === 0) {
+            // Neither detected hands
+            card.classList.add('nohand');
+            card.innerHTML = `
+              <div class="card-header">
+                <h3>${i + 1}. ${label} (${img.naturalWidth}×${img.naturalHeight})</h3>
+                <span class="card-badge nohand">No hands detected</span>
+              </div>
+              <div class="card-visuals">
+                <div><div class="label">Source</div><canvas width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas></div>
+              </div>`;
+            const srcCanvas = card.querySelector('canvas');
+            drawImageOnCanvas(srcCanvas, img);
+            resultsDiv.appendChild(card);
+            allResults.push({ label, file, handsDetected: false, microCount: 0, mpCount: 0 });
+            continue;
+          }
+
+          // Match hands and compute comparison
+          const pairs = matchHands(microResults, mpLandmarks);
+
+          if (pairs.length === 0) {
+            // Only one pipeline detected hands
+            card.classList.add('fail');
+            const who = microCount > 0 ? `micro: ${microCount}, MP: 0` : `micro: 0, MP: ${mpCount}`;
+            card.innerHTML = `
+              <div class="card-header">
+                <h3>${i + 1}. ${label} (${img.naturalWidth}×${img.naturalHeight})</h3>
+                <span class="card-badge fail">Detection mismatch (${who})</span>
+              </div>
+              <div class="card-visuals">
+                <div><div class="label">Source</div><canvas width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas></div>
+                <div><div class="label">micro (${microCount} hands)</div><canvas width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas></div>
+                <div><div class="label">MediaPipe GPU (${mpCount} hands)</div><canvas width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas></div>
+              </div>`;
+            const canvases = card.querySelectorAll('canvas');
+            const fit0 = drawImageOnCanvas(canvases[0], img);
+            const fit1 = drawImageOnCanvas(canvases[1], img);
+            for (const r of microResults) drawHandScaled(canvases[1].getContext('2d'), r.landmarks, fit1, '#ff4444');
+            const fit2 = drawImageOnCanvas(canvases[2], img);
+            for (const mpLm of mpLandmarks) drawHandScaled(canvases[2].getContext('2d'), mpLm, fit2, '#44ff44');
+            resultsDiv.appendChild(card);
+            allResults.push({ label, file, handsDetected: true, mismatch: true, microCount, mpCount });
+            continue;
+          }
+
+          // Compare first matched pair (primary hand)
+          const comparison = compareLandmarks(pairs[0].microLm, pairs[0].mpLm);
+          const avgPct = comparison.avg * 100;
+          const passed = avgPct < 1.5; // < 1.5% is acceptable
+
+          // Track per-landmark errors
+          for (const d of comparison.dists) {
+            perLandmarkErrors[d.idx].push(d.dist);
+          }
+
+          card.classList.add(passed ? 'pass' : 'fail');
+
+          // Build visual section
+          card.innerHTML = `
+            <div class="card-header">
+              <h3>${i + 1}. ${label} (${img.naturalWidth}×${img.naturalHeight}) — ${microCount} micro / ${mpCount} MP hands</h3>
+              <span class="card-badge ${passed ? 'pass' : 'fail'}">${avgPct.toFixed(3)}% avg dist</span>
+            </div>
+            <div class="card-visuals">
+              <div><div class="label">micro (red)</div><canvas id="c${i}-micro" width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas></div>
+              <div><div class="label">MediaPipe GPU (green)</div><canvas id="c${i}-mp" width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas></div>
+              <div><div class="label">Both overlaid</div><canvas id="c${i}-both" width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas></div>
+              <div><div class="label">Diff (10x amplified)</div><canvas id="c${i}-diff" width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas></div>
+            </div>
+            <div>
+              <span class="collapsible" onclick="this.classList.toggle('open'); this.nextElementSibling.classList.toggle('open');">Per-landmark breakdown (max: ${(comparison.max * 100).toFixed(3)}% at ${comparison.maxName})</span>
+              <div class="collapse-content" id="table${i}"></div>
+            </div>`;
+
+          resultsDiv.appendChild(card);
+
+          // Draw canvases
+          const microCanvas = document.getElementById(`c${i}-micro`);
+          const mpCanvas = document.getElementById(`c${i}-mp`);
+          const bothCanvas = document.getElementById(`c${i}-both`);
+          const diffCanvas = document.getElementById(`c${i}-diff`);
+
+          const fit1 = drawImageOnCanvas(microCanvas, img);
+          drawHandScaled(microCanvas.getContext('2d'), pairs[0].microLm, fit1, '#ff4444', 2, 4);
+
+          const fit2 = drawImageOnCanvas(mpCanvas, img);
+          drawHandScaled(mpCanvas.getContext('2d'), pairs[0].mpLm, fit2, '#44ff44', 2, 4);
+
+          const fit3 = drawImageOnCanvas(bothCanvas, img);
+          const bothCtx = bothCanvas.getContext('2d');
+          drawHandScaled(bothCtx, pairs[0].microLm, fit3, '#ff4444', 2, 4);
+          drawHandScaled(bothCtx, pairs[0].mpLm, fit3, '#44ff44', 2, 4);
+          bothCtx.font = '11px monospace';
+          bothCtx.fillStyle = '#ff4444'; bothCtx.fillText('RED = micro', 6, 14);
+          bothCtx.fillStyle = '#44ff44'; bothCtx.fillText('GREEN = MediaPipe', 6, 28);
+
+          // Diff image
+          const fit4 = drawImageOnCanvas(diffCanvas, img);
+          // Draw both hands on two temp canvases and diff them
+          const tmpA = document.createElement('canvas');
+          tmpA.width = CANVAS_SIZE; tmpA.height = CANVAS_SIZE;
+          const tmpB = document.createElement('canvas');
+          tmpB.width = CANVAS_SIZE; tmpB.height = CANVAS_SIZE;
+          drawImageOnCanvas(tmpA, img);
+          drawHandScaled(tmpA.getContext('2d'), pairs[0].microLm, fit4, '#ffffff', 3, 5);
+          drawImageOnCanvas(tmpB, img);
+          drawHandScaled(tmpB.getContext('2d'), pairs[0].mpLm, fit4, '#ffffff', 3, 5);
+          const dA = tmpA.getContext('2d').getImageData(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+          const dB = tmpB.getContext('2d').getImageData(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+          const diffCtx = diffCanvas.getContext('2d');
+          const diffData = diffCtx.createImageData(CANVAS_SIZE, CANVAS_SIZE);
+          for (let p = 0; p < CANVAS_SIZE * CANVAS_SIZE; p++) {
+            const dr = Math.abs(dA.data[p*4] - dB.data[p*4]) * 10;
+            const dg = Math.abs(dA.data[p*4+1] - dB.data[p*4+1]) * 10;
+            const db = Math.abs(dA.data[p*4+2] - dB.data[p*4+2]) * 10;
+            diffData.data[p*4] = Math.min(255, dr);
+            diffData.data[p*4+1] = Math.min(255, dg);
+            diffData.data[p*4+2] = Math.min(255, db);
+            diffData.data[p*4+3] = 255;
+          }
+          diffCtx.putImageData(diffData, 0, 0);
+
+          // Landmark table
+          document.getElementById(`table${i}`).innerHTML = buildLandmarkTable(comparison);
+
+          allResults.push({
+            label, file, handsDetected: true, microCount, mpCount,
+            avgDist: comparison.avg, maxDist: comparison.max, maxName: comparison.maxName,
+            passed,
+          });
+        }
+
+        // ============ STEP 3: Summary ============
+        setProgress(100, 'Done!');
+
+        const withHands = allResults.filter(r => r.handsDetected && !r.mismatch && r.avgDist !== undefined);
+        const noHands = allResults.filter(r => !r.handsDetected);
+        const mismatches = allResults.filter(r => r.mismatch);
+        const passing = withHands.filter(r => r.passed);
+
+        const overallAvg = withHands.length > 0
+          ? withHands.reduce((s, r) => s + r.avgDist, 0) / withHands.length
+          : 0;
+        const overallMax = withHands.length > 0
+          ? Math.max(...withHands.map(r => r.maxDist))
+          : 0;
+        const overallMaxImg = withHands.find(r => r.maxDist === overallMax);
+
+        const avgPct = overallAvg * 100;
+        const maxPct = overallMax * 100;
+        const avgCls = avgPct < 0.5 ? 'good' : avgPct < 1.5 ? 'mid' : 'bad';
+        const passCls = passing.length === withHands.length ? 'good' : passing.length > withHands.length / 2 ? 'mid' : 'bad';
+
+        // Per-landmark averages across all images
+        let worstLandmark = '', worstLandmarkAvg = 0;
+        for (let i = 0; i < 21; i++) {
+          if (perLandmarkErrors[i].length > 0) {
+            const avg = perLandmarkErrors[i].reduce((s, v) => s + v, 0) / perLandmarkErrors[i].length;
+            if (avg > worstLandmarkAvg) {
+              worstLandmarkAvg = avg;
+              worstLandmark = NAMES[i];
+            }
+          }
+        }
+
+        summaryBanner.style.display = 'block';
+        summaryBanner.innerHTML = `
+          <h2>📊 Summary — ${TEST_IMAGES.length} Images</h2>
+          <div class="summary-grid">
+            <div class="summary-stat">
+              <div class="label">Overall Avg Distance</div>
+              <div class="value ${avgCls}">${avgPct.toFixed(3)}%</div>
+            </div>
+            <div class="summary-stat">
+              <div class="label">Overall Max Distance</div>
+              <div class="value ${maxPct < 1 ? 'good' : maxPct < 3 ? 'mid' : 'bad'}">${maxPct.toFixed(3)}%</div>
+              <div class="label">${overallMaxImg?.label || '?'} → ${overallMaxImg?.maxName || '?'}</div>
+            </div>
+            <div class="summary-stat">
+              <div class="label">Pass Rate (<1.5%)</div>
+              <div class="value ${passCls}">${passing.length}/${withHands.length}</div>
+            </div>
+            <div class="summary-stat">
+              <div class="label">Hands Detected</div>
+              <div class="value" style="color: #8af">${withHands.length + mismatches.length}/${TEST_IMAGES.length}</div>
+              <div class="label">${noHands.length} no hands, ${mismatches.length} mismatches</div>
+            </div>
+            <div class="summary-stat">
+              <div class="label">Worst Landmark (avg)</div>
+              <div class="value ${worstLandmarkAvg * 100 < 1 ? 'mid' : 'bad'}" style="font-size: 20px">${worstLandmark}</div>
+              <div class="label">${(worstLandmarkAvg * 100).toFixed(3)}%</div>
+            </div>
+            <div class="summary-stat">
+              <div class="label">Target</div>
+              <div class="value" style="font-size: 16px; color: #888">MP GPU↔CPU: ~0.27%</div>
+            </div>
+          </div>
+
+          <div id="aggregate-table" style="margin-top: 16px;">
+            <span class="collapsible" onclick="this.classList.toggle('open'); this.nextElementSibling.classList.toggle('open');">Per-landmark averages across all ${withHands.length} images</span>
+            <div class="collapse-content">
+              <table>
+                <tr><th>#</th><th>Landmark</th><th>Avg Dist</th><th>Avg %</th><th>Max Dist</th><th>Max %</th><th>Samples</th></tr>
+                ${NAMES.map((name, idx) => {
+                  const errs = perLandmarkErrors[idx];
+                  if (errs.length === 0) return '';
+                  const avg = errs.reduce((s, v) => s + v, 0) / errs.length;
+                  const max = Math.max(...errs);
+                  const cls = avg * 100 < 0.5 ? 'good' : avg * 100 < 1.5 ? 'mid' : 'bad';
+                  return `<tr><td>${idx}</td><td>${name}</td>
+                    <td class="${cls}">${avg.toFixed(5)}</td><td class="${cls}">${(avg * 100).toFixed(3)}%</td>
+                    <td>${max.toFixed(5)}</td><td>${(max * 100).toFixed(3)}%</td>
+                    <td>${errs.length}</td></tr>`;
+                }).join('')}
+              </table>
+            </div>
+          </div>
+
+          <div id="image-summary-table" style="margin-top: 16px;">
+            <span class="collapsible" onclick="this.classList.toggle('open'); this.nextElementSibling.classList.toggle('open');">Per-image summary</span>
+            <div class="collapse-content">
+              <table>
+                <tr><th>#</th><th>Image</th><th>micro</th><th>MP</th><th>Avg Dist</th><th>Max Dist</th><th>Worst</th><th>Status</th></tr>
+                ${allResults.map((r, idx) => {
+                  if (!r.handsDetected) return `<tr><td>${idx+1}</td><td>${r.label}</td><td colspan="6" style="color:#666">No hands detected</td></tr>`;
+                  if (r.mismatch) return `<tr><td>${idx+1}</td><td>${r.label}</td><td>${r.microCount}</td><td>${r.mpCount}</td><td colspan="4" style="color:#f84">Detection mismatch</td></tr>`;
+                  const cls = r.passed ? 'good' : 'bad';
+                  return `<tr><td>${idx+1}</td><td>${r.label}</td><td>${r.microCount}</td><td>${r.mpCount}</td>
+                    <td class="${cls}">${(r.avgDist * 100).toFixed(3)}%</td>
+                    <td>${(r.maxDist * 100).toFixed(3)}%</td>
+                    <td>${r.maxName}</td>
+                    <td class="${cls}">${r.passed ? '✅' : '❌'}</td></tr>`;
+                }).join('')}
+              </table>
+            </div>
+          </div>
+        `;
+
+        // Log to console for easy copy
+        console.log('=== BATCH COMPARE RESULTS ===');
+        console.log(`Overall avg: ${avgPct.toFixed(3)}%`);
+        console.log(`Overall max: ${maxPct.toFixed(3)}% (${overallMaxImg?.label} → ${overallMaxImg?.maxName})`);
+        console.log(`Pass rate: ${passing.length}/${withHands.length}`);
+        console.log(`Worst landmark: ${worstLandmark} (${(worstLandmarkAvg * 100).toFixed(3)}%)`);
+        console.table(allResults.filter(r => r.avgDist).map(r => ({
+          image: r.label,
+          avgPct: (r.avgDist * 100).toFixed(3) + '%',
+          maxPct: (r.maxDist * 100).toFixed(3) + '%',
+          worst: r.maxName,
+          pass: r.passed ? '✅' : '❌',
+        })));
+
+      } catch (e) {
+        setProgress(0, `❌ Error: ${e.message}`);
+        console.error(e);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
