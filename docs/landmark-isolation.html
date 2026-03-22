@@ -49,7 +49,7 @@
       margin-bottom: 12px; flex-wrap: wrap; gap: 8px;
     }
     .card-header h3 { margin: 0; font-size: 13px; color: #ccc; }
-    .card-badges { display: flex; gap: 6px; }
+    .card-badges { display: flex; gap: 6px; flex-wrap: wrap; }
     .badge {
       padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: bold;
     }
@@ -80,23 +80,24 @@
       padding: 14px; margin-bottom: 20px; font-size: 12px; line-height: 1.6;
     }
     .explanation b { color: #8af; }
+    .roi-info { font-size: 11px; color: #888; margin: 6px 0; font-family: monospace; }
+    .roi-info span { color: #aaf; }
   </style>
 </head>
 <body>
   <h1>🔬 Landmark Model Isolation Test</h1>
-  <p class="subtitle">Bypasses our palm detection — uses MediaPipe's detected hand position to crop, then runs our landmark model on that crop.</p>
+  <p class="subtitle">Tests 3 configurations: (A) our full pipeline, (B) our box + MP's keypoints for rotation, (C) direct crop from MP's landmarks</p>
 
   <div class="explanation">
-    <b>Purpose:</b> Our full pipeline has ~1% landmark error vs MediaPipe. The activation-level debug showed the palm detection
-    middle_MCP keypoint is 2.82% off, cascading into rotation and crop errors. This test isolates the landmark model by:
-    <br>1. Running MediaPipe to get its final landmarks (ground truth)
-    <br>2. Using MediaPipe's wrist + middle_MCP landmarks as if they were palm detection keypoints
-    <br>3. Computing the crop ROI using our <code>detectionToPixelROI</code> math
-    <br>4. Feeding that crop into our landmark model
-    <br>5. Comparing to MediaPipe's landmarks
+    <b>Purpose:</b> Isolate whether the ~1% error vs MediaPipe comes from palm detection or the landmark model.
     <br><br>
-    <b>Expected:</b> If our landmark model is correct, error should drop from ~1% to ~0.3% (matching MP GPU↔CPU variance).
-    If it stays at ~1%, the landmark model architecture or weights also diverge.
+    <b>Method A — Full Pipeline:</b> Our normal pipeline (palm detection → crop → landmark model). Baseline ~1% error.
+    <br><b>Method B — Our Box, MP's Rotation:</b> Uses our palm detection's bounding box but substitutes MediaPipe's
+    wrist+middleMCP for rotation computation. Tests if rotation accuracy is the issue.
+    <br><b>Method C — MP-Derived Crop:</b> Computes crop directly from MediaPipe's final landmarks (centroid, bounding box,
+    rotation from wrist→middleMCP). Tests if our landmark model produces correct results with a "perfect" crop.
+    <br><br>
+    <b>Expected:</b> If the landmark model is correct, Method C should approach ~0.27% (MP GPU↔CPU baseline).
   </div>
 
   <div id="progress-bar">
@@ -135,7 +136,7 @@
       [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17],
     ];
 
-    const CANVAS_SIZE = 280;
+    const CANVAS_SIZE = 250;
     const LANDMARK_SIZE = 224;
 
     function drawHand(ctx, landmarks, w, h, color, lineWidth = 2, dotSize = 3) {
@@ -179,95 +180,64 @@
     }
 
     /**
-     * Compute crop ROI from wrist + middleMCP landmarks (MediaPipe's pipeline).
-     * This replicates detectionToPixelROI but takes landmark coords instead of PalmDetection.
+     * Method C: Compute crop ROI directly from MediaPipe's 21 landmarks.
+     * Uses the same math as detectionToPixelROI but derives box from landmark positions.
      */
-    function computeROIFromLandmarks(wrist, middleMCP, imgW, imgH) {
-      // We need to simulate what the palm detector would produce.
-      // The palm detector outputs a bounding box + keypoints.
-      // keypoints[0] = wrist, keypoints[2] = middle_MCP
-      //
-      // For the box, we'll derive it from the two keypoints.
-      // MediaPipe's palm detector box is centered between wrist and middleMCP,
-      // with size proportional to the distance between them.
+    function computeROIFromMPLandmarks(mpLm, imgW, imgH) {
+      const wrist = mpLm[0];
+      const middleMCP = mpLm[9];
 
-      const dx = middleMCP.x - wrist.x;
-      const dy = middleMCP.y - wrist.y;
-      const handLen = Math.sqrt(dx * dx + dy * dy);
-
-      // The palm detector box typically spans ~2x the wrist-to-middleMCP distance
-      // Box center is midpoint of wrist and middleMCP
-      const cx = (wrist.x + middleMCP.x) / 2;
-      const cy = (wrist.y + middleMCP.y) / 2;
-      const boxW = handLen * 2.4; // approximate palm detector box width
-      const boxH = handLen * 2.4;
-
-      // Now compute rotation (same as detectionToPixelROI)
-      const angle = Math.atan2(-dy, dx);
-      const targetAngle = Math.PI / 2;
-      const rotation = targetAngle - angle;
-
-      // RectTransformationCalculator
-      const longSidePx = Math.max(boxW * imgW, boxH * imgH);
-      const shiftYnorm = -0.5 * longSidePx / imgH;
-      const cosR = Math.cos(rotation);
-      const sinR = Math.sin(rotation);
-      const newCx = cx + (-shiftYnorm * sinR); // shiftX = 0
-      const newCy = cy + (shiftYnorm * cosR);
-
-      const scale = 2.6;
-      const sizePx = longSidePx * scale;
-
-      return {
-        centerXpx: newCx * imgW,
-        centerYpx: newCy * imgH,
-        sizePx,
-        rotation,
-      };
-    }
-
-    /**
-     * Alternative: Directly compute the crop from MediaPipe landmarks
-     * without going through the palm detection simulation.
-     * Uses wrist+middleMCP for rotation, and a bounding box of all landmarks for size.
-     */
-    function computeROIFromAllLandmarks(mpLandmarks, imgW, imgH) {
-      const wrist = mpLandmarks[0];
-      const middleMCP = mpLandmarks[9];
-
-      // Rotation from wrist → middleMCP (same as palm detection)
+      // Rotation: same formula as our detectionToPixelROI
       const dx = middleMCP.x - wrist.x;
       const dy = middleMCP.y - wrist.y;
       const angle = Math.atan2(-dy, dx);
       const targetAngle = Math.PI / 2;
       const rotation = targetAngle - angle;
 
-      // Compute bounding box of all landmarks to estimate palm detector box
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      for (const lm of mpLandmarks) {
-        minX = Math.min(minX, lm.x);
-        maxX = Math.max(maxX, lm.x);
-        minY = Math.min(minY, lm.y);
-        maxY = Math.max(maxY, lm.y);
+      // To derive the palm detection box: rotate all landmarks by -rotation around centroid,
+      // then compute bounding box in that aligned frame.
+      // This gives us the "natural" box that the palm detector would have found.
+      const cosR = Math.cos(-rotation);
+      const sinR = Math.sin(-rotation);
+
+      // Use wrist-middleMCP midpoint as pivot (matches palm detector's box center heuristic)
+      const pivotX = (wrist.x + middleMCP.x) / 2;
+      const pivotY = (wrist.y + middleMCP.y) / 2;
+
+      let minRX = Infinity, maxRX = -Infinity, minRY = Infinity, maxRY = -Infinity;
+      for (const lm of mpLm) {
+        const relX = lm.x - pivotX;
+        const relY = lm.y - pivotY;
+        const rx = cosR * relX - sinR * relY;
+        const ry = sinR * relX + cosR * relY;
+        minRX = Math.min(minRX, rx); maxRX = Math.max(maxRX, rx);
+        minRY = Math.min(minRY, ry); maxRY = Math.max(maxRY, ry);
       }
 
-      const bboxW = maxX - minX;
-      const bboxH = maxY - minY;
-      const cx = (minX + maxX) / 2;
-      const cy = (minY + maxY) / 2;
+      // The bounding box in the aligned frame
+      const bboxW = (maxRX - minRX);
+      const bboxH = (maxRY - minRY);
 
-      // Estimate palm detector box: ~60% of full hand bbox centered at wrist-middleMCP midpoint
-      const palmCx = (wrist.x + middleMCP.x) / 2;
-      const palmCy = (wrist.y + middleMCP.y) / 2;
-      const palmW = Math.max(bboxW, bboxH) * 0.65;
-      const palmH = palmW;
+      // Palm detector box center: we'll use wrist-middleMCP midpoint
+      // (approximate but reasonable for the palm region)
+      const cx = pivotX;
+      const cy = pivotY;
 
-      const longSidePx = Math.max(palmW * imgW, palmH * imgH);
+      // The palm box size: palm detector typically finds the palm (wrist to MCP),
+      // which is about 40-50% of the full hand height.
+      // Use wrist-to-middleMCP distance as the box "height"
+      const palmLen = Math.sqrt(dx * dx + dy * dy);
+      // Make the box roughly square, sized to the palm
+      const boxW = palmLen * 1.0;  // palm width ≈ palm length
+      const boxH = palmLen * 1.0;
+
+      // Now feed through the same pipeline as detectionToPixelROI
+      const longSidePx = Math.max(boxW * imgW, boxH * imgH);
       const shiftYnorm = -0.5 * longSidePx / imgH;
-      const cosR = Math.cos(rotation);
-      const sinR = Math.sin(rotation);
-      const newCx = palmCx + (-shiftYnorm * sinR);
-      const newCy = palmCy + (shiftYnorm * cosR);
+      const cosR2 = Math.cos(rotation);
+      const sinR2 = Math.sin(rotation);
+      const newCx = cx + (-shiftYnorm * sinR2);
+      const newCy = cy + (shiftYnorm * cosR2);
 
       const scale = 2.6;
       const sizePx = longSidePx * scale;
@@ -278,45 +248,6 @@
         sizePx,
         rotation,
       };
-    }
-
-    /**
-     * Run our palm detection to get its actual output,
-     * then use MediaPipe's palm keypoints (from final landmarks) instead.
-     */
-    function computeROIFromMPPalmKPs(mpLandmarks, imgW, imgH, microDebug) {
-      // Use our full pipeline's ROI computation, but with MP's landmark positions
-      // as the palm detection keypoints.
-      //
-      // The key insight: MediaPipe's palm detector outputs [wrist, middle_mcp] as keypoints[0,2].
-      // Our pipeline then uses detectionToPixelROI on those.
-      // If we feed MP's final wrist/middleMCP into our detectionToPixelROI,
-      // we get the crop that our pipeline would compute with perfect palm detection.
-      const wrist = mpLandmarks[0];
-      const middleMCP = mpLandmarks[9];
-
-      // Create a fake PalmDetection with MP's keypoints
-      // We need a bounding box too — derive from keypoints
-      const dx = middleMCP.x - wrist.x;
-      const dy = middleMCP.y - wrist.y;
-      const handLen = Math.sqrt(dx * dx + dy * dy);
-
-      // Palm detection box: center at midpoint, size proportional to hand length
-      const cx = (wrist.x + middleMCP.x) / 2;
-      const cy = (wrist.y + middleMCP.y) / 2;
-      const halfSize = handLen * 1.2;
-
-      const fakeDet = {
-        score: 1.0,
-        box: [cx, cy, halfSize * 2, halfSize * 2], // [cx, cy, w, h]
-        keypoints: [
-          [wrist.x, wrist.y],       // kp[0] = wrist
-          [cx, cy],                  // kp[1] = unused placeholder
-          [middleMCP.x, middleMCP.y], // kp[2] = middle_MCP
-        ],
-      };
-
-      return microDebug.detectionToPixelROI(fakeDet, imgW, imgH);
     }
 
     function cropHandCanvas(img, pxROI) {
@@ -341,7 +272,7 @@
       return canvas;
     }
 
-    function projectLandmarksToImage(rawLandmarks, pxROI, imgW, imgH) {
+    function projectLandmarks(rawLandmarks, pxROI, imgW, imgH) {
       const cosR = Math.cos(pxROI.rotation);
       const sinR = Math.sin(pxROI.rotation);
       const landmarks = [];
@@ -349,27 +280,23 @@
         const lx = rawLandmarks[i * 3];
         const ly = rawLandmarks[i * 3 + 1];
         const lz = rawLandmarks[i * 3 + 2];
-
-        const dx = (lx - 0.5) * pxROI.sizePx;
-        const dy = (ly - 0.5) * pxROI.sizePx;
-        const origXpx = cosR * dx - sinR * dy + pxROI.centerXpx;
-        const origYpx = sinR * dx + cosR * dy + pxROI.centerYpx;
-
+        const ddx = (lx - 0.5) * pxROI.sizePx;
+        const ddy = (ly - 0.5) * pxROI.sizePx;
         landmarks.push({
-          x: origXpx / imgW,
-          y: origYpx / imgH,
+          x: (cosR * ddx - sinR * ddy + pxROI.centerXpx) / imgW,
+          y: (sinR * ddx + cosR * ddy + pxROI.centerYpx) / imgH,
           z: lz,
         });
       }
       return landmarks;
     }
 
-    function compareLandmarks(microLm, mpLm) {
+    function compareLandmarks(aLm, bLm) {
       const dists = [];
       for (let i = 0; i < 21; i++) {
-        const m = microLm[i], p = mpLm[i];
+        const m = aLm[i], p = bLm[i];
         const dist = Math.sqrt((m.x - p.x) ** 2 + (m.y - p.y) ** 2);
-        dists.push({ idx: i, name: NAMES[i], dist, micro: m, mp: p });
+        dists.push({ idx: i, name: NAMES[i], dist });
       }
       const avg = dists.reduce((s, d) => s + d.dist, 0) / 21;
       const max = Math.max(...dists.map(d => d.dist));
@@ -377,38 +304,23 @@
       return { dists, avg, max, maxName: NAMES[maxIdx] };
     }
 
-    function buildLandmarkTable(compIsolated, compFull) {
-      let html = `<table class="lm-table">
-        <tr><th>#</th><th>Landmark</th>
-        <th>Isolated %</th><th>Full Pipeline %</th><th>Improvement</th></tr>`;
-      for (let i = 0; i < 21; i++) {
-        const iso = compIsolated.dists[i];
-        const full = compFull ? compFull.dists[i] : null;
-        const isoPct = iso.dist * 100;
-        const fullPct = full ? full.dist * 100 : 0;
-        const improvement = full ? ((fullPct - isoPct) / fullPct * 100) : 0;
-        const isoCls = isoPct < 0.3 ? 'good' : isoPct < 1.0 ? 'mid' : 'bad';
-        const fullCls = fullPct < 0.3 ? 'good' : fullPct < 1.0 ? 'mid' : 'bad';
-        html += `<tr>
-          <td>${i}</td><td style="text-align:left">${NAMES[i]}</td>
-          <td class="${isoCls}">${isoPct.toFixed(3)}%</td>
-          <td class="${fullCls}">${fullPct.toFixed(3)}%</td>
-          <td class="${improvement > 0 ? 'good' : 'bad'}">${improvement > 0 ? '+' : ''}${improvement.toFixed(1)}%</td>
-        </tr>`;
+    function matchHands(microResults, mpLandmarks) {
+      const pairs = [];
+      const usedMp = new Set();
+      for (const micro of microResults) {
+        let bestDist = Infinity, bestIdx = -1;
+        for (let j = 0; j < mpLandmarks.length; j++) {
+          if (usedMp.has(j)) continue;
+          const mw = micro.landmarks[0], pw = mpLandmarks[j][0];
+          const d = Math.sqrt((mw.x - pw.x) ** 2 + (mw.y - pw.y) ** 2);
+          if (d < bestDist) { bestDist = d; bestIdx = j; }
+        }
+        if (bestIdx >= 0 && bestDist < 0.15) {
+          usedMp.add(bestIdx);
+          pairs.push({ microLm: micro.landmarks, mpLm: mpLandmarks[bestIdx], mpIdx: bestIdx });
+        }
       }
-      const isoAvg = compIsolated.avg * 100;
-      const fullAvg = compFull ? compFull.avg * 100 : 0;
-      const avgImprove = fullAvg > 0 ? ((fullAvg - isoAvg) / fullAvg * 100) : 0;
-      const isoAvgCls = isoAvg < 0.3 ? 'good' : isoAvg < 1.0 ? 'mid' : 'bad';
-      const fullAvgCls = fullAvg < 0.3 ? 'good' : fullAvg < 1.0 ? 'mid' : 'bad';
-      html += `<tr class="avg-row">
-        <td></td><td style="text-align:left">AVERAGE</td>
-        <td class="${isoAvgCls}">${isoAvg.toFixed(3)}%</td>
-        <td class="${fullAvgCls}">${fullAvg.toFixed(3)}%</td>
-        <td class="${avgImprove > 0 ? 'good' : 'bad'}">${avgImprove > 0 ? '+' : ''}${avgImprove.toFixed(1)}%</td>
-      </tr>`;
-      html += '</table>';
-      return html;
+      return pairs;
     }
 
     // ============ MAIN ============
@@ -434,9 +346,8 @@
 
     async function run() {
       try {
-        // Load micro-handpose
         setProgress(5, 'Loading micro-handpose...');
-        const { createHandpose } = await import('./dist/index.js?v=iso1');
+        const { createHandpose } = await import('./dist/index.js?v=iso2');
         const handpose = await createHandpose({
           weightsUrl: 'weights',
           scoreThreshold: 0.1,
@@ -444,7 +355,6 @@
         });
         const debug = handpose._debug;
 
-        // Load MediaPipe
         setProgress(15, 'Loading MediaPipe...');
         const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
         const { HandLandmarker, FilesetResolver } = vision;
@@ -460,17 +370,16 @@
           numHands: 4,
         });
 
-        setProgress(25, 'Both pipelines loaded. Running isolation tests...');
+        setProgress(25, 'Both loaded. Running tests...');
 
-        const allIsolated = [];
-        const allFull = [];
-        const perLmIso = Array.from({ length: 21 }, () => []);
-        const perLmFull = Array.from({ length: 21 }, () => []);
+        // Track results for each method
+        const statsA = []; // Full pipeline
+        const statsB = []; // Our box + MP rotation
+        const statsC = []; // MP-derived crop
 
         for (let i = 0; i < TEST_IMAGES.length; i++) {
           const { file, label } = TEST_IMAGES[i];
-          const pct = 25 + (i / TEST_IMAGES.length) * 70;
-          setProgress(pct, `Processing ${i + 1}/${TEST_IMAGES.length}: ${label}...`);
+          setProgress(25 + (i / TEST_IMAGES.length) * 70, `${i + 1}/${TEST_IMAGES.length}: ${label}`);
 
           let img;
           try { img = await loadImage(file); } catch (e) { continue; }
@@ -484,234 +393,283 @@
           if (mpLandmarkSets.length === 0) {
             const card = document.createElement('div');
             card.className = 'image-card nohand';
-            card.innerHTML = `<div class="card-header">
-              <h3>${i + 1}. ${label} (${imgW}×${imgH})</h3>
-              <span class="badge" style="background:#333;color:#888">No hands (MP)</span>
-            </div>`;
+            card.innerHTML = `<div class="card-header"><h3>${i + 1}. ${label}</h3>
+              <span class="badge" style="background:#333;color:#888">No hands (MP)</span></div>`;
             resultsDiv.appendChild(card);
             continue;
           }
 
-          // Run our full pipeline for comparison
+          // Run our full pipeline — get raw palm detections too
+          // We need to run palm detection separately to get the raw PalmDetection objects
+          const { detections: rawDets, lbPadX, lbPadY } =
+            await debug.palmDetector.detectRawWithResize(img, imgW, imgH);
+
+          // Also run full pipeline for Method A comparison
           const microResults = await handpose.detect(img);
 
-          // For each MP hand
+          // Match our detections to MP's hands
           for (let h = 0; h < mpLandmarkSets.length; h++) {
             const mpLm = mpLandmarkSets[h];
 
-            // === ISOLATION TEST ===
-            // Use MP's wrist (0) + middle_MCP (9) as palm detection keypoints
-            const pxROI = computeROIFromMPPalmKPs(mpLm, imgW, imgH, debug);
+            // === METHOD A: Full pipeline ===
+            let compA = null;
+            const pairs = matchHands(microResults, [mpLm]);
+            if (pairs.length > 0) {
+              compA = compareLandmarks(pairs[0].microLm, mpLm);
+              statsA.push({ label, hand: h, comp: compA });
+            }
 
-            // Crop using the same function our pipeline uses
-            const cropCanvas = cropHandCanvas(img, pxROI);
+            // === METHOD B: Our box + MP's keypoints for rotation ===
+            // Find our raw detection that best matches this MP hand
+            let compB = null;
+            if (rawDets.length > 0) {
+              // Remove letterbox from our detections
+              const sx = 1 / (1 - 2 * lbPadX);
+              const sy = 1 / (1 - 2 * lbPadY);
 
-            // Run our landmark model on this crop
-            const output = await debug.landmarkModel.runFromCanvas(cropCanvas);
-            const handScore = output.handflag[0];
-
-            // Project landmarks back to image space
-            const isoLandmarks = projectLandmarksToImage(output.landmarks, pxROI, imgW, imgH);
-
-            // Compare isolated landmarks to MP
-            const compIso = compareLandmarks(isoLandmarks, mpLm);
-
-            // Compare full pipeline to MP (find matching hand by wrist proximity)
-            let compFull = null;
-            if (microResults.length > 0) {
-              let bestDist = Infinity, bestIdx = -1;
-              for (let j = 0; j < microResults.length; j++) {
-                const mw = microResults[j].landmarks[0];
-                const pw = mpLm[0];
-                const d = Math.sqrt((mw.x - pw.x) ** 2 + (mw.y - pw.y) ** 2);
-                if (d < bestDist) { bestDist = d; bestIdx = j; }
+              let bestDetIdx = 0;
+              let bestDetDist = Infinity;
+              for (let d = 0; d < rawDets.length; d++) {
+                const det = rawDets[d];
+                // Remove letterbox from wrist keypoint
+                const wristX = (det.keypoints[0][0] - lbPadX) * sx;
+                const wristY = (det.keypoints[0][1] - lbPadY) * sy;
+                const dist = Math.sqrt((wristX - mpLm[0].x) ** 2 + (wristY - mpLm[0].y) ** 2);
+                if (dist < bestDetDist) { bestDetDist = dist; bestDetIdx = d; }
               }
-              if (bestIdx >= 0 && bestDist < 0.1) {
-                compFull = compareLandmarks(microResults[bestIdx].landmarks, mpLm);
+
+              if (bestDetDist < 0.15) {
+                const rawDet = rawDets[bestDetIdx];
+                // Remove letterbox
+                const det = {
+                  score: rawDet.score,
+                  box: [
+                    (rawDet.box[0] - lbPadX) * sx,
+                    (rawDet.box[1] - lbPadY) * sy,
+                    rawDet.box[2] * sx,
+                    rawDet.box[3] * sy,
+                  ],
+                  // Replace keypoints with MP's landmarks for rotation
+                  keypoints: rawDet.keypoints.map(([kx, ky]) => [
+                    (kx - lbPadX) * sx,
+                    (ky - lbPadY) * sy,
+                  ]),
+                };
+
+                // Method B: keep box, swap keypoints 0 and 2 with MP's wrist/middleMCP
+                const detB = {
+                  ...det,
+                  keypoints: [
+                    [mpLm[0].x, mpLm[0].y],   // wrist from MP
+                    det.keypoints[1],           // keep
+                    [mpLm[9].x, mpLm[9].y],   // middleMCP from MP
+                    ...det.keypoints.slice(3),
+                  ],
+                };
+
+                const roiB = debug.detectionToPixelROI(detB, imgW, imgH);
+                const cropB = cropHandCanvas(img, roiB);
+                const outputB = await debug.landmarkModel.runFromCanvas(cropB);
+                const lmB = projectLandmarks(outputB.landmarks, roiB, imgW, imgH);
+                compB = compareLandmarks(lmB, mpLm);
+                statsB.push({ label, hand: h, comp: compB });
               }
             }
 
-            // Track stats
-            for (const d of compIso.dists) perLmIso[d.idx].push(d.dist);
-            if (compFull) {
-              for (const d of compFull.dists) perLmFull[d.idx].push(d.dist);
-            }
-            allIsolated.push({ label: `${label} hand ${h}`, comp: compIso });
-            if (compFull) allFull.push({ label: `${label} hand ${h}`, comp: compFull });
+            // === METHOD C: Crop derived entirely from MP's landmarks ===
+            const roiC = computeROIFromMPLandmarks(mpLm, imgW, imgH);
+            const cropC = cropHandCanvas(img, roiC);
+            const outputC = await debug.landmarkModel.runFromCanvas(cropC);
+            const lmC = projectLandmarks(outputC.landmarks, roiC, imgW, imgH);
+            const compC = compareLandmarks(lmC, mpLm);
+            statsC.push({ label, hand: h, comp: compC });
 
             // === BUILD CARD ===
             const card = document.createElement('div');
-            const isoPct = compIso.avg * 100;
-            const fullPct = compFull ? compFull.avg * 100 : null;
-            const passed = isoPct < 0.5;
-            card.className = `image-card ${passed ? 'pass' : isoPct < 1.0 ? '' : 'fail'}`;
-            if (passed) card.classList.add('pass');
+            const pctA = compA ? (compA.avg * 100).toFixed(3) : 'N/A';
+            const pctB = compB ? (compB.avg * 100).toFixed(3) : 'N/A';
+            const pctC = (compC.avg * 100).toFixed(3);
+
+            card.className = 'image-card';
 
             card.innerHTML = `
               <div class="card-header">
                 <h3>${i + 1}${mpLandmarkSets.length > 1 ? String.fromCharCode(97 + h) : ''}. ${label} (${imgW}×${imgH})</h3>
                 <div class="card-badges">
-                  <span class="badge ${isoPct < 0.3 ? 'pass' : isoPct < 1.0 ? 'ref' : 'fail'}">Isolated: ${isoPct.toFixed(3)}%</span>
-                  ${fullPct !== null ? `<span class="badge ${fullPct < 0.3 ? 'pass' : fullPct < 1.5 ? 'ref' : 'fail'}">Full: ${fullPct.toFixed(3)}%</span>` : ''}
+                  <span class="badge ${compA && compA.avg * 100 < 1.5 ? 'pass' : 'fail'}">A Full: ${pctA}%</span>
+                  <span class="badge ${compB && compB.avg * 100 < 1.0 ? 'pass' : 'ref'}">B FixRot: ${pctB}%</span>
+                  <span class="badge ${compC.avg * 100 < 0.5 ? 'pass' : compC.avg * 100 < 1.0 ? 'ref' : 'fail'}">C MPCrop: ${pctC}%</span>
                 </div>
               </div>
               <div class="card-visuals">
-                <div><div class="vlabel">Crop (MP ROI)</div><canvas class="crop-cv" width="${LANDMARK_SIZE}" height="${LANDMARK_SIZE}"></canvas></div>
-                <div><div class="vlabel">Isolated (cyan) vs MP (green)</div><canvas class="iso-cv" width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas></div>
-                <div><div class="vlabel">Full pipeline (red) vs MP (green)</div><canvas class="full-cv" width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas></div>
+                <div>
+                  <div class="vlabel">Our crop (A)</div>
+                  <canvas class="cv-cropA" width="${LANDMARK_SIZE}" height="${LANDMARK_SIZE}"></canvas>
+                </div>
+                <div>
+                  <div class="vlabel">MP-derived crop (C)</div>
+                  <canvas class="cv-cropC" width="${LANDMARK_SIZE}" height="${LANDMARK_SIZE}"></canvas>
+                </div>
+                <div>
+                  <div class="vlabel">A: Full (red) vs MP (green)</div>
+                  <canvas class="cv-a" width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas>
+                </div>
+                <div>
+                  <div class="vlabel">C: MPCrop (cyan) vs MP (green)</div>
+                  <canvas class="cv-c" width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas>
+                </div>
               </div>
               <div>
                 <span class="collapsible" onclick="this.classList.toggle('open'); this.nextElementSibling.classList.toggle('open');">
-                  Per-landmark breakdown
+                  Per-landmark: A=${pctA}% | B=${pctB}% | C=${pctC}%
                 </span>
-                <div class="collapse-content lm-table-container"></div>
+                <div class="collapse-content lm-container"></div>
               </div>`;
 
             resultsDiv.appendChild(card);
 
-            // Draw crop
-            const cropCv = card.querySelector('.crop-cv');
-            const cropCtx = cropCv.getContext('2d');
-            const cropBitmap = await createImageBitmap(cropCanvas);
-            cropCtx.drawImage(cropBitmap, 0, 0);
-
-            // Draw isolated overlay
-            const isoCv = card.querySelector('.iso-cv');
-            const fit1 = drawImageFit(isoCv, img);
-            const isoCtx = isoCv.getContext('2d');
-            drawHandScaled(isoCtx, isoLandmarks, fit1, '#00ddff', 2, 4);
-            drawHandScaled(isoCtx, mpLm, fit1, '#44ff44', 2, 4);
-            isoCtx.font = '11px monospace';
-            isoCtx.fillStyle = '#00ddff'; isoCtx.fillText('CYAN = isolated', 6, 14);
-            isoCtx.fillStyle = '#44ff44'; isoCtx.fillText('GREEN = MediaPipe', 6, 28);
-
-            // Draw full pipeline overlay
-            const fullCv = card.querySelector('.full-cv');
-            const fit2 = drawImageFit(fullCv, img);
-            const fullCtx = fullCv.getContext('2d');
-            if (compFull) {
-              const matchIdx = microResults.findIndex((r, j) => {
-                const mw = r.landmarks[0], pw = mpLm[0];
-                return Math.sqrt((mw.x - pw.x) ** 2 + (mw.y - pw.y) ** 2) < 0.1;
-              });
-              if (matchIdx >= 0) {
-                drawHandScaled(fullCtx, microResults[matchIdx].landmarks, fit2, '#ff4444', 2, 4);
+            // Draw our crop (Method A) — need to get it from our pipeline
+            const cvCropA = card.querySelector('.cv-cropA');
+            if (rawDets.length > 0 && bestDetDist < 0.15) {
+              // Re-use the closest detection
+              const sxx = 1 / (1 - 2 * lbPadX);
+              const syy = 1 / (1 - 2 * lbPadY);
+              let bestDI = 0, bestDD = Infinity;
+              for (let d = 0; d < rawDets.length; d++) {
+                const det = rawDets[d];
+                const wx = (det.keypoints[0][0] - lbPadX) * sxx;
+                const wy = (det.keypoints[0][1] - lbPadY) * syy;
+                const dd = Math.sqrt((wx - mpLm[0].x) ** 2 + (wy - mpLm[0].y) ** 2);
+                if (dd < bestDD) { bestDD = dd; bestDI = d; }
               }
+              const rawD = rawDets[bestDI];
+              const detA = {
+                score: rawD.score,
+                box: [(rawD.box[0] - lbPadX) * sxx, (rawD.box[1] - lbPadY) * syy, rawD.box[2] * sxx, rawD.box[3] * syy],
+                keypoints: rawD.keypoints.map(([kx, ky]) => [(kx - lbPadX) * sxx, (ky - lbPadY) * syy]),
+              };
+              const roiA = debug.detectionToPixelROI(detA, imgW, imgH);
+              const cropA = cropHandCanvas(img, roiA);
+              const bmpA = await createImageBitmap(cropA);
+              cvCropA.getContext('2d').drawImage(bmpA, 0, 0);
             }
-            drawHandScaled(fullCtx, mpLm, fit2, '#44ff44', 2, 4);
-            fullCtx.font = '11px monospace';
-            fullCtx.fillStyle = '#ff4444'; fullCtx.fillText('RED = full pipeline', 6, 14);
-            fullCtx.fillStyle = '#44ff44'; fullCtx.fillText('GREEN = MediaPipe', 6, 28);
+
+            // Draw MP-derived crop (Method C)
+            const cvCropC = card.querySelector('.cv-cropC');
+            const bmpC = await createImageBitmap(cropC);
+            cvCropC.getContext('2d').drawImage(bmpC, 0, 0);
+
+            // Draw overlay A
+            const cvA = card.querySelector('.cv-a');
+            const fitA = drawImageFit(cvA, img);
+            const ctxA = cvA.getContext('2d');
+            if (compA) drawHandScaled(ctxA, pairs[0].microLm, fitA, '#ff4444', 2, 4);
+            drawHandScaled(ctxA, mpLm, fitA, '#44ff44', 2, 4);
+            ctxA.font = '11px monospace';
+            ctxA.fillStyle = '#ff4444'; ctxA.fillText('RED = full pipeline', 6, 14);
+            ctxA.fillStyle = '#44ff44'; ctxA.fillText('GREEN = MediaPipe', 6, 28);
+
+            // Draw overlay C
+            const cvC = card.querySelector('.cv-c');
+            const fitC = drawImageFit(cvC, img);
+            const ctxC = cvC.getContext('2d');
+            drawHandScaled(ctxC, lmC, fitC, '#00ddff', 2, 4);
+            drawHandScaled(ctxC, mpLm, fitC, '#44ff44', 2, 4);
+            ctxC.font = '11px monospace';
+            ctxC.fillStyle = '#00ddff'; ctxC.fillText('CYAN = MP crop', 6, 14);
+            ctxC.fillStyle = '#44ff44'; ctxC.fillText('GREEN = MediaPipe', 6, 28);
 
             // Landmark table
-            card.querySelector('.lm-table-container').innerHTML = buildLandmarkTable(compIso, compFull);
+            let tableHtml = `<table class="lm-table">
+              <tr><th>#</th><th>Landmark</th><th>A Full %</th><th>B FixRot %</th><th>C MPCrop %</th></tr>`;
+            for (let j = 0; j < 21; j++) {
+              const dA = compA ? compA.dists[j].dist * 100 : null;
+              const dB = compB ? compB.dists[j].dist * 100 : null;
+              const dC = compC.dists[j].dist * 100;
+              const cA = dA !== null ? (dA < 0.5 ? 'good' : dA < 1.5 ? 'mid' : 'bad') : '';
+              const cB = dB !== null ? (dB < 0.5 ? 'good' : dB < 1.0 ? 'mid' : 'bad') : '';
+              const cC = dC < 0.3 ? 'good' : dC < 1.0 ? 'mid' : 'bad';
+              tableHtml += `<tr>
+                <td>${j}</td><td style="text-align:left">${NAMES[j]}</td>
+                <td class="${cA}">${dA !== null ? dA.toFixed(3) + '%' : 'N/A'}</td>
+                <td class="${cB}">${dB !== null ? dB.toFixed(3) + '%' : 'N/A'}</td>
+                <td class="${cC}">${dC.toFixed(3)}%</td>
+              </tr>`;
+            }
+            const avgA = compA ? compA.avg * 100 : null;
+            const avgB = compB ? compB.avg * 100 : null;
+            const avgC = compC.avg * 100;
+            tableHtml += `<tr class="avg-row"><td></td><td style="text-align:left">AVERAGE</td>
+              <td class="${avgA !== null ? (avgA < 0.5 ? 'good' : avgA < 1.5 ? 'mid' : 'bad') : ''}">${avgA !== null ? avgA.toFixed(3) + '%' : 'N/A'}</td>
+              <td class="${avgB !== null ? (avgB < 0.5 ? 'good' : avgB < 1.0 ? 'mid' : 'bad') : ''}">${avgB !== null ? avgB.toFixed(3) + '%' : 'N/A'}</td>
+              <td class="${avgC < 0.3 ? 'good' : avgC < 1.0 ? 'mid' : 'bad'}">${avgC.toFixed(3)}%</td>
+            </tr></table>`;
+            card.querySelector('.lm-container').innerHTML = tableHtml;
           }
         }
 
         // ============ SUMMARY ============
         setProgress(100, 'Done!');
 
-        const isoAvgAll = allIsolated.length > 0
-          ? allIsolated.reduce((s, r) => s + r.comp.avg, 0) / allIsolated.length : 0;
-        const fullAvgAll = allFull.length > 0
-          ? allFull.reduce((s, r) => s + r.comp.avg, 0) / allFull.length : 0;
-        const isoMaxAll = allIsolated.length > 0
-          ? Math.max(...allIsolated.map(r => r.comp.max)) : 0;
+        const avgA = statsA.length > 0 ? statsA.reduce((s, r) => s + r.comp.avg, 0) / statsA.length * 100 : 0;
+        const avgB = statsB.length > 0 ? statsB.reduce((s, r) => s + r.comp.avg, 0) / statsB.length * 100 : 0;
+        const avgC = statsC.length > 0 ? statsC.reduce((s, r) => s + r.comp.avg, 0) / statsC.length * 100 : 0;
 
-        const improvement = fullAvgAll > 0 ? ((fullAvgAll - isoAvgAll) / fullAvgAll * 100) : 0;
+        const clsA = avgA < 0.5 ? 'good' : avgA < 1.5 ? 'mid' : 'bad';
+        const clsB = avgB < 0.5 ? 'good' : avgB < 1.0 ? 'mid' : 'bad';
+        const clsC = avgC < 0.5 ? 'good' : avgC < 1.0 ? 'mid' : 'bad';
 
-        const isoPct = isoAvgAll * 100;
-        const fullPct = fullAvgAll * 100;
-        const isoCls = isoPct < 0.3 ? 'good' : isoPct < 1.0 ? 'mid' : 'bad';
-        const fullCls = fullPct < 0.3 ? 'good' : fullPct < 1.0 ? 'mid' : 'bad';
-
-        // Per-landmark comparison
-        let worstIsoLm = '', worstIsoVal = 0;
-        let worstFullLm = '', worstFullVal = 0;
-        for (let i = 0; i < 21; i++) {
-          if (perLmIso[i].length > 0) {
-            const avg = perLmIso[i].reduce((s, v) => s + v, 0) / perLmIso[i].length;
-            if (avg > worstIsoVal) { worstIsoVal = avg; worstIsoLm = NAMES[i]; }
-          }
-          if (perLmFull[i].length > 0) {
-            const avg = perLmFull[i].reduce((s, v) => s + v, 0) / perLmFull[i].length;
-            if (avg > worstFullVal) { worstFullVal = avg; worstFullLm = NAMES[i]; }
-          }
-        }
+        const improvBC = avgA > 0 ? ((avgA - avgC) / avgA * 100) : 0;
 
         summaryBanner.style.display = 'block';
         summaryBanner.innerHTML = `
-          <h2>🔬 Isolation Test Results — ${allIsolated.length} hands across ${TEST_IMAGES.length} images</h2>
+          <h2>🔬 Results — ${statsC.length} hands across ${TEST_IMAGES.length} images</h2>
           <div class="summary-grid">
             <div class="summary-stat">
-              <div class="label">Isolated Avg (MP crop → our model)</div>
-              <div class="value ${isoCls}">${isoPct.toFixed(3)}%</div>
+              <div class="label">A: Full Pipeline</div>
+              <div class="value ${clsA}">${avgA.toFixed(3)}%</div>
             </div>
             <div class="summary-stat">
-              <div class="label">Full Pipeline Avg</div>
-              <div class="value ${fullCls}">${fullPct.toFixed(3)}%</div>
+              <div class="label">B: Our Box + MP Rotation</div>
+              <div class="value ${clsB}">${avgB.toFixed(3)}%</div>
             </div>
             <div class="summary-stat">
-              <div class="label">Improvement</div>
-              <div class="value ${improvement > 50 ? 'good' : improvement > 20 ? 'mid' : 'bad'}">${improvement.toFixed(1)}%</div>
+              <div class="label">C: MP-Derived Crop</div>
+              <div class="value ${clsC}">${avgC.toFixed(3)}%</div>
             </div>
             <div class="summary-stat">
-              <div class="label">Isolated Max</div>
-              <div class="value ${isoMaxAll * 100 < 1 ? 'mid' : 'bad'}">${(isoMaxAll * 100).toFixed(3)}%</div>
+              <div class="label">A→C Improvement</div>
+              <div class="value ${improvBC > 50 ? 'good' : improvBC > 20 ? 'mid' : 'bad'}">${improvBC.toFixed(1)}%</div>
             </div>
             <div class="summary-stat">
-              <div class="label">Worst Landmark (isolated)</div>
-              <div class="value" style="font-size: 16px; color: #8af">${worstIsoLm}</div>
-              <div class="label">${(worstIsoVal * 100).toFixed(3)}%</div>
-            </div>
-            <div class="summary-stat">
-              <div class="label">Target (MP GPU↔CPU)</div>
+              <div class="label">Target (GPU↔CPU)</div>
               <div class="value" style="font-size: 16px; color: #888">~0.27%</div>
             </div>
           </div>
 
-          <div style="margin-top: 16px; padding: 12px; background: #0a1a0a; border: 1px solid #3f8; border-radius: 8px; font-size: 13px;">
-            <b style="color: #3f8">Diagnosis:</b>
-            ${isoPct < 0.5
-              ? `✅ Isolated error (${isoPct.toFixed(3)}%) is near the MP GPU↔CPU baseline (~0.27%). <b>Our landmark model is correct!</b> The ~${fullPct.toFixed(1)}% error in the full pipeline comes entirely from palm detection inaccuracy.`
-              : isoPct < 1.0
-                ? `⚠️ Isolated error (${isoPct.toFixed(3)}%) is improved over full pipeline (${fullPct.toFixed(3)}%) but still above the ~0.27% baseline. Both palm detection AND the landmark model may have minor discrepancies.`
-                : `❌ Isolated error (${isoPct.toFixed(3)}%) is still high. The landmark model itself has significant divergence from MediaPipe, independent of palm detection.`
+          <div style="margin-top: 16px; padding: 12px; border-radius: 8px; font-size: 13px;
+            ${avgC < 0.5 ? 'background: #0a1a0a; border: 1px solid #3f8;' : avgC < 1.0 ? 'background: #1a1a0a; border: 1px solid #fe8;' : 'background: #1a0a0a; border: 1px solid #f84;'}">
+            <b style="color: ${avgC < 0.5 ? '#3f8' : avgC < 1.0 ? '#fe8' : '#f84'}">Diagnosis:</b>
+            ${avgC < 0.5
+              ? `✅ MP-Derived Crop error (${avgC.toFixed(3)}%) is near the GPU↔CPU baseline (~0.27%). <b>Our landmark model is correct!</b> The ${avgA.toFixed(3)}% error in the full pipeline comes from palm detection.`
+              : avgC < 1.0
+                ? `⚠️ MP-Derived Crop (${avgC.toFixed(3)}%) improved over full pipeline (${avgA.toFixed(3)}%) but not to baseline. ` +
+                  `Both palm detection AND the landmark model may contribute. The crop derivation from landmarks may also not perfectly match MediaPipe's internal crop.`
+                : `❌ MP-Derived Crop (${avgC.toFixed(3)}%) is still high. The landmark model itself diverges, OR the MP-derived crop doesn't match MediaPipe's internal crop transform. ` +
+                  `Try Method B: if ${avgB.toFixed(3)}% < ${avgA.toFixed(3)}%, rotation accuracy matters.`
             }
-          </div>
-
-          <div style="margin-top: 16px;">
-            <span class="collapsible" onclick="this.classList.toggle('open'); this.nextElementSibling.classList.toggle('open');">
-              Per-landmark averages: isolated vs full pipeline
-            </span>
-            <div class="collapse-content">
-              <table class="lm-table">
-                <tr><th>#</th><th>Landmark</th><th>Isolated Avg</th><th>Full Avg</th><th>Improvement</th></tr>
-                ${NAMES.map((name, idx) => {
-                  const isoErrs = perLmIso[idx];
-                  const fullErrs = perLmFull[idx];
-                  if (isoErrs.length === 0) return '';
-                  const isoA = isoErrs.reduce((s, v) => s + v, 0) / isoErrs.length;
-                  const fullA = fullErrs.length > 0 ? fullErrs.reduce((s, v) => s + v, 0) / fullErrs.length : 0;
-                  const imp = fullA > 0 ? ((fullA - isoA) / fullA * 100) : 0;
-                  const isoC = isoA * 100 < 0.3 ? 'good' : isoA * 100 < 1.0 ? 'mid' : 'bad';
-                  const fullC = fullA * 100 < 0.3 ? 'good' : fullA * 100 < 1.0 ? 'mid' : 'bad';
-                  return `<tr><td>${idx}</td><td style="text-align:left">${name}</td>
-                    <td class="${isoC}">${(isoA * 100).toFixed(3)}%</td>
-                    <td class="${fullC}">${(fullA * 100).toFixed(3)}%</td>
-                    <td class="${imp > 0 ? 'good' : 'bad'}">${imp > 0 ? '+' : ''}${imp.toFixed(1)}%</td></tr>`;
-                }).join('')}
-              </table>
-            </div>
+            <br><br>
+            <b>B vs A:</b> ${avgB < avgA
+              ? `Method B (${avgB.toFixed(3)}%) < A (${avgA.toFixed(3)}%) → fixing rotation helps. Palm detection keypoint accuracy matters.`
+              : `Method B (${avgB.toFixed(3)}%) ≥ A (${avgA.toFixed(3)}%) → rotation isn't the main issue. Box size/position may dominate.`
+            }
           </div>
         `;
 
-        // Console output
-        console.log('=== ISOLATION TEST RESULTS ===');
-        console.log(`Isolated avg: ${isoPct.toFixed(3)}%`);
-        console.log(`Full pipeline avg: ${fullPct.toFixed(3)}%`);
-        console.log(`Improvement: ${improvement.toFixed(1)}%`);
-        console.log(`Worst isolated landmark: ${worstIsoLm} (${(worstIsoVal * 100).toFixed(3)}%)`);
+        console.log('=== ISOLATION RESULTS ===');
+        console.log(`A (Full): ${avgA.toFixed(3)}%`);
+        console.log(`B (FixRot): ${avgB.toFixed(3)}%`);
+        console.log(`C (MPCrop): ${avgC.toFixed(3)}%`);
 
       } catch (e) {
         setProgress(0, `❌ Error: ${e.message}`);
