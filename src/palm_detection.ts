@@ -130,7 +130,14 @@ function decodeDetections(
 }
 
 /**
- * Non-maximum suppression using IoU (intersection over union).
+ * Weighted non-maximum suppression matching MediaPipe's WEIGHTED algorithm.
+ *
+ * For each remaining top-scoring detection, finds all overlapping detections
+ * above the IoU threshold and computes a score-weighted average of their
+ * bounding box coordinates and keypoints. This produces smoother, more
+ * accurate detections than greedy NMS.
+ *
+ * Reference: mediapipe/calculators/util/non_max_suppression_calculator.cc
  */
 function nms(detections: PalmDetection[], iouThreshold: number): PalmDetection[] {
   if (detections.length === 0) return [];
@@ -142,14 +149,43 @@ function nms(detections: PalmDetection[], iouThreshold: number): PalmDetection[]
 
   for (let i = 0; i < sorted.length; i++) {
     if (suppressed.has(i)) continue;
-    kept.push(sorted[i]);
 
+    // Collect all overlapping detections (including self)
+    const cluster: number[] = [i];
     for (let j = i + 1; j < sorted.length; j++) {
       if (suppressed.has(j)) continue;
-      if (computeIoU(sorted[i], sorted[j]) > iouThreshold) {
+      if (computeIoU(sorted[i]!, sorted[j]!) > iouThreshold) {
+        cluster.push(j);
         suppressed.add(j);
       }
     }
+
+    // Compute score-weighted average of box and keypoints across cluster
+    let totalWeight = 0;
+    let avgCx = 0, avgCy = 0, avgW = 0, avgH = 0;
+    const avgKps: [number, number][] = [];
+    for (let k = 0; k < 7; k++) avgKps.push([0, 0]);
+
+    for (const idx of cluster) {
+      const det = sorted[idx]!;
+      const w = det.score;
+      totalWeight += w;
+      avgCx += det.box[0] * w;
+      avgCy += det.box[1] * w;
+      avgW += det.box[2] * w;
+      avgH += det.box[3] * w;
+      for (let k = 0; k < 7; k++) {
+        avgKps[k]![0] += det.keypoints[k]![0] * w;
+        avgKps[k]![1] += det.keypoints[k]![1] * w;
+      }
+    }
+
+    const invW = 1 / totalWeight;
+    kept.push({
+      score: sorted[i]!.score, // Keep top score (not averaged)
+      box: [avgCx * invW, avgCy * invW, avgW * invW, avgH * invW],
+      keypoints: avgKps.map(([x, y]) => [x * invW, y * invW] as [number, number]),
+    });
   }
 
   return kept;
