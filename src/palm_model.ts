@@ -544,44 +544,37 @@ export async function compilePalmModel(
   });
 
   // Pre-create uniform buffers for FPN blocks
+  // All FPN blocks have stride=1, so outH=inH and pad=2
   const fpn12Block1Uniforms = (() => {
     const b = fpn12Block1;
-    const outH = b.stride === 2 ? b.inH / 2 : b.inH;
-    const pad = b.stride === 2 ? 1 : 2;
     return {
-      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, outH, outH, b.stride, pad])),
-      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, outH, outH, b.inCh, b.stride, b.inH, b.inH])),
-      outH,
+      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, b.inH, b.inH, b.stride, 2])),
+      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, b.inH, b.inH, b.inCh, b.stride, b.inH, b.inH])),
+      outH: b.inH,
     };
   })();
   const fpn12Block2Uniforms = (() => {
     const b = fpn12Block2;
-    const outH = b.stride === 2 ? b.inH / 2 : b.inH;
-    const pad = b.stride === 2 ? 1 : 2;
     return {
-      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, outH, outH, b.stride, pad])),
-      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, outH, outH, b.inCh, b.stride, b.inH, b.inH])),
-      outH,
+      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, b.inH, b.inH, b.stride, 2])),
+      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, b.inH, b.inH, b.inCh, b.stride, b.inH, b.inH])),
+      outH: b.inH,
     };
   })();
   const fpn24Block1Uniforms = (() => {
     const b = fpn24Block1;
-    const outH = b.stride === 2 ? b.inH / 2 : b.inH;
-    const pad = b.stride === 2 ? 1 : 2;
     return {
-      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, outH, outH, b.stride, pad])),
-      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, outH, outH, b.inCh, b.stride, b.inH, b.inH])),
-      outH,
+      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, b.inH, b.inH, b.stride, 2])),
+      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, b.inH, b.inH, b.inCh, b.stride, b.inH, b.inH])),
+      outH: b.inH,
     };
   })();
   const fpn24Block2Uniforms = (() => {
     const b = fpn24Block2;
-    const outH = b.stride === 2 ? b.inH / 2 : b.inH;
-    const pad = b.stride === 2 ? 1 : 2;
     return {
-      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, outH, outH, b.stride, pad])),
-      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, outH, outH, b.inCh, b.stride, b.inH, b.inH])),
-      outH,
+      dw: makeUniform(new Uint32Array([1, b.inCh, b.inH, b.inH, b.inH, b.inH, b.stride, 2])),
+      pw: makeUniform(new Uint32Array([1, b.inCh, b.outCh, b.inH, b.inH, b.inCh, b.stride, b.inH, b.inH])),
+      outH: b.inH,
     };
   })();
 
@@ -1120,7 +1113,11 @@ export async function compilePalmModel(
     // Run the full model step by step, reading back after key layers
     // Supports arbitrary-size images via letterbox resize (same as runWithResize)
 
-    function stats(data: Float32Array, n: number = 1000) {
+    function stats(data: Float32Array, n: number = 1000): {
+      min: number; max: number; mean: number; nonZero: number;
+      sample: number[]; data500: number[]; dataMid500: number[];
+      totalLength: number; dataCenter500?: number[]; spatialShape?: number[];
+    } {
       const d = data.slice(0, n);
       // Also grab 500 values from the middle of the buffer (avoids letterbox padding)
       const midStart = Math.max(0, Math.floor(data.length / 2) - 250);
@@ -1172,30 +1169,34 @@ export async function compilePalmModel(
       uploadSource = source as HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
     }
 
-    if (srcW !== 192 || srcH !== 192) {
+    // At this point srcW and srcH are always defined
+    const w = srcW!;
+    const h = srcH!;
+
+    if (w !== 192 || h !== 192) {
       // Letterbox resize path (same as runWithResize)
-      const scale = Math.min(192 / srcW, 192 / srcH);
-      const scaledW = Math.round(srcW * scale);
-      const scaledH = Math.round(srcH * scale);
+      const scale = Math.min(192 / w, 192 / h);
+      const scaledW = Math.round(w * scale);
+      const scaledH = Math.round(h * scale);
       const offsetX = Math.floor((192 - scaledW) / 2);
       const offsetY = Math.floor((192 - scaledH) / 2);
 
-      const tex = ensureLetterboxTexture(srcW, srcH);
+      const tex = ensureLetterboxTexture(w, h);
       device.queue.copyExternalImageToTexture(
         { source: uploadSource },
         { texture: tex },
-        [srcW, srcH],
+        [w, h],
       );
 
       const paramsData = new ArrayBuffer(32);
       const u32View = new Uint32Array(paramsData);
       const f32View = new Float32Array(paramsData);
-      u32View[0] = srcW;
-      u32View[1] = srcH;
+      u32View[0] = w;
+      u32View[1] = h;
       u32View[2] = 192;
       u32View[3] = 0;
-      f32View[4] = srcW / scaledW;
-      f32View[5] = srcH / scaledH;
+      f32View[4] = w / scaledW;
+      f32View[5] = h / scaledH;
       f32View[6] = offsetX;
       f32View[7] = offsetY;
       device.queue.writeBuffer(lbParamsUniform, 0, paramsData);
