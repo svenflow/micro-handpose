@@ -70,7 +70,7 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   // Compile FULL landmark model (EfficientNet-B0, 224x224)
   // When f16 is available, use f16 compute to match MediaPipe's mediump
   // WebGL behavior (reduces ~1.5% precision gap to near-zero)
-  let landmarkModel = await compileFullModel(landmarkWeights);
+  const landmarkModel = await compileFullModel(landmarkWeights);
 
   // f16 self-test (FULL model doesn't have f16 toggle — always f32 BN weights)
   {

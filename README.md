@@ -43,7 +43,7 @@ Create once, detect per frame. Weights download on first call from CDN and are c
 
 ## Features
 
-- **80KB** minified JS + 7.7MB weights (served via CDN)
+- **74KB** minified JS (17KB gzipped) + 7.7MB weights (served via CDN)
 - **~2x faster** than MediaPipe on the same hardware
 - **Multi-hand tracking** — detects up to 3 hands simultaneously
 - **ROI tracking** — uses previous landmarks to track between frames (same approach as MediaPipe), skipping palm detection for smoother, faster results
