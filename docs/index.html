@@ -847,12 +847,15 @@ handpose.<span class="fn">dispose</span>()</pre>
 
     // Diagnostic mode: ?diag shows dimension info overlay
     const diagMode = new URLSearchParams(location.search).has('diag');
+    // Reference image mode: ?ref uses a static image instead of camera
+    const refMode = new URLSearchParams(location.search).has('ref');
     // Canvas capture mode: always capture video to 2D canvas before model input
     // This works around potential ImageBitmap orientation issues on iOS Safari
     const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     let captureCanvas = null;
     let captureCtx = null;
     let diagInfo = {};
+    let refImage = null; // static reference image for ?ref mode
 
     function showError(msg) {
       errorBar.textContent = msg;
@@ -907,7 +910,7 @@ handpose.<span class="fn">dispose</span>()</pre>
           modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
           delegate: delegate,
         },
-        runningMode: 'VIDEO',
+        runningMode: refMode ? 'IMAGE' : 'VIDEO',
         numHands: 1,
         minHandDetectionConfidence: 0.5,
         minTrackingConfidence: 0.5,
@@ -1000,40 +1003,76 @@ handpose.<span class="fn">dispose</span>()</pre>
       statusVal.textContent = 'Loading...';
 
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
-        });
-        video.srcObject = stream;
-        await video.play();
+        let vw, vh;
 
-        // Probe actual frame dimensions via ImageBitmap (handles iOS rotation)
-        const probeBmp = await createImageBitmap(video);
-        const bmpW = probeBmp.width;
-        const bmpH = probeBmp.height;
-        probeBmp.close();
+        if (refMode) {
+          // Reference image mode: load static image instead of camera
+          statusVal.textContent = 'Loading reference image...';
+          refImage = new Image();
+          refImage.crossOrigin = 'anonymous';
+          await new Promise((resolve, reject) => {
+            refImage.onload = resolve;
+            refImage.onerror = reject;
+            refImage.src = 'test-hand-ref.png';
+          });
+          vw = refImage.naturalWidth;
+          vh = refImage.naturalHeight;
+          // Scale down for performance (keep aspect ratio)
+          const maxDim = 640;
+          if (Math.max(vw, vh) > maxDim) {
+            const scale = maxDim / Math.max(vw, vh);
+            vw = Math.round(vw * scale);
+            vh = Math.round(vh * scale);
+          }
+          canvas.width = vw;
+          canvas.height = vh;
+          // Draw the reference image onto the video canvas area
+          video.style.display = 'none';
+          canvas.style.position = 'relative';
+          diagInfo = {
+            videoW: refImage.naturalWidth, videoH: refImage.naturalHeight,
+            bmpW: vw, bmpH: vh,
+            screen: `${screen.width}x${screen.height}`,
+            orientation: 'ref-image',
+            isMobile,
+          };
+          console.log('[micro-handpose] Ref mode:', JSON.stringify(diagInfo));
+        } else {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+          });
+          video.srcObject = stream;
+          await video.play();
 
-        // Use video element dimensions for canvas (what the browser displays)
-        const vw = video.videoWidth;
-        const vh = video.videoHeight;
-        canvas.width = vw;
-        canvas.height = vh;
+          // Probe actual frame dimensions via ImageBitmap (handles iOS rotation)
+          const probeBmp = await createImageBitmap(video);
+          const bmpW = probeBmp.width;
+          const bmpH = probeBmp.height;
+          probeBmp.close();
 
-        // Store diagnostic info
-        diagInfo = {
-          videoW: vw, videoH: vh,
-          bmpW: bmpW, bmpH: bmpH,
-          screen: `${screen.width}x${screen.height}`,
-          orientation: screen.orientation?.type || 'unknown',
-          isMobile,
-        };
-        console.log('[micro-handpose] Diag:', JSON.stringify(diagInfo));
+          // Use video element dimensions for canvas (what the browser displays)
+          vw = video.videoWidth;
+          vh = video.videoHeight;
+          canvas.width = vw;
+          canvas.height = vh;
 
-        // On mobile, create a capture canvas to work around potential
-        // ImageBitmap/WebGPU video orientation issues on iOS Safari
-        if (isMobile) {
-          captureCanvas = new OffscreenCanvas(vw, vh);
-          captureCtx = captureCanvas.getContext('2d');
-          console.log('[micro-handpose] Mobile detected — using canvas capture');
+          // Store diagnostic info
+          diagInfo = {
+            videoW: vw, videoH: vh,
+            bmpW: bmpW, bmpH: bmpH,
+            screen: `${screen.width}x${screen.height}`,
+            orientation: screen.orientation?.type || 'unknown',
+            isMobile,
+          };
+          console.log('[micro-handpose] Diag:', JSON.stringify(diagInfo));
+
+          // On mobile, create a capture canvas to work around potential
+          // ImageBitmap/WebGPU video orientation issues on iOS Safari
+          if (isMobile) {
+            captureCanvas = new OffscreenCanvas(vw, vh);
+            captureCtx = captureCanvas.getContext('2d');
+            console.log('[micro-handpose] Mobile detected — using canvas capture');
+          }
         }
 
         document.getElementById('viewport').style.aspectRatio = `${vw} / ${vh}`;
@@ -1112,9 +1151,9 @@ handpose.<span class="fn">dispose</span>()</pre>
     let debugFrameCount = 0;
 
     async function detectMicro() {
-      // On mobile, capture video to 2D canvas first (normalizes rotation/orientation)
-      let source = video;
-      if (captureCanvas && captureCtx) {
+      // Choose source: reference image, mobile canvas capture, or video
+      let source = refImage || video;
+      if (!refImage && captureCanvas && captureCtx) {
         captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
         source = captureCanvas;
       }
@@ -1127,6 +1166,10 @@ handpose.<span class="fn">dispose</span>()</pre>
       updateFps();
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // Draw reference image as background in ref mode
+      if (refImage) {
+        ctx.drawImage(refImage, 0, 0, canvas.width, canvas.height);
+      }
 
       // In debug mode, also run MediaPipe and draw both
       if (debugCompare && mpHandsWasm) {
@@ -1189,17 +1232,26 @@ handpose.<span class="fn">dispose</span>()</pre>
     let mpGpuTimestamp = 0;
 
     function detectMediaPipeVariant(landmarker, isGpu) {
-      if (isGpu) { mpGpuTimestamp += 33; } else { mpWasmTimestamp += 33; }
-      const ts = isGpu ? mpGpuTimestamp : mpWasmTimestamp;
-
       const t0 = performance.now();
-      const results = landmarker.detectForVideo(video, ts);
+      let results;
+      if (refImage) {
+        // In ref mode, use IMAGE mode detection
+        results = landmarker.detect(refImage);
+      } else {
+        if (isGpu) { mpGpuTimestamp += 33; } else { mpWasmTimestamp += 33; }
+        const ts = isGpu ? mpGpuTimestamp : mpWasmTimestamp;
+        results = landmarker.detectForVideo(video, ts);
+      }
       const inferTime = performance.now() - t0;
 
       updateInferDisplay(inferTime);
       updateFps();
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // Draw reference image as background in ref mode
+      if (refImage) {
+        ctx.drawImage(refImage, 0, 0, canvas.width, canvas.height);
+      }
 
       if (results && results.landmarks && results.landmarks.length > 0) {
         const landmarks = results.landmarks[0];
