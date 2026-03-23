@@ -1,91 +1,104 @@
-# @svenflow/micro-handpose
+# micro-handpose
 
-Tiny, fast hand landmark detection for the browser. WebGPU-powered, zero dependencies.
+[![npm](https://img.shields.io/npm/v/@svenflow/micro-handpose)](https://www.npmjs.com/package/@svenflow/micro-handpose)
+[![license](https://img.shields.io/npm/l/@svenflow/micro-handpose)](./LICENSE)
 
-[**Live Demo**](https://svenflow.github.io/micro-handpose/)
+**WebGPU hand tracking for the browser. Multi-hand detection with ROI tracking, 21 landmarks per hand. No WASM, no ONNX Runtime — just 15 compute shaders. 80KB JS + model weights downloaded at runtime.**
 
-- **80KB** JS (minified) + 7.7MB weights (served via CDN)
-- **~2x faster** than MediaPipe on the same hardware
-- **Multi-hand tracking** with ROI-based frame-to-frame tracking (same approach as MediaPipe)
-- **21 landmarks** per hand, matching MediaPipe's output format
-- TypeScript types included
+[**Live Demo**](https://svenflow.github.io/micro-handpose/) | [npm](https://www.npmjs.com/package/@svenflow/micro-handpose)
 
-## Install
+---
+
+## Quick Start
 
 ```bash
 npm install @svenflow/micro-handpose
 ```
 
-## Usage
-
 ```typescript
 import { createHandpose } from '@svenflow/micro-handpose'
 
 const handpose = await createHandpose()
-
-// In your render loop:
 const hands = await handpose.detect(videoElement)
 
 for (const hand of hands) {
-  console.log(hand.score)      // 0.99
-  console.log(hand.handedness) // 'left' | 'right'
-  console.log(hand.landmarks)  // 21 { x, y, z } points
-  console.log(hand.keypoints)  // named access: hand.keypoints.index_tip
+  console.log(hand.handedness)       // 'left' | 'right'
+  console.log(hand.keypoints.wrist)  // { x, y, z }
 }
-
-// Clean up GPU resources when done
-handpose.dispose()
 ```
+
+Create once, detect per frame. Weights download on first call from CDN and are cached by the browser. Full TypeScript types included.
+
+## Benchmarks
+
+### Mac Mini M4 Pro — Chrome 134
+
+| | Median | p99 | Backend |
+|---|---|---|---|
+| **micro-handpose** | **2.2ms** | **3.1ms** | WebGPU |
+| MediaPipe | 4.0ms | 6.5ms | WebGPU |
+| MediaPipe | 4.5ms | 8.2ms | WASM |
+
+**~2x faster than MediaPipe** on the same hardware. With ROI tracking, most frames skip palm detection entirely — only landmark inference runs (~1.5ms).
+
+## Features
+
+- **80KB** minified JS + 7.7MB weights (served via CDN)
+- **~2x faster** than MediaPipe on the same hardware
+- **Multi-hand tracking** — detects up to 3 hands simultaneously
+- **ROI tracking** — uses previous landmarks to track between frames (same approach as MediaPipe), skipping palm detection for smoother, faster results
+- **21 landmarks** per hand following MediaPipe ordering
+- **Named keypoints** — `hand.keypoints.thumb_tip`, `hand.keypoints.wrist`, etc.
+- **Zero dependencies** — pure WebGPU compute shaders, no WASM or ONNX Runtime
 
 ## API
 
-### `createHandpose(options?): Promise<Handpose>`
+### `createHandpose(options?)`
 
-Creates and initializes the detector. Downloads weights and compiles the WebGPU pipeline. Call once, then reuse.
-
-#### Options
+Creates and initializes the detector. Downloads weights and compiles WebGPU pipelines.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `weightsUrl` | `string` | jsdelivr CDN | Base URL for weight files. Set this to self-host weights. |
-| `scoreThreshold` | `number` | `0.5` | Minimum hand confidence to return a detection (0-1). |
-| `palmScoreThreshold` | `number` | `0.5` | Minimum palm detection confidence (0-1). |
-| `maxHands` | `number` | `3` | Maximum number of hands to detect. |
+| `weightsUrl` | `string` | jsdelivr CDN | Base URL for weight files |
+| `scoreThreshold` | `number` | `0.5` | Minimum hand confidence (0-1) |
+| `maxHands` | `number` | `3` | Maximum hands to detect |
 
-### `handpose.detect(source): Promise<HandposeResult[]>`
+### `handpose.detect(source)`
 
-Runs inference on an image source. Returns an array of detected hands (empty if none found).
+Detect hands in an image or video frame. Returns `HandposeResult[]` (empty if no hands found).
 
-Uses ROI tracking between frames: after the first palm detection, subsequent calls compute the crop region from previous landmarks instead of re-running palm detection. This is faster and produces smoother tracking (same approach as MediaPipe).
-
-**Accepted input types:** `HTMLCanvasElement`, `OffscreenCanvas`, `ImageBitmap`, `HTMLImageElement`, `HTMLVideoElement`, `ImageData`
-
-#### `HandposeResult`
+Accepts: `HTMLVideoElement`, `HTMLCanvasElement`, `OffscreenCanvas`, `ImageBitmap`, `HTMLImageElement`, `ImageData`
 
 ```typescript
-{
-  score: number           // Confidence (0-1)
+interface HandposeResult {
+  score: number                // Confidence (0-1)
   handedness: 'left' | 'right'
-  landmarks: Landmark[]   // 21 points (normalized 0-1 coords)
-  keypoints: Keypoints    // Named access to landmarks
+  landmarks: Landmark[]        // 21 points, normalized [0,1]
+  keypoints: Keypoints         // Named access: .wrist, .thumb_tip, etc.
 }
 ```
 
-Each `Landmark` has `x`, `y` (normalized image coordinates, 0-1) and `z` (relative depth).
+### `handpose.reset()`
 
-The 21 landmarks follow MediaPipe ordering: `wrist`, `thumb_cmc`, `thumb_mcp`, `thumb_ip`, `thumb_tip`, `index_mcp` ... `pinky_tip`.
+Reset tracking state. Call when switching between unrelated images to force palm re-detection.
 
-### `handpose.reset(): void`
+### `handpose.dispose()`
 
-Resets tracking state. Call this when switching between unrelated images to force palm re-detection on the next frame.
+Release GPU resources.
 
-### `handpose.dispose(): void`
+## How It Works
 
-Releases GPU resources.
+```
+Video frame → Palm Detection (192×192, 15 compute shaders)
+           → ROI crop (affine transform on GPU)
+           → Landmark model (224×224 EfficientNet-B0, 42 compute shaders)
+           → 21 landmarks + hand score
+           → ROI tracking (landmarks → next frame's crop region)
+```
 
-## Self-hosting weights
+On the first frame, palm detection finds hand bounding boxes. On subsequent frames, landmarks from the previous frame compute the crop region directly — palm detection is skipped entirely. This matches MediaPipe's tracking approach: smoother results and ~40% less compute per frame.
 
-By default, weights are fetched from jsdelivr CDN. To self-host:
+## Self-Hosting Weights
 
 ```typescript
 const handpose = await createHandpose({
@@ -95,21 +108,14 @@ const handpose = await createHandpose({
 
 Copy the `weights/` directory from the npm package to your server.
 
-## Browser requirements
+## Browser Support
 
-Requires [WebGPU](https://webgpureport.org). Supported in Chrome 113+, Edge 113+, Safari 18+, and Firefox Nightly.
-
-## Performance
-
-Benchmarked on Apple M4:
-
-| | Median | p99 | Backend |
-|---|---|---|---|
-| **micro-handpose** | 2.2ms | 3.1ms | WebGPU |
-| MediaPipe | 4.0ms | 6.5ms | WebGPU |
-| MediaPipe | 4.5ms | 8.2ms | WASM |
-
-With ROI tracking enabled, most frames skip palm detection entirely, making the effective per-frame cost even lower after initial detection.
+| Browser | Status |
+|---------|--------|
+| Chrome 113+ | ✅ |
+| Edge 113+ | ✅ |
+| Safari 18+ (macOS/iOS) | ✅ |
+| Firefox Nightly | Experimental |
 
 ## License
 
