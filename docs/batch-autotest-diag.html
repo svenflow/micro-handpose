@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diagnostic: Error Direction Analysis</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 10px; font-size: 11px; }
+    pre { background: #222; padding: 8px; border-radius: 4px; font-size: 10px; white-space: pre-wrap; }
+    .error { color: #ff6b6b; }
+    .ok { color: #34d399; }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+    td, th { border: 1px solid #333; padding: 4px 8px; text-align: left; font-size: 11px; }
+    th { background: #222; }
+  </style>
+</head>
+<body>
+  <h2>Diagnostic: Per-landmark error direction (dx, dy)</h2>
+  <div id="status">Starting...</div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip',
+      'index_mcp','index_pip','index_dip','index_tip',
+      'middle_mcp','middle_pip','middle_dip','middle_tip',
+      'ring_mcp','ring_pip','ring_dip','ring_tip',
+      'pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
+
+    const IMAGES = [
+      'test-hands/hand_05.jpg','test-hands/hand_06.jpg',
+      'test-hands/hand_07.jpg','test-hands/hand_08.jpg','test-hands/hand_09.jpg',
+      'test-hands/hand_10.jpg','hand_nikhil.jpg',
+    ];
+
+    async function run() {
+      try {
+        const { createHandpose } = await import('./dist/index.js?v=batch9');
+        const handpose = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.1, palmScoreThreshold: 0.5 });
+        log('micro-handpose loaded');
+
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const wasmFileset = await vision.FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        let mp;
+        try {
+          mp = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+              delegate: 'GPU',
+            },
+            runningMode: 'IMAGE', numHands: 2,
+          });
+          log('MediaPipe GPU loaded');
+        } catch(e) {
+          mp = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+              delegate: 'CPU',
+            },
+            runningMode: 'IMAGE', numHands: 2,
+          });
+          log('MediaPipe CPU loaded');
+        }
+
+        // Also get debug info from our detector
+        for (const imgSrc of IMAGES) {
+          status.textContent = `Testing ${imgSrc}...`;
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          try {
+            await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = imgSrc; });
+          } catch(e) { continue; }
+
+          const W = img.naturalWidth, H = img.naturalHeight;
+          handpose.reset();
+
+          // Get debug info
+          const debugHands = await handpose.detectWithDebug(img);
+          const mpResult = mp.detect(img);
+          const mpHands = mpResult.landmarks || [];
+
+          if (debugHands.length === 0 || mpHands.length === 0) {
+            log('\n' + imgSrc + ': no detection');
+            continue;
+          }
+
+          const ourLm = debugHands[0].landmarks;
+          const roi = debugHands[0].roi;
+          const palm = debugHands[0].palmDetection;
+
+          // Match hand
+          let bestIdx = 0, bestD = Infinity;
+          for (let j = 0; j < mpHands.length; j++) {
+            const d = Math.hypot(ourLm[0].x - mpHands[j][0].x, ourLm[0].y - mpHands[j][0].y);
+            if (d < bestD) { bestD = d; bestIdx = j; }
+          }
+          const mpLm = mpHands[bestIdx];
+
+          const name = imgSrc.split('/').pop();
+          log('\n═══════════════════════════════════════');
+          log(`${name} (${W}x${H})`);
+          log(`ROI: center=(${roi.centerXpx.toFixed(1)}, ${roi.centerYpx.toFixed(1)}) size=${roi.sizePx.toFixed(1)} rot=${(roi.rotation * 180 / Math.PI).toFixed(2)}°`);
+          log(`Palm score: ${palm.score.toFixed(4)}`);
+          log(`Palm box (norm): cx=${palm.box[0].toFixed(4)} cy=${palm.box[1].toFixed(4)} w=${palm.box[2].toFixed(4)} h=${palm.box[3].toFixed(4)}`);
+          log(`Palm kp0 (wrist): (${palm.keypoints[0][0].toFixed(4)}, ${palm.keypoints[0][1].toFixed(4)})`);
+          log(`Palm kp2 (midMCP): (${palm.keypoints[2][0].toFixed(4)}, ${palm.keypoints[2][1].toFixed(4)})`);
+
+          // Compute mean dx, dy across all landmarks
+          let sumDx = 0, sumDy = 0, sumDist = 0;
+          log('\nLandmark         dx%      dy%     dist%');
+          log('─'.repeat(45));
+          for (let i = 0; i < 21; i++) {
+            const dx = (ourLm[i].x - mpLm[i].x) * 100;
+            const dy = (ourLm[i].y - mpLm[i].y) * 100;
+            const d = Math.sqrt(dx*dx + dy*dy);
+            sumDx += dx; sumDy += dy; sumDist += d;
+            if (d > 0.5) { // Only show high-error landmarks
+              log(`${NAMES[i].padEnd(16)} ${dx >= 0 ? '+' : ''}${dx.toFixed(3)}  ${dy >= 0 ? '+' : ''}${dy.toFixed(3)}  ${d.toFixed(3)}`);
+            }
+          }
+          const avgDx = sumDx / 21, avgDy = sumDy / 21;
+          log('─'.repeat(45));
+          log(`MEAN SHIFT:      ${avgDx >= 0 ? '+' : ''}${avgDx.toFixed(3)}  ${avgDy >= 0 ? '+' : ''}${avgDy.toFixed(3)}  avg=${(sumDist/21).toFixed(3)}%`);
+
+          // Analyze: is the error a pure translation?
+          // If all dx are similar and all dy are similar, it's a translation
+          let dxVals = [], dyVals = [];
+          for (let i = 0; i < 21; i++) {
+            dxVals.push((ourLm[i].x - mpLm[i].x) * 100);
+            dyVals.push((ourLm[i].y - mpLm[i].y) * 100);
+          }
+          const dxStd = Math.sqrt(dxVals.reduce((s,v) => s + (v-avgDx)**2, 0) / 21);
+          const dyStd = Math.sqrt(dyVals.reduce((s,v) => s + (v-avgDy)**2, 0) / 21);
+          log(`SHIFT STD:       ±${dxStd.toFixed(3)}   ±${dyStd.toFixed(3)}`);
+          log(`Translation component: ${Math.sqrt(avgDx**2 + avgDy**2).toFixed(3)}%`);
+          log(`Residual (after removing translation): ${Math.sqrt(Math.max(0, (sumDist/21)**2 - avgDx**2 - avgDy**2)).toFixed(3)}%`);
+        }
+
+        status.textContent = 'Done!';
+      } catch(e) {
+        log('FATAL: ' + e.message + '\n' + e.stack);
+        status.textContent = 'ERROR';
+      }
+    }
+    run();
+  </script>
+</body>
+</html>

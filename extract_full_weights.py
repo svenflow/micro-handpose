@@ -27,7 +27,7 @@ import numpy as np
 SCRIPT_DIR = Path(__file__).parent
 TASK_PATH = SCRIPT_DIR / "hand_landmarker.task"
 LITE_PATH = SCRIPT_DIR / "hand_landmark.tflite"
-FULL_PATH = SCRIPT_DIR / "hand_landmark_full.tflite"
+FULL_PATH = SCRIPT_DIR / "hand_landmark_full_from_task.tflite"
 WEIGHTS_DIR = SCRIPT_DIR / "weights"
 OUTPUT_BIN = WEIGHTS_DIR / "weights_f16_full.bin"
 OUTPUT_JSON = WEIGHTS_DIR / "weights_f16_full.json"

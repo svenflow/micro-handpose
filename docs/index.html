@@ -997,11 +997,15 @@ handpose.<span class="fn">dispose</span>()</pre>
         video.srcObject = stream;
         await video.play();
 
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+        // Use actual display dimensions (handles mobile camera rotation where
+        // videoWidth/videoHeight may report sensor dimensions, not display dimensions)
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        canvas.width = vw;
+        canvas.height = vh;
 
-        document.getElementById('viewport').style.aspectRatio =
-          `${video.videoWidth} / ${video.videoHeight}`;
+        document.getElementById('viewport').style.aspectRatio = `${vw} / ${vh}`;
+        console.log(`[micro-handpose] Camera: ${vw}x${vh}`);
 
         placeholder.style.display = 'none';
         cameraReady = true;

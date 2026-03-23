@@ -34,42 +34,27 @@ struct AffineTransform { a:f32, b:f32, tx:f32, c:f32, d:f32, ty:f32, }
 @group(0)@binding(1) var<storage,read_write> output:array<f32>;
 @group(0)@binding(2) var<uniform> params:CropParams;
 @group(0)@binding(3) var<uniform> transform:AffineTransform;
+@group(0)@binding(4) var src_sampler:sampler;
 
 @compute @workgroup_size(16,16,1)
 fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let dst_x=gid.x; let dst_y=gid.y;
   if(dst_x>=params.dst_size||dst_y>=params.dst_size){return;}
 
-  // Map crop pixel to source normalized coordinates
+  // Map crop pixel to source normalized coordinates [0,1]
   let fx=f32(dst_x)+0.5;
   let fy=f32(dst_y)+0.5;
   let src_nx=transform.a*fx+transform.b*fy+transform.tx;
   let src_ny=transform.c*fx+transform.d*fy+transform.ty;
 
-  // Convert to pixel coordinates
-  let src_px=src_nx*f32(params.src_width)-0.5;
-  let src_py=src_ny*f32(params.src_height)-0.5;
+  let out_stride=params.dst_size*params.dst_size;
 
-  // Bilinear interpolation
-  let x0=i32(floor(src_px)); let y0=i32(floor(src_py));
-  let x1=x0+1; let y1=y0+1;
-  let lx=src_px-f32(x0); let ly=src_py-f32(y0);
-
-  let sw=i32(params.src_width); let sh=i32(params.src_height);
-
-  // Zero for out-of-bounds (matches MediaPipe's kZero border mode)
-  var p00=vec4<f32>(0.0); var p01=vec4<f32>(0.0);
-  var p10=vec4<f32>(0.0); var p11=vec4<f32>(0.0);
-
-  if(x0>=0 && x0<sw && y0>=0 && y0<sh){ p00=textureLoad(src_tex,vec2<u32>(u32(x0),u32(y0)),0); }
-  if(x1>=0 && x1<sw && y0>=0 && y0<sh){ p01=textureLoad(src_tex,vec2<u32>(u32(x1),u32(y0)),0); }
-  if(x0>=0 && x0<sw && y1>=0 && y1<sh){ p10=textureLoad(src_tex,vec2<u32>(u32(x0),u32(y1)),0); }
-  if(x1>=0 && x1<sw && y1>=0 && y1<sh){ p11=textureLoad(src_tex,vec2<u32>(u32(x1),u32(y1)),0); }
-
-  let pixel=p00*(1.0-lx)*(1.0-ly)+p01*lx*(1.0-ly)+p10*(1.0-lx)*ly+p11*lx*ly;
+  // Hardware bilinear sampling via textureSampleLevel with clamp-to-edge sampler.
+  // Clamp-to-edge matches MediaPipe's BORDER_REPLICATE default
+  // (ImageToTensorCalculatorOptions proto: "BORDER_REPLICATE is used by default").
+  let pixel = textureSampleLevel(src_tex, src_sampler, vec2<f32>(src_nx, src_ny), 0.0);
 
   // Write CHW format
-  let out_stride=params.dst_size*params.dst_size;
   output[0u*out_stride+dst_y*params.dst_size+dst_x]=pixel.r;
   output[1u*out_stride+dst_y*params.dst_size+dst_x]=pixel.g;
   output[2u*out_stride+dst_y*params.dst_size+dst_x]=pixel.b;
@@ -101,12 +86,21 @@ export function createCropPipeline(device: GPUDevice): CropPipeline {
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' as GPUBufferBindingType } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' as GPUBufferBindingType } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' as GPUBufferBindingType } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, sampler: {} },
     ],
   });
 
   const pipeline = device.createComputePipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
     compute: { module: shaderModule, entryPoint: 'main' },
+  });
+
+  // Linear sampler for hardware bilinear interpolation (matches MediaPipe's GL_LINEAR)
+  const linearSampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+    addressModeU: 'clamp-to-edge',
+    addressModeV: 'clamp-to-edge',
   });
 
   // Pre-create reusable uniform buffers (avoid per-frame GPU buffer allocation leak)
@@ -141,6 +135,7 @@ export function createCropPipeline(device: GPUDevice): CropPipeline {
         { binding: 1, resource: { buffer: outputBuffer } },
         { binding: 2, resource: { buffer: paramsBuf } },
         { binding: 3, resource: { buffer: transformBuf } },
+        { binding: 4, resource: linearSampler },
       ],
     });
 

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Export GPU SSD</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+    #status { color: #888; margin-bottom: 20px; }
+    #scores, #regressors { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Export GPU SSD Outputs</h1>
+  <div id="status">Initializing...</div>
+  <div id="scores"></div>
+  <div id="regressors"></div>
+  <pre id="summary"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const summary = document.getElementById('summary');
+
+    async function run() {
+      try {
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=export2');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
+        });
+
+        status.textContent = 'Loading 192x192 test image...';
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = 'test-hands/hand_192.png';
+        });
+
+        status.textContent = 'Running GPU inference...';
+        const debug = await handpose._debug.palmModel.debugRun(img);
+
+        const scores = debug.rawScores;
+        const regs = debug.rawRegressors;
+
+        // Store as JSON in hidden divs for scraping
+        document.getElementById('scores').textContent = JSON.stringify(Array.from(scores));
+        document.getElementById('regressors').textContent = JSON.stringify(Array.from(regs));
+
+        // Show summary
+        const sigmoid = (x) => 1 / (1 + Math.exp(-x));
+        const sigScores = Array.from(scores).map(sigmoid);
+        const topIdx = sigScores.map((s, i) => [s, i]).sort((a, b) => b[0] - a[0]).slice(0, 10);
+
+        let text = `Scores: ${scores.length} values\n`;
+        text += `Regressors: ${regs.length} values\n`;
+        text += `Score range: [${Math.min(...scores).toFixed(4)}, ${Math.max(...scores).toFixed(4)}]\n\n`;
+        text += `Top 10 GPU detections:\n`;
+        for (const [s, idx] of topIdx) {
+          text += `  anchor=${idx} score=${s.toFixed(6)} logit=${scores[idx].toFixed(4)}\n`;
+        }
+        summary.textContent = text;
+        status.textContent = 'Done! Scores and regressors stored in hidden divs.';
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        console.error(e);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

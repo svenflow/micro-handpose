@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>NMS Debug</title>
+  <style>body { font-family: monospace; background: #111; color: #eee; padding: 20px; } pre { background: #222; padding: 10px; border-radius: 6px; font-size: 11px; white-space: pre-wrap; }</style>
+</head>
+<body>
+  <h1>NMS Debug: Raw vs Weighted Detection Comparison</h1>
+  <div id="status">Loading...</div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    async function run() {
+      try {
+        status.textContent = 'Loading...';
+        const { createHandpose } = await import('./dist/index.js?v=nmstest1');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
+        });
+
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = 'test-hands/hand_192.png'; });
+
+        status.textContent = 'Running palm detection...';
+        // Get raw SSD outputs
+        const palmModel = handpose._debug.palmModel;
+        const debug = await palmModel.debugRun(img);
+        const scores = debug.rawScores;
+        const regs = debug.rawRegressors;
+
+        log(`Raw SSD: ${scores.length} scores, ${regs.length} regressors`);
+
+        // Generate anchors (same as palm_detection.ts)
+        const anchors = [];
+        // 12x12 grid, 6 anchors per cell
+        for (let y = 0; y < 12; y++) {
+          for (let x = 0; x < 12; x++) {
+            for (let a = 0; a < 6; a++) {
+              anchors.push({ x: (x + 0.5) / 12, y: (y + 0.5) / 12 });
+            }
+          }
+        }
+        // 24x24 grid, 2 anchors per cell
+        for (let y = 0; y < 24; y++) {
+          for (let x = 0; x < 24; x++) {
+            for (let a = 0; a < 2; a++) {
+              anchors.push({ x: (x + 0.5) / 24, y: (y + 0.5) / 24 });
+            }
+          }
+        }
+        log(`Anchors: ${anchors.length}`);
+
+        // Decode all detections above threshold
+        const sigmoid = x => 1 / (1 + Math.exp(-x));
+        const detections = [];
+        for (let i = 0; i < anchors.length; i++) {
+          const score = sigmoid(scores[i]);
+          if (score < 0.5) continue;
+
+          const anchor = anchors[i];
+          const base = i * 18;
+          const cx = anchor.x + regs[base + 0] / 192;
+          const cy = anchor.y + regs[base + 1] / 192;
+          const w = regs[base + 2] / 192;
+          const h = regs[base + 3] / 192;
+          const kps = [];
+          for (let k = 0; k < 7; k++) {
+            kps.push([
+              anchor.x + regs[base + 4 + k*2] / 192,
+              anchor.y + regs[base + 4 + k*2 + 1] / 192,
+            ]);
+          }
+          detections.push({ score, box: [cx, cy, w, h], keypoints: kps, anchorIdx: i });
+        }
+
+        log(`Detections above 0.5: ${detections.length}`);
+        detections.sort((a, b) => b.score - a.score);
+
+        // Show top detections BEFORE NMS
+        log(`\n=== Top 15 detections (before NMS) ===`);
+        for (let i = 0; i < Math.min(15, detections.length); i++) {
+          const d = detections[i];
+          log(`  ${i+1}. score=${d.score.toFixed(6)} anchor=${d.anchorIdx} box=[${d.box.map(v=>v.toFixed(4)).join(',')}]`);
+          log(`     wrist=(${d.keypoints[0][0].toFixed(4)},${d.keypoints[0][1].toFixed(4)}) midMCP=(${d.keypoints[2][0].toFixed(4)},${d.keypoints[2][1].toFixed(4)})`);
+        }
+
+        // Compute IoU between top detections
+        function computeIoU(a, b) {
+          const ax1 = a.box[0] - a.box[2]/2, ay1 = a.box[1] - a.box[3]/2;
+          const ax2 = a.box[0] + a.box[2]/2, ay2 = a.box[1] + a.box[3]/2;
+          const bx1 = b.box[0] - b.box[2]/2, by1 = b.box[1] - b.box[3]/2;
+          const bx2 = b.box[0] + b.box[2]/2, by2 = b.box[1] + b.box[3]/2;
+          const ix1 = Math.max(ax1, bx1), iy1 = Math.max(ay1, by1);
+          const ix2 = Math.min(ax2, bx2), iy2 = Math.min(ay2, by2);
+          const iw = Math.max(0, ix2 - ix1), ih = Math.max(0, iy2 - iy1);
+          const inter = iw * ih;
+          const union = (ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter;
+          return union > 0 ? inter / union : 0;
+        }
+
+        log(`\n=== IoU between top detections ===`);
+        for (let i = 0; i < Math.min(5, detections.length); i++) {
+          const ious = [];
+          for (let j = 0; j < Math.min(15, detections.length); j++) {
+            ious.push(computeIoU(detections[i], detections[j]).toFixed(3));
+          }
+          log(`  det${i}: [${ious.join(', ')}]`);
+        }
+
+        // Do weighted NMS (our implementation)
+        function weightedNMS(dets, iouThresh) {
+          const sorted = [...dets].sort((a, b) => b.score - a.score);
+          const kept = [];
+          const suppressed = new Set();
+
+          for (let i = 0; i < sorted.length; i++) {
+            if (suppressed.has(i)) continue;
+            const cluster = [i];
+            for (let j = i + 1; j < sorted.length; j++) {
+              if (suppressed.has(j)) continue;
+              if (computeIoU(sorted[i], sorted[j]) > iouThresh) {
+                cluster.push(j);
+                suppressed.add(j);
+              }
+            }
+
+            let totalW = 0;
+            let cx=0, cy=0, w=0, h=0;
+            const kps = Array(7).fill(null).map(()=>[0,0]);
+
+            for (const idx of cluster) {
+              const det = sorted[idx];
+              const weight = det.score;
+              totalW += weight;
+              cx += det.box[0]*weight; cy += det.box[1]*weight;
+              w += det.box[2]*weight; h += det.box[3]*weight;
+              for (let k = 0; k < 7; k++) {
+                kps[k][0] += det.keypoints[k][0]*weight;
+                kps[k][1] += det.keypoints[k][1]*weight;
+              }
+            }
+
+            const inv = 1/totalW;
+            kept.push({
+              score: sorted[i].score,
+              box: [cx*inv, cy*inv, w*inv, h*inv],
+              keypoints: kps.map(([x,y]) => [x*inv, y*inv]),
+              clusterSize: cluster.length,
+              clusterIndices: cluster.map(j => sorted[j].anchorIdx),
+            });
+          }
+          return kept;
+        }
+
+        // Run our weighted NMS
+        const nmsResult = weightedNMS(detections, 0.3);
+        log(`\n=== Weighted NMS result (IoU=0.3) ===`);
+        log(`Detections after NMS: ${nmsResult.length}`);
+        const best = nmsResult[0];
+        log(`Top detection:`);
+        log(`  score: ${best.score.toFixed(6)}`);
+        log(`  box: [${best.box.map(v=>v.toFixed(6)).join(', ')}]`);
+        log(`  wrist kp: (${best.keypoints[0][0].toFixed(6)}, ${best.keypoints[0][1].toFixed(6)})`);
+        log(`  midMCP kp: (${best.keypoints[2][0].toFixed(6)}, ${best.keypoints[2][1].toFixed(6)})`);
+        log(`  cluster size: ${best.clusterSize}`);
+        log(`  cluster anchors: [${best.clusterIndices.join(', ')}]`);
+
+        // Also do GREEDY NMS (no averaging) for comparison
+        function greedyNMS(dets, iouThresh) {
+          const sorted = [...dets].sort((a, b) => b.score - a.score);
+          const kept = [];
+          const suppressed = new Set();
+          for (let i = 0; i < sorted.length; i++) {
+            if (suppressed.has(i)) continue;
+            kept.push(sorted[i]);
+            for (let j = i + 1; j < sorted.length; j++) {
+              if (computeIoU(sorted[i], sorted[j]) > iouThresh) {
+                suppressed.add(j);
+              }
+            }
+          }
+          return kept;
+        }
+
+        const greedyResult = greedyNMS(detections, 0.3);
+        const greedyBest = greedyResult[0];
+        log(`\n=== Greedy NMS (no averaging) ===`);
+        log(`  score: ${greedyBest.score.toFixed(6)}`);
+        log(`  box: [${greedyBest.box.map(v=>v.toFixed(6)).join(', ')}]`);
+        log(`  wrist: (${greedyBest.keypoints[0][0].toFixed(6)}, ${greedyBest.keypoints[0][1].toFixed(6)})`);
+        log(`  midMCP: (${greedyBest.keypoints[2][0].toFixed(6)}, ${greedyBest.keypoints[2][1].toFixed(6)})`);
+
+        // Compare weighted vs greedy
+        const dWrist = Math.sqrt(
+          (best.keypoints[0][0] - greedyBest.keypoints[0][0])**2 +
+          (best.keypoints[0][1] - greedyBest.keypoints[0][1])**2
+        );
+        const dMid = Math.sqrt(
+          (best.keypoints[2][0] - greedyBest.keypoints[2][0])**2 +
+          (best.keypoints[2][1] - greedyBest.keypoints[2][1])**2
+        );
+        const dBox = Math.sqrt(
+          (best.box[0] - greedyBest.box[0])**2 +
+          (best.box[1] - greedyBest.box[1])**2
+        );
+        log(`\nWeighted vs Greedy NMS differences:`);
+        log(`  Box center diff: ${(dBox*100).toFixed(4)}%`);
+        log(`  Wrist kp diff: ${(dWrist*100).toFixed(4)}%`);
+        log(`  MidMCP kp diff: ${(dMid*100).toFixed(4)}%`);
+
+        // Compute rotation for both
+        function computeRotation(wrist, midMCP, imgW, imgH) {
+          const dxPx = (midMCP[0] - wrist[0]) * imgW;
+          const dyPx = (midMCP[1] - wrist[1]) * imgH;
+          const angle = Math.atan2(-dyPx, dxPx);
+          const rawRot = Math.PI/2 - angle;
+          return rawRot - 2*Math.PI * Math.floor((rawRot + Math.PI) / (2*Math.PI));
+        }
+
+        const rotWeighted = computeRotation(best.keypoints[0], best.keypoints[2], 192, 192);
+        const rotGreedy = computeRotation(greedyBest.keypoints[0], greedyBest.keypoints[2], 192, 192);
+        log(`\nRotation comparison:`);
+        log(`  Weighted: ${(rotWeighted*180/Math.PI).toFixed(4)}°`);
+        log(`  Greedy: ${(rotGreedy*180/Math.PI).toFixed(4)}°`);
+        log(`  Difference: ${((rotWeighted-rotGreedy)*180/Math.PI).toFixed(4)}°`);
+
+        status.textContent = 'Done!';
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        log(`ERROR: ${e.message}\n${e.stack}`);
+        console.error(e);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

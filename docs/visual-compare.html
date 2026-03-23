@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Visual Comparison: micro-handpose vs MediaPipe</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+    canvas { border: 1px solid #333; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    pre { background: #222; padding: 10px; border-radius: 6px; font-size: 11px; white-space: pre-wrap; max-height: 400px; overflow-y: auto; }
+    h3 { margin: 10px 0 5px; }
+    select, button { padding: 6px 12px; margin: 5px; }
+  </style>
+</head>
+<body>
+  <h1>Visual Comparison: micro-handpose vs MediaPipe</h1>
+  <p>Runs FULL pipeline (palm detection + crop + landmarks) on both models using a static image.</p>
+  <div>
+    <label>Image: </label>
+    <select id="imgSelect">
+      <option value="test-hands/hand_01.jpg">hand_01</option>
+      <option value="test-hands/hand_02.jpg">hand_02</option>
+      <option value="test-hands/hand_03.jpg">hand_03</option>
+      <option value="test-hands/hand_04.jpg">hand_04</option>
+      <option value="test-hands/hand_05.jpg" selected>hand_05</option>
+      <option value="test-hands/hand_06.jpg">hand_06</option>
+      <option value="test-hands/hand_07.jpg">hand_07</option>
+      <option value="test-hands/hand_08.jpg">hand_08</option>
+      <option value="test-hands/hand_09.jpg">hand_09</option>
+      <option value="test-hands/hand_10.jpg">hand_10</option>
+      <option value="hand_nikhil.jpg">hand_nikhil</option>
+    </select>
+    <button id="runBtn" onclick="runTest()">Run Comparison</button>
+    <button onclick="runAll()">Run All Images</button>
+  </div>
+  <div id="status">Ready</div>
+
+  <div class="row">
+    <div>
+      <h3>micro-handpose (purple)</h3>
+      <canvas id="microCanvas" width="640" height="480"></canvas>
+    </div>
+    <div>
+      <h3>MediaPipe GPU (green)</h3>
+      <canvas id="mpCanvas" width="640" height="480"></canvas>
+    </div>
+    <div>
+      <h3>Overlay (purple=ours, green=MP)</h3>
+      <canvas id="overlayCanvas" width="640" height="480"></canvas>
+    </div>
+  </div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let logText = '';
+    function log(msg) { logText += msg + '\n'; output.textContent = logText; }
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],
+      [0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],
+      [5,9],[9,13],[13,17],
+    ];
+
+    const NAMES = [
+      'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+      'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+      'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+      'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+      'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+    ];
+
+    function drawLandmarks(ctx, landmarks, w, h, color, lineWidth = 3) {
+      // Draw connections
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lineWidth;
+      ctx.lineCap = 'round';
+      for (const [a, b] of CONNECTIONS) {
+        ctx.beginPath();
+        ctx.moveTo(landmarks[a].x * w, landmarks[a].y * h);
+        ctx.lineTo(landmarks[b].x * w, landmarks[b].y * h);
+        ctx.stroke();
+      }
+      // Draw dots
+      for (let i = 0; i < landmarks.length; i++) {
+        ctx.beginPath();
+        ctx.arc(landmarks[i].x * w, landmarks[i].y * h, i === 0 ? 5 : 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        // Label
+        ctx.fillStyle = '#fff';
+        ctx.font = '9px monospace';
+        ctx.fillText(i.toString(), landmarks[i].x * w + 5, landmarks[i].y * h - 3);
+      }
+    }
+
+    let handpose = null;
+    let mpGpu = null;
+
+    async function ensureModels() {
+      if (!handpose) {
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=visualcmp');
+        handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.3,
+        });
+        log('micro-handpose loaded');
+      }
+
+      if (!mpGpu) {
+        status.textContent = 'Loading MediaPipe GPU...';
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+        });
+        log('MediaPipe GPU loaded');
+      }
+    }
+
+    window.runTest = async function() {
+      const imgSrc = document.getElementById('imgSelect').value;
+      logText = '';
+      output.textContent = '';
+
+      await ensureModels();
+
+      status.textContent = 'Loading image...';
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = imgSrc; });
+      const W = img.naturalWidth, H = img.naturalHeight;
+      log(`Image: ${imgSrc} (${W}x${H})`);
+
+      // Set canvas sizes proportionally
+      const maxW = 640;
+      const scale = maxW / W;
+      const dispW = Math.round(W * scale);
+      const dispH = Math.round(H * scale);
+
+      for (const id of ['microCanvas', 'mpCanvas', 'overlayCanvas']) {
+        const c = document.getElementById(id);
+        c.width = dispW; c.height = dispH;
+      }
+
+      // Run micro-handpose
+      status.textContent = 'Running micro-handpose...';
+      const t0 = performance.now();
+      const microHands = await handpose.detect(img);
+      const microMs = performance.now() - t0;
+      log(`micro-handpose: ${microHands.length} hand(s) detected in ${microMs.toFixed(1)}ms`);
+
+      // Run MediaPipe
+      status.textContent = 'Running MediaPipe GPU...';
+      const t1 = performance.now();
+      const mpResult = mpGpu.detect(img);
+      const mpMs = performance.now() - t1;
+      const mpHands = mpResult.landmarks || [];
+      log(`MediaPipe GPU: ${mpHands.length} hand(s) detected in ${mpMs.toFixed(1)}ms`);
+
+      // Draw micro-handpose result
+      const microCtx = document.getElementById('microCanvas').getContext('2d');
+      microCtx.drawImage(img, 0, 0, dispW, dispH);
+      for (const hand of microHands) {
+        drawLandmarks(microCtx, hand.landmarks, dispW, dispH, '#7c6aef');
+      }
+
+      // Draw MediaPipe result
+      const mpCtx = document.getElementById('mpCanvas').getContext('2d');
+      mpCtx.drawImage(img, 0, 0, dispW, dispH);
+      for (const mpLm of mpHands) {
+        drawLandmarks(mpCtx, mpLm, dispW, dispH, '#34d399');
+      }
+
+      // Overlay both
+      const ovCtx = document.getElementById('overlayCanvas').getContext('2d');
+      ovCtx.drawImage(img, 0, 0, dispW, dispH);
+      for (const mpLm of mpHands) {
+        drawLandmarks(ovCtx, mpLm, dispW, dispH, '#34d399', 2);
+      }
+      for (const hand of microHands) {
+        drawLandmarks(ovCtx, hand.landmarks, dispW, dispH, '#7c6aef', 2);
+      }
+
+      // Compare per-landmark if both detected
+      if (microHands.length > 0 && mpHands.length > 0) {
+        // Match closest hands
+        for (let hi = 0; hi < microHands.length; hi++) {
+          const ourLm = microHands[hi].landmarks;
+          // Find closest MP hand by wrist distance
+          let bestMp = 0, bestDist = Infinity;
+          for (let j = 0; j < mpHands.length; j++) {
+            const d = Math.hypot(ourLm[0].x - mpHands[j][0].x, ourLm[0].y - mpHands[j][0].y);
+            if (d < bestDist) { bestDist = d; bestMp = j; }
+          }
+          const mpLm = mpHands[bestMp];
+
+          log(`\n=== Hand ${hi} vs MP hand ${bestMp} ===`);
+          log(`${'#'.padStart(3)} ${'Name'.padEnd(12)} ${'Dist%'.padStart(8)} ${'Dx%'.padStart(8)} ${'Dy%'.padStart(8)}  Ours              MP`);
+
+          let sumDist = 0, maxDist = 0, maxIdx = 0;
+          for (let i = 0; i < 21; i++) {
+            const dx = (ourLm[i].x - mpLm[i].x) * 100;
+            const dy = (ourLm[i].y - mpLm[i].y) * 100;
+            const d = Math.sqrt(dx*dx + dy*dy);
+            sumDist += d;
+            if (d > maxDist) { maxDist = d; maxIdx = i; }
+            log(`${i.toString().padStart(3)} ${NAMES[i].padEnd(12)} ${d.toFixed(4).padStart(8)} ${dx.toFixed(4).padStart(8)} ${dy.toFixed(4).padStart(8)}  (${ourLm[i].x.toFixed(4)},${ourLm[i].y.toFixed(4)}) (${mpLm[i].x.toFixed(4)},${mpLm[i].y.toFixed(4)})`);
+          }
+          const avgDist = sumDist / 21;
+          log(`\nAvg distance: ${avgDist.toFixed(4)}%`);
+          log(`Max distance: ${maxDist.toFixed(4)}% (${NAMES[maxIdx]})`);
+          log(`In pixels (${W}x${H}): avg=${(avgDist/100*Math.max(W,H)).toFixed(1)}px, max=${(maxDist/100*Math.max(W,H)).toFixed(1)}px`);
+        }
+      }
+
+      status.textContent = 'Done!';
+    };
+
+    window.runAll = async function() {
+      const select = document.getElementById('imgSelect');
+      const results = [];
+      for (const opt of select.options) {
+        select.value = opt.value;
+        await runTest();
+        // Extract avg distance from log
+        const match = logText.match(/Avg distance: ([\d.]+)%/);
+        if (match) results.push({ img: opt.value, avg: parseFloat(match[1]) });
+      }
+      log('\n=== SUMMARY ===');
+      for (const r of results) {
+        log(`${r.img.padEnd(30)} avg=${r.avg.toFixed(4)}%`);
+      }
+      const overall = results.reduce((s, r) => s + r.avg, 0) / results.length;
+      log(`Overall avg: ${overall.toFixed(4)}%`);
+    };
+  </script>
+</body>
+</html>

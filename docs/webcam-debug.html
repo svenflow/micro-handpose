@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Webcam Debug</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 10px; font-size: 11px; }
+    .viewport { position: relative; width: 100%; max-width: 400px; }
+    .viewport video, .viewport canvas {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      object-fit: contain; transform: scaleX(-1);
+    }
+    pre { background: #222; padding: 8px; border-radius: 4px; font-size: 10px; white-space: pre-wrap; max-height: 300px; overflow-y: auto; }
+    .error { color: #ff6b6b; }
+    .ok { color: #34d399; }
+    button { padding: 8px 16px; font-size: 14px; margin: 5px; }
+  </style>
+</head>
+<body>
+  <h2>Webcam Debug: micro-handpose</h2>
+  <div id="status">Ready</div>
+  <button onclick="start()">Start Camera + Detection</button>
+  <div class="viewport" id="vp">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+  </div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17],
+    ];
+
+    function drawHand(lm, w, h, color) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      for (const [a, b] of CONNECTIONS) {
+        ctx.beginPath();
+        ctx.moveTo(lm[a].x * w, lm[a].y * h);
+        ctx.lineTo(lm[b].x * w, lm[b].y * h);
+        ctx.stroke();
+      }
+      for (let i = 0; i < lm.length; i++) {
+        ctx.beginPath();
+        ctx.arc(lm[i].x * w, lm[i].y * h, 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
+    }
+
+    // System info
+    log('UA: ' + navigator.userAgent.substring(0, 100));
+    log('Screen: ' + screen.width + 'x' + screen.height + ' dpr=' + devicePixelRatio);
+    log('WebGPU: ' + (navigator.gpu ? 'YES' : 'NO'));
+    log('getUserMedia: ' + (navigator.mediaDevices?.getUserMedia ? 'YES' : 'NO'));
+
+    let handpose = null;
+    let mpHands = null;
+    let running = false;
+    let mpTimestamp = 0;
+
+    window.start = async function() {
+      try {
+        status.textContent = 'Starting camera...';
+
+        // Get camera
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        const vw = video.videoWidth, vh = video.videoHeight;
+        log('\n=== Camera ===');
+        log('videoWidth: ' + vw + ', videoHeight: ' + vh);
+        log('aspect: ' + (vw/vh).toFixed(3));
+        log('track settings: ' + JSON.stringify(stream.getVideoTracks()[0].getSettings()));
+
+        canvas.width = vw;
+        canvas.height = vh;
+        document.getElementById('vp').style.aspectRatio = vw + '/' + vh;
+
+        // Load micro-handpose
+        status.textContent = 'Loading micro-handpose...';
+        if (!handpose) {
+          const { createHandpose } = await import('./dist/index.js?v=webcamdebug');
+          handpose = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.1 });
+          log('micro-handpose loaded');
+        }
+
+        // Load MediaPipe WASM for comparison
+        status.textContent = 'Loading MediaPipe...';
+        if (!mpHands) {
+          try {
+            const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+            const wasmFileset = await vision.FilesetResolver.forVisionTasks(
+              'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+            );
+            mpHands = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+              baseOptions: {
+                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+                delegate: 'GPU',
+              },
+              runningMode: 'VIDEO',
+              numHands: 1,
+            });
+            log('MediaPipe GPU loaded');
+          } catch(e) {
+            log('MediaPipe GPU failed: ' + e.message);
+            try {
+              const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+              const wasmFileset = await vision.FilesetResolver.forVisionTasks(
+                'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+              );
+              mpHands = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+                baseOptions: {
+                  modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+                  delegate: 'CPU',
+                },
+                runningMode: 'VIDEO',
+                numHands: 1,
+              });
+              log('MediaPipe CPU loaded');
+            } catch(e2) {
+              log('MediaPipe failed entirely: ' + e2.message);
+            }
+          }
+        }
+
+        running = true;
+        status.textContent = 'Running - show your hand!';
+        let frameCount = 0;
+
+        async function loop() {
+          if (!running) return;
+
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+          // Run micro-handpose
+          const t0 = performance.now();
+          const hands = await handpose.detect(video);
+          const microMs = performance.now() - t0;
+
+          // Run MediaPipe
+          let mpLandmarks = null;
+          if (mpHands) {
+            mpTimestamp += 33;
+            try {
+              const mpResult = mpHands.detectForVideo(video, mpTimestamp);
+              if (mpResult?.landmarks?.length > 0) mpLandmarks = mpResult.landmarks[0];
+            } catch(e) {}
+          }
+
+          // Draw MP (green) then ours (purple)
+          if (mpLandmarks) drawHand(mpLandmarks, canvas.width, canvas.height, '#34d399');
+          if (hands.length > 0) {
+            drawHand(hands[0].landmarks, canvas.width, canvas.height, '#7c6aef');
+
+            // Log first 3 frames
+            if (frameCount < 3) {
+              const lm = hands[0].landmarks;
+              log('\n=== Frame ' + frameCount + ' ===');
+              log('micro: ' + microMs.toFixed(0) + 'ms, hands: ' + hands.length);
+              log('  wrist: (' + lm[0].x.toFixed(4) + ', ' + lm[0].y.toFixed(4) + ')');
+              log('  index_tip: (' + lm[8].x.toFixed(4) + ', ' + lm[8].y.toFixed(4) + ')');
+              if (mpLandmarks) {
+                log('MP:');
+                log('  wrist: (' + mpLandmarks[0].x.toFixed(4) + ', ' + mpLandmarks[0].y.toFixed(4) + ')');
+                log('  index_tip: (' + mpLandmarks[8].x.toFixed(4) + ', ' + mpLandmarks[8].y.toFixed(4) + ')');
+
+                // Compute avg error
+                let sumDist = 0;
+                for (let i = 0; i < 21; i++) {
+                  const dx = lm[i].x - mpLandmarks[i].x;
+                  const dy = lm[i].y - mpLandmarks[i].y;
+                  sumDist += Math.sqrt(dx*dx + dy*dy);
+                }
+                log('Avg distance: ' + (sumDist/21*100).toFixed(2) + '%');
+              }
+            }
+            frameCount++;
+          }
+
+          // Update status
+          if (frameCount > 0) {
+            status.textContent = 'Running (' + frameCount + ' frames, ' + microMs.toFixed(0) + 'ms)';
+          }
+
+          requestAnimationFrame(loop);
+        }
+        loop();
+
+      } catch(e) {
+        log('ERROR: ' + e.message + '\n' + e.stack);
+        status.textContent = 'ERROR: ' + e.message;
+        status.className = 'error';
+      }
+    };
+  </script>
+</body>
+</html>

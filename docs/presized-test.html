@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Pre-sized Image Test (No Letterbox)</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+    pre { background: #222; padding: 10px; border-radius: 6px; font-size: 11px; white-space: pre-wrap; }
+    .good { color: #3f8; } .mid { color: #fe8; } .bad { color: #f84; }
+  </style>
+</head>
+<body>
+  <h1>Pre-sized 192×192 Test (No Letterbox Resize)</h1>
+  <p>Compares our GPU vs MediaPipe GPU on a 192×192 image to isolate letterbox resize from other differences.</p>
+  <div id="status">Loading...</div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    async function run() {
+      try {
+        // Load our model
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=presized1');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
+        });
+
+        // Load MediaPipe
+        status.textContent = 'Loading MediaPipe...';
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+        });
+
+        // Load BOTH the 192x192 pre-sized image AND a real image
+        const testImages = [
+          { src: 'test-hands/hand_192.png', label: '192×192 (NO resize)' },
+          { src: 'test-hands/hand_05.jpg', label: 'hand_05.jpg (1500×1500, needs letterbox)' },
+        ];
+
+        for (const { src, label } of testImages) {
+          status.textContent = `Testing: ${label}...`;
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = src; });
+
+          log(`\n${'='.repeat(70)}`);
+          log(`IMAGE: ${label} (${img.naturalWidth}×${img.naturalHeight})`);
+          log('='.repeat(70));
+
+          // Run both
+          const ourResults = await handpose.detectWithDebug(img);
+          const mpResults = mpGpu.detect(img);
+
+          log(`Our detections: ${ourResults.length}`);
+          log(`MP GPU detections: ${mpResults.landmarks?.length || 0}`);
+
+          if (ourResults.length === 0 || !mpResults.landmarks?.length) {
+            log('SKIPPED: no detections from one or both');
+            continue;
+          }
+
+          const ourHand = ourResults[0];
+          const ourLm = ourHand.landmarks;
+
+          // Match to closest MP hand by wrist position
+          let bestIdx = 0, bestDist = Infinity;
+          for (let j = 0; j < mpResults.landmarks.length; j++) {
+            const d = Math.sqrt(
+              (ourLm[0].x - mpResults.landmarks[j][0].x) ** 2 +
+              (ourLm[0].y - mpResults.landmarks[j][0].y) ** 2
+            );
+            if (d < bestDist) { bestDist = d; bestIdx = j; }
+          }
+          const mpLm = mpResults.landmarks[bestIdx];
+
+          // Per-landmark distances
+          let sumDist = 0, maxDist = 0, maxIdx = 0;
+          let sumDx = 0, sumDy = 0;
+          const dists = [];
+          for (let i = 0; i < 21; i++) {
+            const dx = ourLm[i].x - mpLm[i].x;
+            const dy = ourLm[i].y - mpLm[i].y;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            dists.push(d);
+            sumDist += d;
+            sumDx += dx;
+            sumDy += dy;
+            if (d > maxDist) { maxDist = d; maxIdx = i; }
+          }
+
+          const avgDist = sumDist / 21;
+          const avgDx = sumDx / 21;
+          const avgDy = sumDy / 21;
+
+          const cls = (v) => v < 0.001 ? 'good' : v < 0.01 ? 'mid' : 'bad';
+
+          log(`\nAvg landmark distance: ${(avgDist * 100).toFixed(4)}%`);
+          log(`Max landmark distance: ${(maxDist * 100).toFixed(4)}% (landmark ${maxIdx})`);
+          log(`Mean offset (dx, dy): (${(avgDx * 100).toFixed(4)}%, ${(avgDy * 100).toFixed(4)}%)`);
+          log(`Offset magnitude: ${(Math.sqrt(avgDx*avgDx + avgDy*avgDy) * 100).toFixed(4)}%`);
+
+          // Show our palm detection debug
+          log(`\nOur palm detection:`);
+          log(`  score: ${ourHand.palmDetection.score.toFixed(6)}`);
+          log(`  box: [${ourHand.palmDetection.box.map(v=>v.toFixed(6)).join(', ')}]`);
+          log(`  wrist kp: (${ourHand.palmDetection.keypoints[0][0].toFixed(6)}, ${ourHand.palmDetection.keypoints[0][1].toFixed(6)})`);
+          log(`  midMCP kp: (${ourHand.palmDetection.keypoints[2][0].toFixed(6)}, ${ourHand.palmDetection.keypoints[2][1].toFixed(6)})`);
+          log(`  ROI: center=(${ourHand.roi.centerXpx.toFixed(2)}, ${ourHand.roi.centerYpx.toFixed(2)}) size=${ourHand.roi.sizePx.toFixed(2)}px rot=${(ourHand.roi.rotation*180/Math.PI).toFixed(2)}°`);
+
+          // Per-landmark table
+          const NAMES = [
+            'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+            'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+            'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+            'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+            'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+          ];
+
+          log(`\n${'#'.padStart(3)} ${'Name'.padEnd(12)} ${'Dist%'.padStart(8)} ${'dx%'.padStart(8)} ${'dy%'.padStart(8)}  Our(x,y)             MP(x,y)`);
+          for (let i = 0; i < 21; i++) {
+            const dx = ourLm[i].x - mpLm[i].x;
+            const dy = ourLm[i].y - mpLm[i].y;
+            const d = dists[i];
+            log(`${i.toString().padStart(3)} ${NAMES[i].padEnd(12)} ${(d*100).toFixed(4).padStart(8)} ${(dx*100).toFixed(4).padStart(8)} ${(dy*100).toFixed(4).padStart(8)}  (${ourLm[i].x.toFixed(4)},${ourLm[i].y.toFixed(4)})  (${mpLm[i].x.toFixed(4)},${mpLm[i].y.toFixed(4)})`);
+          }
+        }
+
+        // Summary
+        log(`\n${'='.repeat(70)}`);
+        log('If 192×192 error ≈ 0%: model computation matches, error comes from letterbox resize.');
+        log('If 192×192 error ≈ same as real: error is in landmark model, crop, or ROI computation.');
+        log('='.repeat(70));
+
+        status.textContent = 'Done!';
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        console.error(e);
+        log(`\nERROR: ${e.message}\n${e.stack}`);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

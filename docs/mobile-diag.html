@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mobile Diagnostics</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #0f0; padding: 10px; font-size: 12px; }
+    pre { white-space: pre-wrap; word-break: break-all; }
+    video { max-width: 200px; border: 1px solid #333; }
+    canvas { max-width: 200px; border: 1px solid #555; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    button { padding: 8px 16px; margin: 5px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h2>Mobile Camera Diagnostics</h2>
+  <button onclick="startCamera()">Start Camera</button>
+  <button onclick="runTest()">Run Detection Test</button>
+  <div class="row">
+    <div>
+      <div>Video:</div>
+      <video id="v" autoplay playsinline></video>
+    </div>
+    <div>
+      <div>Canvas (drawn):</div>
+      <canvas id="c"></canvas>
+    </div>
+    <div>
+      <div>ImageBitmap:</div>
+      <canvas id="bmp"></canvas>
+    </div>
+  </div>
+  <pre id="log"></pre>
+
+  <script type="module">
+    const log = document.getElementById('log');
+    let logText = '';
+    function L(msg) { logText += msg + '\n'; log.textContent = logText; }
+
+    const video = document.getElementById('v');
+
+    L('User Agent: ' + navigator.userAgent);
+    L('Screen: ' + screen.width + 'x' + screen.height);
+    L('Window: ' + window.innerWidth + 'x' + window.innerHeight);
+    L('Pixel ratio: ' + devicePixelRatio);
+    L('Orientation: ' + (screen.orientation?.type || 'unknown'));
+    L('WebGPU: ' + (!!navigator.gpu));
+
+    window.startCamera = async function() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        const track = stream.getVideoTracks()[0];
+        const settings = track.getSettings();
+        const caps = track.getCapabilities?.() || {};
+
+        L('\n=== Video Track ===');
+        L('Track settings: ' + JSON.stringify(settings, null, 2));
+        L('video.videoWidth: ' + video.videoWidth);
+        L('video.videoHeight: ' + video.videoHeight);
+        L('video.clientWidth: ' + video.clientWidth);
+        L('video.clientHeight: ' + video.clientHeight);
+
+        // Draw to canvas
+        const c = document.getElementById('c');
+        c.width = video.videoWidth;
+        c.height = video.videoHeight;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(video, 0, 0);
+        L('Canvas drawn: ' + c.width + 'x' + c.height);
+
+        // createImageBitmap test
+        try {
+          const bmp = await createImageBitmap(video);
+          L('\nImageBitmap: ' + bmp.width + 'x' + bmp.height);
+          const bc = document.getElementById('bmp');
+          bc.width = bmp.width;
+          bc.height = bmp.height;
+          bc.getContext('2d').drawImage(bmp, 0, 0);
+
+          // Check if dimensions match
+          if (bmp.width !== video.videoWidth || bmp.height !== video.videoHeight) {
+            L('⚠️ MISMATCH! ImageBitmap dims differ from videoWidth/Height!');
+            L('  videoW/H: ' + video.videoWidth + 'x' + video.videoHeight);
+            L('  bitmapW/H: ' + bmp.width + 'x' + bmp.height);
+          } else {
+            L('✅ ImageBitmap matches video dimensions');
+          }
+          bmp.close();
+        } catch (e) {
+          L('createImageBitmap error: ' + e.message);
+        }
+
+        // Check WebGPU texture support
+        if (navigator.gpu) {
+          try {
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            L('\n=== WebGPU ===');
+            L('Adapter: ' + adapter.info?.description || adapter.info?.vendor || 'unknown');
+            L('shader-f16: ' + adapter.features.has('shader-f16'));
+
+            // Test copyExternalImageToTexture from video
+            const tex = device.createTexture({
+              size: [video.videoWidth, video.videoHeight],
+              format: 'rgba8unorm',
+              usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+            });
+            try {
+              device.queue.copyExternalImageToTexture(
+                { source: video },
+                { texture: tex },
+                [video.videoWidth, video.videoHeight],
+              );
+              L('✅ copyExternalImageToTexture(video) succeeded');
+            } catch (e) {
+              L('❌ copyExternalImageToTexture(video) failed: ' + e.message);
+              // Try with ImageBitmap
+              try {
+                const bmp2 = await createImageBitmap(video);
+                device.queue.copyExternalImageToTexture(
+                  { source: bmp2 },
+                  { texture: tex },
+                  [video.videoWidth, video.videoHeight],
+                );
+                L('✅ copyExternalImageToTexture(imageBitmap) succeeded');
+                bmp2.close();
+              } catch (e2) {
+                L('❌ copyExternalImageToTexture(imageBitmap) also failed: ' + e2.message);
+              }
+            }
+            tex.destroy();
+            device.destroy();
+          } catch (e) {
+            L('WebGPU init error: ' + e.message);
+          }
+        }
+
+      } catch (e) {
+        L('Camera error: ' + e.message);
+      }
+    };
+
+    window.runTest = async function() {
+      if (!video.srcObject) {
+        L('Start camera first!');
+        return;
+      }
+
+      L('\n=== Running micro-handpose ===');
+      try {
+        const { createHandpose } = await import('./dist/index.js?v=diag');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.3,
+        });
+        L('Model loaded');
+
+        const t0 = performance.now();
+        const hands = await handpose.detect(video);
+        L('Detection: ' + (performance.now() - t0).toFixed(1) + 'ms');
+        L('Hands found: ' + hands.length);
+
+        if (hands.length > 0) {
+          const h = hands[0];
+          L('Hand 0:');
+          L('  score: ' + h.score.toFixed(4));
+          L('  handedness: ' + h.handedness);
+          L('  wrist: (' + h.landmarks[0].x.toFixed(4) + ', ' + h.landmarks[0].y.toFixed(4) + ')');
+          L('  index_tip: (' + h.landmarks[8].x.toFixed(4) + ', ' + h.landmarks[8].y.toFixed(4) + ')');
+
+          // Draw on canvas
+          const c = document.getElementById('c');
+          c.width = video.videoWidth;
+          c.height = video.videoHeight;
+          const ctx = c.getContext('2d');
+          ctx.drawImage(video, 0, 0);
+
+          // Draw skeleton
+          const CONN = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+          ctx.strokeStyle = '#7c6aef';
+          ctx.lineWidth = 2;
+          for (const [a, b] of CONN) {
+            ctx.beginPath();
+            ctx.moveTo(h.landmarks[a].x * c.width, h.landmarks[a].y * c.height);
+            ctx.lineTo(h.landmarks[b].x * c.width, h.landmarks[b].y * c.height);
+            ctx.stroke();
+          }
+          for (let i = 0; i < 21; i++) {
+            ctx.beginPath();
+            ctx.arc(h.landmarks[i].x * c.width, h.landmarks[i].y * c.height, 3, 0, Math.PI*2);
+            ctx.fillStyle = '#7c6aef';
+            ctx.fill();
+          }
+          L('Drew skeleton on canvas');
+
+          // Check if landmarks are within frame
+          let outOfBounds = 0;
+          for (let i = 0; i < 21; i++) {
+            const lm = h.landmarks[i];
+            if (lm.x < 0 || lm.x > 1 || lm.y < 0 || lm.y > 1) outOfBounds++;
+          }
+          if (outOfBounds > 0) {
+            L('⚠️ ' + outOfBounds + ' landmarks out of [0,1] range!');
+          }
+        }
+      } catch (e) {
+        L('Detection error: ' + e.message);
+        L('Stack: ' + e.stack);
+      }
+    };
+  </script>
+</body>
+</html>

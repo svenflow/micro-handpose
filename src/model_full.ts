@@ -6,7 +6,6 @@
  * Output: landmarks(63), world_landmarks(63), handflag(1), handedness(1)
  */
 
-import { applyF16Weights } from './shaders.js';
 import type { Tensor, HandLandmarksOutput, CompiledModel, WeightsMetadata } from './model.js';
 
 /**
@@ -501,6 +500,7 @@ export async function compileFullModel(
   // Check f16 support (simplified — skip full validation for now)
   const firstWeight = weights.values().next().value as Tensor | undefined;
   const useF16 = hasF16 && !!firstWeight?.rawF16 && !options?.forceF32;
+  // Debug: console.log('[micro-handpose] useF16:', useF16, 'hasF16:', hasF16, 'rawF16:', !!firstWeight?.rawF16, 'forceF32:', options?.forceF32);
 
   function getWeightData(tensor: Tensor): ArrayBufferView {
     if (useF16 && tensor.rawF16) {
@@ -522,8 +522,76 @@ export async function compileFullModel(
     return tensor.data.byteLength;
   }
 
-  function f16Shader(code: string): string {
-    return useF16 ? applyF16Weights(code) : code;
+  // Bytes per element: 2 for f16, 4 for f32
+  const bpe = useF16 ? 2 : 4;
+
+  /**
+   * Full f16 compute shader: ALL arrays become f16, accumulators become f16,
+   * literals become h-suffixed. Matches MediaPipe's mediump behavior.
+   */
+  function f16ComputeShader(code: string): string {
+    if (!useF16) return code;
+    let s = code;
+    // Convert all storage arrays from f32 to f16
+    s = s.replace(/array<f32>/g, 'array<f16>');
+    s = s.replace(/array<f32,/g, 'array<f16,');
+    // Convert accumulator declarations
+    s = s.replace(/var sum:f32=0\.0/g, 'var sum:f16=0.0h');
+    s = s.replace(/var sum0:f32=0\.0/g, 'var sum0:f16=0.0h');
+    s = s.replace(/var sum1:f32=0\.0/g, 'var sum1:f16=0.0h');
+    s = s.replace(/var sum2:f32=0\.0/g, 'var sum2:f16=0.0h');
+    s = s.replace(/var sum3:f32=0\.0/g, 'var sum3:f16=0.0h');
+    // Convert f32 casts to f16 in division (GAP: sum/f32(x) -> sum/f16(x))
+    s = s.replace(/\/f32\(params/g, '/f16(params');
+    // Convert clamp literals: min(max(sum,0.0),6.0) -> min(max(sum,0.0h),6.0h)
+    // After minification: min(max(sum,0.0),6.0)
+    s = s.replace(/,0\.0\),6\.0\)/g, ',0.0h),6.0h)');
+    // Convert helper function return types
+    s = s.replace(/->f32\{/g, '->f16{');
+    s = s.replace(/->f32 \{/g, '->f16 {');
+    // Convert return 0.0 to return 0.0h in helper functions
+    s = s.replace(/return 0\.0;/g, 'return 0.0h;');
+    return 'enable f16;' + s;
+  }
+
+  /**
+   * Initial conv f16 shader: input stays array<f32> (reads from f32 crop/canvas buffer),
+   * but weights, bias, output, and computation are all f16.
+   */
+  function f16InitConvShader(code: string): string {
+    if (!useF16) return code;
+    // First apply full f16 conversion
+    let s = f16ComputeShader(code);
+    // Restore the FIRST storage binding (input) back to f32.
+    // After f16ComputeShader, pattern is: read>input:array<f16>
+    // We need to revert just the input binding.
+    s = s.replace('read>input:array<f16>', 'read>input:array<f32>');
+    // Input reads need f16 cast: input[in_idx] -> f16(input[in_idx])
+    // After minification the pattern is: input[in_idx]*weight[w_idx]
+    s = s.replace(/input\[in_idx\]/g, 'f16(input[in_idx])');
+    return s;
+  }
+
+  /**
+   * FC head shader (f32 compute, matching MediaPipe highp):
+   * Input is f16 (from GAP), weights/bias are f16, but computation is f32, output is f32.
+   * This is essentially what applyF16Weights does, plus converting input to f16.
+   */
+  function f16FcShader(code: string): string {
+    if (!useF16) return code;
+    let s = code;
+    // Convert input, weight, bias arrays to f16 (they store f16 data)
+    s = s.replace('read>input:array<f32>', 'read>input:array<f16>');
+    s = s.replace('read>weight:array<f32>', 'read>weight:array<f16>');
+    s = s.replace('read>bias:array<f32>', 'read>bias:array<f16>');
+    // Output stays f32, computation stays f32 (var sum:f32=0.0)
+    // WGSL does NOT auto-promote f16 to f32 — must cast explicitly
+    // FC matmul: sum+=input[ic]*weight[oc*params.in_features+ic]
+    s = s.replace(/input\[ic\]/g, 'f32(input[ic])');
+    s = s.replace(/weight\[oc\*params\.in_features\+ic\]/g, 'f32(weight[oc*params.in_features+ic])');
+    // FC matmul: output[oc]=sum+bias[oc]
+    s = s.replace(/bias\[oc\]/g, 'f32(bias[oc])');
+    return 'enable f16;' + s;
   }
 
   // Helper functions
@@ -568,14 +636,14 @@ export async function compileFullModel(
 
   // ============ Create Shader Modules ============
   const canvasInputShaderMod = device.createShaderModule({ code: CANVAS_INPUT_224_SHADER });
-  const initConvShaderMod = device.createShaderModule({ code: f16Shader(CONV3X3_S2_BN_RELU6_SHADER) });
-  const expand1x1ShaderMod = device.createShaderModule({ code: f16Shader(EXPAND_1X1_BN_RELU6_SHADER) });
-  const dwShaderMod = device.createShaderModule({ code: f16Shader(DEPTHWISE_BN_RELU6_SHADER) });
-  const project1x1ShaderMod = device.createShaderModule({ code: f16Shader(PROJECT_1X1_BN_SHADER) });
-  const addResShaderMod = device.createShaderModule({ code: ADD_RESIDUAL_SHADER });
-  const gapShaderMod = device.createShaderModule({ code: GLOBAL_AVG_POOL_SHADER });
-  const fcShaderMod = device.createShaderModule({ code: f16Shader(FC_MATMUL_SHADER) });
-  const fcSigmoidShaderMod = device.createShaderModule({ code: f16Shader(FC_SIGMOID_SHADER) });
+  const initConvShaderMod = device.createShaderModule({ code: f16InitConvShader(CONV3X3_S2_BN_RELU6_SHADER) });
+  const expand1x1ShaderMod = device.createShaderModule({ code: f16ComputeShader(EXPAND_1X1_BN_RELU6_SHADER) });
+  const dwShaderMod = device.createShaderModule({ code: f16ComputeShader(DEPTHWISE_BN_RELU6_SHADER) });
+  const project1x1ShaderMod = device.createShaderModule({ code: f16ComputeShader(PROJECT_1X1_BN_SHADER) });
+  const addResShaderMod = device.createShaderModule({ code: f16ComputeShader(ADD_RESIDUAL_SHADER) });
+  const gapShaderMod = device.createShaderModule({ code: f16ComputeShader(GLOBAL_AVG_POOL_SHADER) });
+  const fcShaderMod = device.createShaderModule({ code: f16FcShader(FC_MATMUL_SHADER) });
+  const fcSigmoidShaderMod = device.createShaderModule({ code: f16FcShader(FC_SIGMOID_SHADER) });
 
   // ============ Create Layouts ============
   const conv5Layout = makeLayout(['r', 'r', 'r', 's', 'u']); // input, weight, bias, output, params
@@ -864,7 +932,7 @@ export async function compileFullModel(
 
       // Save input for residual if needed (requires encoder-level copy)
       if (spec.hasResidual) {
-        const residualSize = spec.inCh * bd.inH * bd.inW * 4;
+        const residualSize = spec.inCh * bd.inH * bd.inW * bpe;
         encoder.copyBufferToBuffer(curBuf, 0, bufResidual, 0, residualSize);
       }
 

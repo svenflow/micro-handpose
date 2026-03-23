@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Export GPU Input Tensor</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+    #status { color: #888; margin-bottom: 20px; }
+    pre { background: #222; padding: 10px; border-radius: 6px; font-size: 11px; }
+    a { color: #8af; }
+  </style>
+</head>
+<body>
+  <h1>Export GPU Input Tensor</h1>
+  <p>Exports the exact preprocessed input tensor our GPU model sees, as a raw float32 binary file.</p>
+  <div id="status">Initializing...</div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+
+    async function run() {
+      try {
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=export1');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
+        });
+
+        // Load the 192x192 test image
+        status.textContent = 'Loading 192x192 test image...';
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = 'test-hands/hand_192.png';
+        });
+
+        status.textContent = 'Running GPU inference...';
+        const debug = await handpose._debug.palmModel.debugRun(img);
+
+        const rawInput = debug.rawInput; // Float32Array, CHW [3, 192, 192]
+        output.textContent = `Input tensor: ${rawInput.length} floats (${rawInput.length * 4} bytes)\n`;
+        output.textContent += `Format: CHW [3, 192, 192]\n`;
+        output.textContent += `Range: [${Math.min(...rawInput.slice(0, 1000)).toFixed(6)}, ${Math.max(...rawInput.slice(0, 1000)).toFixed(6)}]\n`;
+        output.textContent += `First 20 CHW values: [${Array.from(rawInput.slice(0, 20)).map(v => v.toFixed(6)).join(', ')}]\n`;
+
+        // Also show NHWC equivalent
+        const nhwcSample = [];
+        for (let i = 0; i < 5; i++) {
+          const r = rawInput[0 * 192 * 192 + i]; // R channel, pixel i
+          const g = rawInput[1 * 192 * 192 + i]; // G channel, pixel i
+          const b = rawInput[2 * 192 * 192 + i]; // B channel, pixel i
+          nhwcSample.push(`(${r.toFixed(4)}, ${g.toFixed(4)}, ${b.toFixed(4)})`);
+        }
+        output.textContent += `First 5 pixels NHWC (R,G,B): ${nhwcSample.join(', ')}\n`;
+
+        // Download as binary file
+        const blob = new Blob([rawInput.buffer], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'gpu_input_192x192_chw.bin';
+        a.textContent = '💾 Download GPU input tensor (gpu_input_192x192_chw.bin)';
+        a.style.cssText = 'display: block; margin: 20px 0; color: #8af; font-size: 16px;';
+        output.after(a);
+
+        // Also save the raw SSD outputs
+        const ssdBlob = new Blob([
+          new Float32Array([debug.rawScores.length, debug.rawRegressors.length]),
+          debug.rawScores.buffer,
+          debug.rawRegressors.buffer,
+        ], { type: 'application/octet-stream' });
+        const ssdUrl = URL.createObjectURL(ssdBlob);
+        const ssdA = document.createElement('a');
+        ssdA.href = ssdUrl;
+        ssdA.download = 'gpu_ssd_output.bin';
+        ssdA.textContent = '💾 Download GPU SSD outputs (gpu_ssd_output.bin)';
+        ssdA.style.cssText = 'display: block; margin: 20px 0; color: #8af; font-size: 16px;';
+        a.after(ssdA);
+
+        // Auto-download the input
+        a.click();
+        setTimeout(() => ssdA.click(), 500);
+
+        status.textContent = 'Done! Download the files and run compare_gpu_input.py';
+      } catch (e) {
+        status.textContent = `❌ Error: ${e.message}`;
+        console.error(e);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

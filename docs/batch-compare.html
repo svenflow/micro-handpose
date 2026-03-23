@@ -192,25 +192,34 @@
     }
 
     function matchHands(microResults, mpLandmarks) {
-      // Match hands between micro and MediaPipe by closest wrist position
+      // Match hands between micro and MediaPipe by best overall landmark distance
+      // (not just wrist — full 21-landmark comparison finds the true best pair)
       if (!microResults.length || !mpLandmarks?.length) return [];
 
-      const pairs = [];
-      const usedMp = new Set();
-
-      for (const micro of microResults) {
-        let bestDist = Infinity, bestIdx = -1;
+      // Find the best (micro, mp) pair by minimum average landmark distance
+      const allPairs = [];
+      for (let i = 0; i < microResults.length; i++) {
         for (let j = 0; j < mpLandmarks.length; j++) {
-          if (usedMp.has(j)) continue;
-          const mw = micro.landmarks[0]; // wrist
-          const pw = mpLandmarks[j][0];
-          const d = Math.sqrt((mw.x - pw.x) ** 2 + (mw.y - pw.y) ** 2);
-          if (d < bestDist) { bestDist = d; bestIdx = j; }
+          let sumDist = 0;
+          for (let k = 0; k < 21; k++) {
+            const dx = microResults[i].landmarks[k].x - mpLandmarks[j][k].x;
+            const dy = microResults[i].landmarks[k].y - mpLandmarks[j][k].y;
+            sumDist += Math.sqrt(dx * dx + dy * dy);
+          }
+          allPairs.push({ microIdx: i, mpIdx: j, avgDist: sumDist / 21, microLm: microResults[i].landmarks, mpLm: mpLandmarks[j], score: microResults[i].score });
         }
-        if (bestIdx >= 0) {
-          usedMp.add(bestIdx);
-          pairs.push({ microLm: micro.landmarks, mpLm: mpLandmarks[bestIdx], score: micro.score });
-        }
+      }
+      allPairs.sort((a, b) => a.avgDist - b.avgDist);
+
+      // Greedy assignment: pick best pair, then next best unused pair
+      const usedMicro = new Set();
+      const usedMp = new Set();
+      const pairs = [];
+      for (const p of allPairs) {
+        if (usedMicro.has(p.microIdx) || usedMp.has(p.mpIdx)) continue;
+        usedMicro.add(p.microIdx);
+        usedMp.add(p.mpIdx);
+        pairs.push({ microLm: p.microLm, mpLm: p.mpLm, score: p.score });
       }
       return pairs;
     }
@@ -263,11 +272,11 @@
       try {
         // ============ STEP 1: Load libraries ============
         setProgress(5, 'Loading micro-handpose...');
-        const { createHandpose } = await import('./dist/index.js?v=batch1');
+        const { createHandpose } = await import('./dist/index.js?v=clean');
         const handpose = await createHandpose({
           weightsUrl: 'weights',
           scoreThreshold: 0.1,
-          palmScoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
         });
 
         setProgress(15, 'Loading MediaPipe...');

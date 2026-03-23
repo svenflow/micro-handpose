@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>MediaPipe GPU Shader Dump</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; max-width: 1400px; }
+    h1 { color: #4af; }
+    #status { color: #ff0; margin: 10px 0; }
+    .shader-card { background: #1a1a2e; border: 1px solid #333; border-radius: 8px; margin: 15px 0; padding: 15px; }
+    .shader-card h3 { color: #4af; margin: 0 0 8px 0; font-size: 14px; }
+    .shader-card .meta { color: #888; font-size: 11px; margin-bottom: 8px; }
+    .shader-code { background: #0a0a1a; padding: 10px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; max-height: 500px; overflow-y: auto; color: #cfc; }
+    .collapsed .shader-code { max-height: 80px; overflow: hidden; }
+    .toggle { cursor: pointer; color: #4af; text-decoration: underline; font-size: 12px; }
+    #summary { background: #1a2e1a; border: 1px solid #3a3; border-radius: 8px; padding: 15px; margin: 15px 0; }
+    button { background: #333; color: #eee; border: 1px solid #555; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin: 5px; }
+    button:hover { background: #444; }
+    .vert { border-left: 3px solid #f84; }
+    .frag { border-left: 3px solid #4f8; }
+  </style>
+</head>
+<body>
+  <h1>MediaPipe GPU Shader Dump</h1>
+  <p>Intercepts WebGL at canvas.getContext level to capture shaders from WASM/Emscripten.</p>
+  <div id="status">Initializing interceptors...</div>
+  <button onclick="runDetection()">Run Detection</button>
+  <button onclick="toggleAll()">Toggle All</button>
+  <button onclick="copyAll()">Copy All</button>
+  <div id="summary"></div>
+  <div id="shaders"></div>
+
+  <script>
+    // ============================================================
+    // Intercept canvas.getContext to patch the actual GL context
+    // that Emscripten/WASM uses (prototype patching doesn't work
+    // because Emscripten captures method references at init time)
+    // ============================================================
+    const capturedShaders = [];
+    const capturedPrograms = [];
+    let shaderIndex = 0;
+
+    // Maps to track shader sources/types per context
+    const shaderSources = new WeakMap();
+    const shaderTypes = new WeakMap();
+
+    function patchGLContext(gl) {
+      console.log('[ShaderDump] Patching GL context:', gl.constructor.name);
+
+      const origShaderSource = gl.shaderSource.bind(gl);
+      const origCompileShader = gl.compileShader.bind(gl);
+      const origCreateShader = gl.createShader.bind(gl);
+      const origLinkProgram = gl.linkProgram.bind(gl);
+      const origGetAttachedShaders = gl.getAttachedShaders.bind(gl);
+      const origGetShaderParameter = gl.getShaderParameter.bind(gl);
+
+      gl.createShader = function(type) {
+        const shader = origCreateShader(type);
+        if (shader) {
+          const typeStr = type === gl.VERTEX_SHADER ? 'VERTEX' : 'FRAGMENT';
+          shaderTypes.set(shader, typeStr);
+        }
+        return shader;
+      };
+
+      gl.shaderSource = function(shader, source) {
+        shaderSources.set(shader, source);
+        return origShaderSource(shader, source);
+      };
+
+      gl.compileShader = function(shader) {
+        const result = origCompileShader(shader);
+        const source = shaderSources.get(shader);
+        const typeStr = shaderTypes.get(shader) || 'UNKNOWN';
+
+        if (source) {
+          const idx = shaderIndex++;
+          capturedShaders.push({
+            index: idx,
+            code: source,
+            type: typeStr,
+            timestamp: performance.now(),
+          });
+          console.log(`[ShaderDump] Captured ${typeStr} #${idx} (${source.length} chars)`);
+        }
+        return result;
+      };
+
+      gl.linkProgram = function(program) {
+        const result = origLinkProgram(program);
+        try {
+          const shaders = origGetAttachedShaders(program);
+          if (shaders) {
+            const info = { vertSource: null, fragSource: null, index: capturedPrograms.length };
+            for (const s of shaders) {
+              const src = shaderSources.get(s);
+              const type = shaderTypes.get(s);
+              if (type === 'VERTEX') info.vertSource = src;
+              if (type === 'FRAGMENT') info.fragSource = src;
+            }
+            capturedPrograms.push(info);
+          }
+        } catch (e) { /* ignore */ }
+        return result;
+      };
+    }
+
+    // Patch getContext on all canvas elements
+    const origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(contextType, ...args) {
+      const ctx = origGetContext.call(this, contextType, ...args);
+      if (ctx && (contextType === 'webgl2' || contextType === 'webgl' || contextType === 'experimental-webgl')) {
+        console.log(`[ShaderDump] Intercepted ${contextType} context creation on canvas:`, this);
+        patchGLContext(ctx);
+      }
+      return ctx;
+    };
+
+    // Also patch OffscreenCanvas if available
+    if (typeof OffscreenCanvas !== 'undefined') {
+      const origOffscreenGetContext = OffscreenCanvas.prototype.getContext;
+      OffscreenCanvas.prototype.getContext = function(contextType, ...args) {
+        const ctx = origOffscreenGetContext.call(this, contextType, ...args);
+        if (ctx && (contextType === 'webgl2' || contextType === 'webgl')) {
+          console.log(`[ShaderDump] Intercepted ${contextType} on OffscreenCanvas`);
+          patchGLContext(ctx);
+        }
+        return ctx;
+      };
+    }
+
+    console.log('[ShaderDump] Canvas getContext interceptors installed');
+  </script>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const shadersDiv = document.getElementById('shaders');
+    const summaryDiv = document.getElementById('summary');
+
+    let handLandmarker = null;
+
+    async function init() {
+      try {
+        status.textContent = 'Loading MediaPipe tasks-vision...';
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+
+        status.textContent = 'Loading WASM fileset...';
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+
+        status.textContent = 'Creating HandLandmarker (GPU)...';
+        handLandmarker = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 1,
+        });
+
+        status.textContent = `Loaded! ${capturedShaders.length} shaders captured during init. Click "Run Detection".`;
+        renderShaders();
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        console.error(e);
+      }
+    }
+
+    window.runDetection = async function() {
+      if (!handLandmarker) { status.textContent = 'Not loaded!'; return; }
+      try {
+        const before = capturedShaders.length;
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = 'test-hands/hand_192.png'; });
+
+        const result = handLandmarker.detect(img);
+        const after = capturedShaders.length;
+        const lm = result.landmarks?.[0];
+
+        status.textContent = `Done! ${lm ? lm.length + ' landmarks' : 'No hand'}. ${after - before} new shaders. Total: ${capturedShaders.length} shaders, ${capturedPrograms.length} programs.`;
+        renderShaders();
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        console.error(e);
+      }
+    };
+
+    function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    function renderShaders() {
+      const unique = new Map();
+      for (const s of capturedShaders) {
+        if (!unique.has(s.code)) unique.set(s.code, { ...s, count: 1 });
+        else unique.get(s.code).count++;
+      }
+
+      const vertCount = capturedShaders.filter(s => s.type === 'VERTEX').length;
+      const fragCount = capturedShaders.filter(s => s.type === 'FRAGMENT').length;
+
+      summaryDiv.innerHTML = `
+        <h2>Summary</h2>
+        <p>Total shaders: <b>${capturedShaders.length}</b> (${vertCount} vertex, ${fragCount} fragment)</p>
+        <p>Unique shaders: <b>${unique.size}</b></p>
+        <p>Programs linked: <b>${capturedPrograms.length}</b></p>
+      `;
+
+      shadersDiv.innerHTML = '';
+      for (const [code, info] of unique) {
+        const card = document.createElement('div');
+        card.className = `shader-card collapsed ${info.type === 'VERTEX' ? 'vert' : 'frag'}`;
+
+        // Quick analysis
+        const lines = code.split('\n').length;
+        const uniforms = [...code.matchAll(/uniform\s+\w+\s+(\w+)/g)].map(m => m[1]);
+        const hasDot = code.includes('dot(');
+        const hasTexture = code.includes('texture(') || code.includes('texelFetch(');
+
+        card.innerHTML = `
+          <h3>${info.type} #${info.index} <span style="color:#888">(${lines} lines, ${info.count}x)</span></h3>
+          <div class="meta">
+            Uniforms: [${uniforms.join(', ')}] | dot: ${hasDot} | texture: ${hasTexture}
+          </div>
+          <span class="toggle" onclick="this.parentElement.classList.toggle('collapsed')">▼ Toggle</span>
+          <div class="shader-code">${escapeHtml(code)}</div>
+        `;
+        shadersDiv.appendChild(card);
+      }
+    }
+
+    window.toggleAll = () => document.querySelectorAll('.shader-card').forEach(c => c.classList.toggle('collapsed'));
+    window.copyAll = () => {
+      const text = capturedShaders.map((s,i) => `// ===== ${s.type} #${i} =====\n${s.code}`).join('\n\n');
+      navigator.clipboard.writeText(text).then(() => status.textContent = 'Copied!');
+    };
+
+    init();
+  </script>
+</body>
+</html>

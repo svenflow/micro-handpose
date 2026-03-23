@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>TFLite vs WebGPU Layer Comparison</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; margin: 0; max-width: 1400px; margin: 0 auto; }
+    h1 { color: #8af; margin-bottom: 5px; }
+    .subtitle { color: #888; margin-bottom: 20px; font-size: 13px; }
+    #status { color: #888; margin-bottom: 20px; font-size: 14px; }
+    .section { background: #1a1a1a; border: 1px solid #333; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .section h2 { color: #8af; margin: 0 0 12px 0; font-size: 14px; }
+    .good { color: #3f8; }
+    .mid { color: #fe8; }
+    .bad { color: #f84; }
+    table { border-collapse: collapse; width: 100%; font-size: 11px; margin: 8px 0; }
+    td, th { border: 1px solid #333; padding: 4px 8px; text-align: right; }
+    th { background: #222; color: #aaa; text-align: center; }
+    td:first-child { text-align: left; font-weight: bold; }
+    .summary { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+    .metric { background: #222; padding: 10px 16px; border-radius: 8px; text-align: center; }
+    .metric .label { font-size: 10px; color: #888; }
+    .metric .value { font-size: 20px; font-weight: bold; }
+    pre { background: #222; padding: 10px; border-radius: 6px; font-size: 11px; overflow-x: auto; white-space: pre-wrap; }
+    canvas { border: 1px solid #333; border-radius: 4px; }
+    .canvas-row { display: flex; gap: 8px; margin: 8px 0; align-items: start; }
+    .canvas-label { font-size: 10px; color: #888; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>TFLite vs WebGPU: Layer-by-Layer Comparison</h1>
+  <p class="subtitle">Compares TFLite CPU reference activations against WebGPU WGSL compute shader outputs for hand_07.jpg</p>
+  <div id="status">Loading...</div>
+  <div id="results"></div>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const resultsDiv = document.getElementById('results');
+
+    function log(msg) { status.textContent = msg; console.log(msg); }
+
+    // Map WebGPU layer names to TFLite reference layer names
+    const LAYER_MAP = [
+      // [webgpu_key, tflite_key, description]
+      ['input', 'input', 'Input (CHW letterboxed)'],
+      ['initConv', 'initConv', 'Initial 5x5 Conv + PReLU (96x96x32)'],
+      // Stage 1: 96x96x32
+      ['block0', 'add_96x32_op11', 'Block 0 (96x96x32)'],
+      ['block1', 'add_96x32_op19', 'Block 1 (96x96x32)'],
+      ['block2', 'add_96x32_op27', 'Block 2 (96x96x32)'],
+      ['block3', 'add_96x32_op35', 'Block 3 (96x96x32)'],
+      // Stage 2: 48x48x64
+      ['block4', 'add_48x64_op45', 'Block 4 stride-2 (→48x48x64)'],
+      ['block5', 'add_48x64_op54', 'Block 5 (48x48x64)'],
+      ['block6', 'add_48x64_op62', 'Block 6 (48x48x64)'],
+      ['block7', 'add_48x64_op70', 'Block 7 (48x48x64)'],
+      ['block8', 'add_48x64_op78', 'Block 8 (48x48x64)'],
+      // Stage 3: 24x24x128
+      ['block9', 'add_24x128_op88', 'Block 9 stride-2 (→24x24x128)'],
+      ['block10', 'add_24x128_op97', 'Block 10 (24x24x128)'],
+      ['block11', 'add_24x128_op105', 'Block 11 (24x24x128)'],
+      ['block12', 'add_24x128_op113', 'Block 12 (24x24x128)'],
+      ['block13', 'add_24x128_op121', 'Block 13 (24x24x128)'],
+      // Stage 4a: 12x12x256
+      ['block14', 'add_12x256_op131', 'Block 14 stride-2 (→12x12x256)'],
+      ['block15', 'add_12x256_op140', 'Block 15 (12x12x256)'],
+      ['block16', 'add_12x256_op148', 'Block 16 (12x12x256)'],
+      ['block17', 'add_12x256_op156', 'Block 17 (12x12x256)'],
+      ['block18', 'add_12x256_op164', 'Block 18 (12x12x256)'],
+      // Stage 4b: 6x6x256
+      ['block19', 'add_6x256_op173', 'Block 19 stride-2 (→6x6x256)'],
+      ['block20', 'add_6x256_op181', 'Block 20 (6x6x256)'],
+      ['block21', 'add_6x256_op189', 'Block 21 (6x6x256)'],
+      ['block22', 'add_6x256_op197', 'Block 22 (6x6x256)'],
+      ['block23', 'add_6x256_op205', 'Block 23 (6x6x256)'],
+      // FPN Level 1: 6→12
+      ['fpnUpsample6to12', 'fpnUpsample6to12', 'FPN Upsample 6→12'],
+      ['fpnAdd12', 'add_12x256_op214', 'FPN Add 12 (skip + upsampled)'],
+      ['fpn12Block1', 'add_12x256_op220', 'FPN 12x12 Block 1'],
+      ['fpn12Block2', 'add_12x256_op228', 'FPN 12x12 Block 2'],
+      // SSD heads (12x12)
+      ['cls16', 'cls16', 'Classifier 16-stride (12x12x6)'],
+      ['reg16', 'reg16', 'Regressor 16-stride (12x12x108)'],
+      // FPN Level 2: 12→24
+      ['fpnUpsample12to24', 'fpnUpsample12to24', 'FPN Upsample 12→24'],
+      ['fpnAdd24', 'add_24x128_op245', 'FPN Add 24 (skip + upsampled)'],
+      ['fpn24Block1', 'add_24x128_op251', 'FPN 24x24 Block 1'],
+      ['fpn24Block2', 'add_24x128_op259', 'FPN 24x24 Block 2'],
+      // SSD heads (24x24)
+      ['cls8', 'cls8', 'Classifier 8-stride (24x24x2)'],
+      ['reg8', 'reg8', 'Regressor 8-stride (24x24x36)'],
+    ];
+
+    function compareArrays(a, b) {
+      const n = Math.min(a.length, b.length);
+      let sumAbsDiff = 0, maxAbsDiff = 0, maxIdx = 0, sumSqDiff = 0;
+      for (let i = 0; i < n; i++) {
+        const diff = Math.abs(a[i] - b[i]);
+        sumAbsDiff += diff;
+        sumSqDiff += diff * diff;
+        if (diff > maxAbsDiff) { maxAbsDiff = diff; maxIdx = i; }
+      }
+      const sorted = Array.from({ length: n }, (_, i) => Math.abs(a[i] - b[i])).sort((x, y) => x - y);
+      return {
+        n,
+        meanAbsDiff: sumAbsDiff / n,
+        maxAbsDiff,
+        maxIdx,
+        rmsDiff: Math.sqrt(sumSqDiff / n),
+        p50: sorted[Math.floor(n * 0.5)],
+        p90: sorted[Math.floor(n * 0.9)],
+        p99: sorted[Math.floor(n * 0.99)],
+        aAtMax: a[maxIdx],
+        bAtMax: b[maxIdx],
+      };
+    }
+
+    function cls(v, lo = 0.01, hi = 0.1) {
+      return v < lo ? 'good' : v < hi ? 'mid' : 'bad';
+    }
+
+    function fmt(v) { return v.toFixed(6); }
+    function fmtSci(v) { return v.toExponential(3); }
+
+    async function run() {
+      try {
+        // Load TFLite reference
+        log('Loading TFLite reference...');
+        const refResp = await fetch('tflite_ref_hand_07.json');
+        const ref = await refResp.json();
+        log(`TFLite reference loaded: ${Object.keys(ref).length} layers`);
+
+        // Load WebGPU model
+        log('Loading micro-handpose WebGPU model...');
+        const { createHandpose } = await import('./dist/index.js?v=tflite-cmp1');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
+        });
+        const palmModel = handpose._debug.palmDetector.model;
+
+        // Load test image
+        log('Loading test image...');
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = 'test-hands/hand_07.jpg';
+        });
+
+        // Run WebGPU debug
+        log('Running WebGPU debugRun...');
+        const gpu = await palmModel.debugRun(img);
+
+        // Compare layers
+        log('Comparing layers...');
+
+        let html = '';
+
+        // Summary table
+        html += `<div class="section"><h2>Layer-by-Layer Error Summary</h2>`;
+        html += `<table>`;
+        html += `<tr><th>Layer</th><th>Description</th><th>Mean |Δ|</th><th>Max |Δ|</th><th>RMS Δ</th><th>p50</th><th>p99</th><th>TFLite range</th><th>Rel. err</th><th>Status</th></tr>`;
+
+        const results = [];
+        let worstLayer = null, worstErr = 0;
+
+        for (const [gpuKey, tflKey, desc] of LAYER_MAP) {
+          const gpuData = gpu[gpuKey];
+          const tflData = ref[tflKey];
+
+          if (!gpuData || !tflData) {
+            html += `<tr><td>${gpuKey}</td><td>${desc}</td><td colspan="8" style="color:#666">Missing (GPU: ${!!gpuData}, TFL: ${!!tflData})</td></tr>`;
+            continue;
+          }
+
+          const gpuArr = gpuData.data500 || gpuData.sample;
+          const tflArr = tflData.data500 || tflData.sample;
+
+          if (!gpuArr || !tflArr) {
+            html += `<tr><td>${gpuKey}</td><td>${desc}</td><td colspan="8" style="color:#666">No data arrays</td></tr>`;
+            continue;
+          }
+
+          const cmp = compareArrays(gpuArr, tflArr);
+          const tflRange = tflData.max - tflData.min;
+          const relErr = tflRange > 0 ? cmp.maxAbsDiff / tflRange : 0;
+
+          const errClass = relErr < 0.001 ? 'good' : relErr < 0.01 ? 'mid' : 'bad';
+          const statusIcon = relErr < 0.001 ? '✅' : relErr < 0.01 ? '⚠️' : '❌';
+
+          if (cmp.maxAbsDiff > worstErr) { worstErr = cmp.maxAbsDiff; worstLayer = gpuKey; }
+
+          results.push({ gpuKey, tflKey, desc, cmp, tflRange, relErr });
+
+          html += `<tr>`;
+          html += `<td>${gpuKey}</td>`;
+          html += `<td style="font-size:10px;font-weight:normal">${desc}</td>`;
+          html += `<td class="${cls(cmp.meanAbsDiff)}">${fmtSci(cmp.meanAbsDiff)}</td>`;
+          html += `<td class="${cls(cmp.maxAbsDiff)}">${fmtSci(cmp.maxAbsDiff)}</td>`;
+          html += `<td class="${cls(cmp.rmsDiff)}">${fmtSci(cmp.rmsDiff)}</td>`;
+          html += `<td>${fmtSci(cmp.p50)}</td>`;
+          html += `<td>${fmtSci(cmp.p99)}</td>`;
+          html += `<td>${fmt(tflRange)}</td>`;
+          html += `<td class="${errClass}">${(relErr * 100).toFixed(4)}%</td>`;
+          html += `<td>${statusIcon}</td>`;
+          html += `</tr>`;
+        }
+        html += `</table></div>`;
+
+        // Overall summary
+        const goodCount = results.filter(r => r.relErr < 0.001).length;
+        const midCount = results.filter(r => r.relErr >= 0.001 && r.relErr < 0.01).length;
+        const badCount = results.filter(r => r.relErr >= 0.01).length;
+
+        let summaryHtml = `<div class="section"><h2>Overall Summary</h2>`;
+        summaryHtml += `<div class="summary">`;
+        summaryHtml += `<div class="metric"><div class="label">Total Layers</div><div class="value">${results.length}</div></div>`;
+        summaryHtml += `<div class="metric"><div class="label">✅ Excellent (&lt;0.1%)</div><div class="value good">${goodCount}</div></div>`;
+        summaryHtml += `<div class="metric"><div class="label">⚠️ Acceptable (&lt;1%)</div><div class="value mid">${midCount}</div></div>`;
+        summaryHtml += `<div class="metric"><div class="label">❌ Divergent (&gt;1%)</div><div class="value bad">${badCount}</div></div>`;
+        summaryHtml += `<div class="metric"><div class="label">Worst Layer</div><div class="value" style="font-size:14px">${worstLayer || '?'}</div></div>`;
+        summaryHtml += `</div></div>`;
+
+        // Detailed per-layer comparison for interesting layers
+        let detailHtml = '';
+        const interestingLayers = ['input', 'initConv', 'block0', 'block4', 'block14', 'block23',
+          'fpnUpsample6to12', 'fpn12Block2', 'cls16', 'reg16', 'cls8', 'reg8'];
+
+        for (const r of results) {
+          if (!interestingLayers.includes(r.gpuKey)) continue;
+          const gpuData = gpu[r.gpuKey];
+          const tflData = ref[r.tflKey];
+          const gpuArr = gpuData.data500 || gpuData.sample;
+          const tflArr = tflData.data500 || tflData.sample;
+
+          detailHtml += `<div class="section">`;
+          detailHtml += `<h2>${r.gpuKey} — ${r.desc}</h2>`;
+          detailHtml += `<pre>`;
+          detailHtml += `WebGPU: min=${fmt(gpuData.min)} max=${fmt(gpuData.max)} mean=${fmt(gpuData.mean)}\n`;
+          detailHtml += `TFLite: min=${fmt(tflData.min)} max=${fmt(tflData.max)} mean=${fmt(tflData.mean)}\n`;
+          detailHtml += `\n`;
+          detailHtml += `Error:  meanAbs=${fmtSci(r.cmp.meanAbsDiff)}  maxAbs=${fmtSci(r.cmp.maxAbsDiff)}  rms=${fmtSci(r.cmp.rmsDiff)}\n`;
+          detailHtml += `        p50=${fmtSci(r.cmp.p50)}  p90=${fmtSci(r.cmp.p90)}  p99=${fmtSci(r.cmp.p99)}\n`;
+          detailHtml += `        relErr=${(r.relErr * 100).toFixed(6)}%\n`;
+          detailHtml += `\nAt max diff (idx ${r.cmp.maxIdx}): GPU=${r.cmp.aAtMax?.toFixed(6)} vs TFL=${r.cmp.bAtMax?.toFixed(6)}\n`;
+
+          // First 20 values side by side
+          const n = Math.min(20, gpuArr.length, tflArr.length);
+          detailHtml += `\nFirst ${n} values:\n`;
+          detailHtml += `${'idx'.padStart(5)} ${'WebGPU'.padStart(12)} ${'TFLite'.padStart(12)} ${'Diff'.padStart(12)}\n`;
+          for (let i = 0; i < n; i++) {
+            const diff = gpuArr[i] - tflArr[i];
+            const diffCls = Math.abs(diff) < 0.001 ? 'good' : Math.abs(diff) < 0.01 ? 'mid' : 'bad';
+            detailHtml += `${String(i).padStart(5)} ${gpuArr[i].toFixed(6).padStart(12)} ${tflArr[i].toFixed(6).padStart(12)} `;
+            detailHtml += `<span class="${diffCls}">${diff.toFixed(6).padStart(12)}</span>\n`;
+          }
+          detailHtml += `</pre>`;
+
+          // Mini histogram of errors
+          const diffs = [];
+          const cn = Math.min(gpuArr.length, tflArr.length);
+          for (let i = 0; i < cn; i++) diffs.push(Math.abs(gpuArr[i] - tflArr[i]));
+          const buckets = [0, 0, 0, 0, 0]; // <1e-5, <1e-4, <1e-3, <1e-2, >=1e-2
+          for (const d of diffs) {
+            if (d < 1e-5) buckets[0]++;
+            else if (d < 1e-4) buckets[1]++;
+            else if (d < 1e-3) buckets[2]++;
+            else if (d < 1e-2) buckets[3]++;
+            else buckets[4]++;
+          }
+          detailHtml += `<pre>Error distribution (${cn} values):\n`;
+          detailHtml += `  <span class="good">&lt;1e-5: ${buckets[0]}</span>  `;
+          detailHtml += `<span class="good">&lt;1e-4: ${buckets[1]}</span>  `;
+          detailHtml += `<span class="mid">&lt;1e-3: ${buckets[2]}</span>  `;
+          detailHtml += `<span class="mid">&lt;1e-2: ${buckets[3]}</span>  `;
+          detailHtml += `<span class="bad">≥1e-2: ${buckets[4]}</span>`;
+          detailHtml += `</pre>`;
+          detailHtml += `</div>`;
+        }
+
+        // Error propagation chart (text-based)
+        let chartHtml = `<div class="section"><h2>Error Propagation Through Network</h2>`;
+        chartHtml += `<pre>`;
+        const maxBarErr = Math.max(...results.map(r => r.cmp.maxAbsDiff));
+        for (const r of results) {
+          const barLen = Math.round((r.cmp.maxAbsDiff / maxBarErr) * 60);
+          const bar = '█'.repeat(barLen);
+          const errClass = r.relErr < 0.001 ? 'good' : r.relErr < 0.01 ? 'mid' : 'bad';
+          chartHtml += `${r.gpuKey.padEnd(22)} <span class="${errClass}">${bar}</span> ${fmtSci(r.cmp.maxAbsDiff)}\n`;
+        }
+        chartHtml += `</pre></div>`;
+
+        resultsDiv.innerHTML = summaryHtml + html + chartHtml + detailHtml;
+        log('Done! Compared ' + results.length + ' layers.');
+
+      } catch (e) {
+        log('Error: ' + e.message);
+        console.error(e);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

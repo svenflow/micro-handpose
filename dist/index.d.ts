@@ -47,10 +47,45 @@ interface Handpose {
      * Returns array of detected hands (empty if none found).
      */
     detect: (source: HandposeInput) => Promise<HandposeResult[]>;
+    /** Detect hands with full debug information (intermediate pipeline values) */
+    detectWithDebug: (source: HandposeInput) => Promise<HandposeDebugResult[]>;
+    /**
+     * Run landmarks from externally-provided palm detections.
+     * Skips internal palm detection — useful for hybrid pipelines
+     * (e.g., WASM palm detection + WebGPU landmarks).
+     *
+     * @param source - Image to crop from
+     * @param detections - Pre-computed palm detections (in image-normalized [0,1] coords, letterbox already removed)
+     */
+    detectFromDetections: (source: HandposeInput, detections: Array<{
+        score: number;
+        box: [number, number, number, number];
+        keypoints: [number, number][];
+    }>) => Promise<HandposeResult[]>;
     /** Dispose GPU resources */
     dispose: () => void;
+    /** Reset temporal smoothing state (call between unrelated images/scenes) */
+    reset: () => void;
     /** Internal debug access (not part of public API) */
     _debug?: any;
+}
+/** Debug result including intermediate pipeline values */
+interface HandposeDebugResult extends HandposeResult {
+    /** Raw crop-space landmarks [0,1] from the model (before back-projection) */
+    cropLandmarks: Landmark[];
+    /** Crop ROI in pixel space */
+    roi: {
+        centerXpx: number;
+        centerYpx: number;
+        sizePx: number;
+        rotation: number;
+    };
+    /** Palm detection in image-normalized coords (after letterbox removal) */
+    palmDetection: {
+        score: number;
+        box: [number, number, number, number];
+        keypoints: [number, number][];
+    };
 }
 /** Accepted input types for detection */
 type HandposeInput = HTMLCanvasElement | OffscreenCanvas | ImageBitmap | HTMLImageElement | HTMLVideoElement | ImageData;
@@ -211,4 +246,4 @@ declare function compileFullModel(weights: Map<string, Tensor>, options?: {
     forceF32?: boolean;
 }): Promise<CompiledModel>;
 
-export { type CompiledModel, type Handpose, type HandposeInput, type HandposeOptions, type HandposeResult, type Keypoints, LANDMARK_NAMES, type Landmark, type LandmarkSmoother, type SmootherOptions, type Tensor, type WeightsMetadata, compileFullModel, createHandpose, createLandmarkSmoother, loadWeightsFromBuffer, toKeypoints };
+export { type CompiledModel, type Handpose, type HandposeDebugResult, type HandposeInput, type HandposeOptions, type HandposeResult, type Keypoints, LANDMARK_NAMES, type Landmark, type LandmarkSmoother, type SmootherOptions, type Tensor, type WeightsMetadata, compileFullModel, createHandpose, createLandmarkSmoother, loadWeightsFromBuffer, toKeypoints };

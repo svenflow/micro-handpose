@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pipeline Stage Compare</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 10px; font-size: 11px; }
+    pre { background: #222; padding: 8px; border-radius: 4px; font-size: 10px; white-space: pre-wrap; }
+    .error { color: #ff6b6b; } .ok { color: #34d399; } .warn { color: #ffd93d; }
+    canvas { border: 1px solid #333; display: inline-block; margin: 5px; }
+    table { border-collapse: collapse; margin: 10px 0; }
+    td, th { border: 1px solid #333; padding: 3px 6px; text-align: left; font-size: 10px; }
+    th { background: #222; }
+    .section { margin: 15px 0; padding: 10px; background: #1a1a1a; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h2>Pipeline Stage Comparison</h2>
+  <div id="status">Starting...</div>
+  <div id="output"></div>
+  <pre id="log"></pre>
+
+  <script type="module">
+    const statusEl = document.getElementById('status');
+    const outputEl = document.getElementById('output');
+    const logEl = document.getElementById('log');
+    let logText = '';
+    function log(msg) { logText += msg + '\n'; logEl.textContent = logText; }
+
+    const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip',
+      'index_mcp','index_pip','index_dip','index_tip',
+      'middle_mcp','middle_pip','middle_dip','middle_tip',
+      'ring_mcp','ring_pip','ring_dip','ring_tip',
+      'pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
+
+    const IMAGES = [
+      'test-hands/hand_05.jpg', 'test-hands/hand_06.jpg',
+      'test-hands/hand_07.jpg', 'test-hands/hand_08.jpg',
+      'test-hands/hand_09.jpg', 'test-hands/hand_10.jpg',
+    ];
+
+    async function run() {
+      try {
+        log('Loading micro-handpose...');
+        const { createHandpose } = await import('./dist/index.js?v=pipe5');
+        const handpose = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.1, palmScoreThreshold: 0.5 });
+        log('micro-handpose loaded');
+
+        log('Loading MediaPipe...');
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const wasmFileset = await vision.FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        let mpDelegate = 'GPU';
+        let mp;
+        try {
+          mp = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+              delegate: 'GPU',
+            },
+            runningMode: 'IMAGE', numHands: 2,
+          });
+        } catch(e) {
+          mpDelegate = 'CPU';
+          mp = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+              delegate: 'CPU',
+            },
+            runningMode: 'IMAGE', numHands: 2,
+          });
+        }
+        log(`MediaPipe loaded (${mpDelegate})`);
+
+        let html = '';
+
+        for (const imgSrc of IMAGES) {
+          statusEl.textContent = `Testing ${imgSrc}...`;
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          try {
+            await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = imgSrc; });
+          } catch(e) { log('Skip ' + imgSrc); continue; }
+
+          const W = img.naturalWidth, H = img.naturalHeight;
+          handpose.reset();
+
+          // Run both pipelines
+          const debugResults = await handpose.detectWithDebug(img);
+          const mpResult = mp.detect(img);
+          const mpHands = mpResult.landmarks || [];
+
+          if (debugResults.length === 0 || mpHands.length === 0) {
+            log(`${imgSrc}: micro=${debugResults.length} MP=${mpHands.length} (skip)`);
+            continue;
+          }
+
+          const ours = debugResults[0];
+          // Match closest MP hand by wrist distance
+          let bestMp = 0, bestD = Infinity;
+          for (let j = 0; j < mpHands.length; j++) {
+            const d = Math.hypot(ours.landmarks[0].x - mpHands[j][0].x, ours.landmarks[0].y - mpHands[j][0].y);
+            if (d < bestD) { bestD = d; bestMp = j; }
+          }
+          const mpLm = mpHands[bestMp];
+
+          // === Stage 1: Compare palm detection keypoints ===
+          // Our palm detection keypoints (after letterbox removal)
+          const palmDet = ours.palmDetection;
+          const ourWrist = palmDet.keypoints[0];
+          const ourMCP = palmDet.keypoints[2];
+
+          // MediaPipe's implied wrist/MCP from final landmarks
+          const mpWrist = [mpLm[0].x, mpLm[0].y];
+          const mpMidMCP = [mpLm[9].x, mpLm[9].y];
+
+          // === Stage 2: Compare rotation angles ===
+          // Our ROI rotation
+          const ourRotation = ours.roi.rotation;
+
+          // MediaPipe's "implied" rotation from final landmarks
+          const mpDxPx = (mpMidMCP[0] - mpWrist[0]) * W;
+          const mpDyPx = (mpMidMCP[1] - mpWrist[1]) * H;
+          const mpAngle = Math.atan2(-mpDyPx, mpDxPx);
+          const mpImpliedRotation = Math.PI / 2 - mpAngle;
+
+          // === Stage 3: Per-landmark error analysis ===
+          let sumErr = 0, maxErr = 0, maxIdx = 0;
+          const errors = [];
+          let sumDx = 0, sumDy = 0;
+          for (let i = 0; i < 21; i++) {
+            const dx = (ours.landmarks[i].x - mpLm[i].x);
+            const dy = (ours.landmarks[i].y - mpLm[i].y);
+            const d = Math.sqrt(dx*dx + dy*dy) * 100;
+            sumErr += d;
+            if (d > maxErr) { maxErr = d; maxIdx = i; }
+            errors.push({ name: NAMES[i], d, dx: dx*100, dy: dy*100 });
+            sumDx += dx; sumDy += dy;
+          }
+          const avgErr = sumErr / 21;
+          const meanDx = sumDx / 21 * 100;
+          const meanDy = sumDy / 21 * 100;
+
+          // Check if errors are systematic (all point same direction)
+          // Compute std dev of error directions
+          let sumAngle = 0;
+          const errAngles = [];
+          for (const e of errors) {
+            if (e.d > 0.1) { // Only for significant errors
+              const angle = Math.atan2(e.dy, e.dx);
+              errAngles.push(angle);
+              sumAngle += angle;
+            }
+          }
+          const meanAngle = errAngles.length > 0 ? sumAngle / errAngles.length : 0;
+          let angleVar = 0;
+          for (const a of errAngles) {
+            let diff = a - meanAngle;
+            while (diff > Math.PI) diff -= 2*Math.PI;
+            while (diff < -Math.PI) diff += 2*Math.PI;
+            angleVar += diff * diff;
+          }
+          const angleStd = errAngles.length > 1 ? Math.sqrt(angleVar / (errAngles.length - 1)) : 0;
+
+          // Log results
+          const shortName = imgSrc.split('/').pop();
+          log(`\n${'='.repeat(60)}`);
+          log(`${shortName} (${W}x${H})  avg=${avgErr.toFixed(3)}%  max=${maxErr.toFixed(3)}% (${NAMES[maxIdx]})`);
+          log(`  Palm keypoints (norm coords):`);
+          log(`    Our wrist:  (${ourWrist[0].toFixed(5)}, ${ourWrist[1].toFixed(5)})`);
+          log(`    Our MCP:    (${ourMCP[0].toFixed(5)}, ${ourMCP[1].toFixed(5)})`);
+          log(`  ROI:`);
+          log(`    center: (${ours.roi.centerXpx.toFixed(2)}, ${ours.roi.centerYpx.toFixed(2)}) px`);
+          log(`    size: ${ours.roi.sizePx.toFixed(2)} px`);
+          log(`    rotation: ${(ours.roi.rotation * 180 / Math.PI).toFixed(3)}°`);
+          log(`    MP implied rot: ${(mpImpliedRotation * 180 / Math.PI).toFixed(3)}°`);
+          log(`    Rotation delta: ${((ours.roi.rotation - mpImpliedRotation) * 180 / Math.PI).toFixed(3)}°`);
+          log(`  Error analysis:`);
+          log(`    Mean error vector: (${meanDx.toFixed(4)}, ${meanDy.toFixed(4)}) %`);
+          log(`    Mean error magnitude: ${Math.sqrt(meanDx*meanDx + meanDy*meanDy).toFixed(4)} %`);
+          log(`    Error direction std: ${(angleStd * 180 / Math.PI).toFixed(1)}° ${angleStd < 0.5 ? '← SYSTEMATIC (crop offset)' : angleStd < 1.0 ? '← MIXED' : '← RANDOM (model precision)'}`);
+          log(`  Per-landmark errors:`);
+          for (const e of errors) {
+            const bar = '█'.repeat(Math.round(e.d * 20));
+            const arrow = `(${e.dx > 0 ? '+' : ''}${e.dx.toFixed(3)}, ${e.dy > 0 ? '+' : ''}${e.dy.toFixed(3)})`;
+            log(`    ${e.name.padEnd(12)} ${e.d.toFixed(3)}% ${arrow} ${bar}`);
+          }
+
+          // === Visual: draw error vectors on image ===
+          html += `<div class="section"><h3>${shortName} (${W}x${H}) — avg=${avgErr.toFixed(2)}%</h3>`;
+          const canvasId = `canvas_${shortName.replace(/\./g, '_')}`;
+          html += `<canvas id="${canvasId}"></canvas>`;
+
+          // Build error vector data for drawing
+          const errData = errors.map((e, i) => ({
+            x: ours.landmarks[i].x, y: ours.landmarks[i].y,
+            dx: e.dx / 100, dy: e.dy / 100, d: e.d
+          }));
+
+          html += `<div style="font-size:10px;margin-top:5px">`;
+          html += `Rot delta: ${((ours.roi.rotation - mpImpliedRotation) * 180 / Math.PI).toFixed(2)}° | `;
+          html += `Mean shift: (${meanDx.toFixed(3)}, ${meanDy.toFixed(3)})% | `;
+          html += `Dir std: ${(angleStd * 180 / Math.PI).toFixed(0)}° `;
+          html += angleStd < 0.5 ? '<span class="warn">SYSTEMATIC</span>' : angleStd < 1.0 ? '<span class="warn">MIXED</span>' : '<span class="ok">RANDOM</span>';
+          html += `</div></div>`;
+          outputEl.innerHTML = html;
+
+          // Draw
+          await new Promise(r => setTimeout(r, 50)); // let DOM update
+          const canvas = document.getElementById(canvasId);
+          if (canvas) {
+            const scale = Math.min(400 / W, 400 / H);
+            canvas.width = Math.round(W * scale);
+            canvas.height = Math.round(H * scale);
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+            // Draw error vectors (magnified 50x for visibility)
+            const mag = 50;
+            for (const e of errData) {
+              const px = e.x * canvas.width;
+              const py = e.y * canvas.height;
+              const ex = e.dx * canvas.width * mag;
+              const ey = e.dy * canvas.height * mag;
+
+              // Color based on magnitude
+              const hue = Math.max(0, 120 - e.d * 80); // green→red
+              ctx.strokeStyle = `hsl(${hue}, 100%, 60%)`;
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.moveTo(px, py);
+              ctx.lineTo(px + ex, py + ey);
+              ctx.stroke();
+
+              // Arrowhead
+              const len = Math.sqrt(ex*ex + ey*ey);
+              if (len > 3) {
+                const angle = Math.atan2(ey, ex);
+                ctx.beginPath();
+                ctx.moveTo(px + ex, py + ey);
+                ctx.lineTo(px + ex - 6*Math.cos(angle-0.4), py + ey - 6*Math.sin(angle-0.4));
+                ctx.moveTo(px + ex, py + ey);
+                ctx.lineTo(px + ex - 6*Math.cos(angle+0.4), py + ey - 6*Math.sin(angle+0.4));
+                ctx.stroke();
+              }
+
+              // Dot at landmark
+              ctx.fillStyle = `hsl(${hue}, 100%, 60%)`;
+              ctx.beginPath();
+              ctx.arc(px, py, 3, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+        }
+
+        statusEl.textContent = 'Done!';
+      } catch(e) {
+        log('FATAL: ' + e.message + '\n' + e.stack);
+        statusEl.textContent = 'ERROR';
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

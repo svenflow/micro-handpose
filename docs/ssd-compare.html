@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SSD Output: WebGPU vs TFLite Reference</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 10px; font-size: 11px; }
+    pre { background: #222; padding: 8px; border-radius: 4px; font-size: 10px; white-space: pre-wrap; max-height: 90vh; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <h2>Raw SSD Output: WebGPU vs TFLite CPU</h2>
+  <div id="status">Starting...</div>
+  <pre id="output"></pre>
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    const TFL_REF = {
+      'hand_05.jpg': { idx: 609, score: 0.9923, reg: [8.210, -5.310, 91.259, 91.261], wrist: [0.42716, 0.91028], midMCP: [0.48358, 0.45236], box: [0.50109, 0.68068] },
+      'hand_06.jpg': { idx: 1510, score: 0.2990, reg: [0.475, 3.803, 8.912, 8.911], wrist: [0.46065, 0.60456], midMCP: [0.49658, 0.63085], box: [0.48164, 0.62346] },
+      'hand_07.jpg': { idx: 1511, score: 0.9326, reg: [-2.798, 3.069, 33.755, 33.708], wrist: [0.43569, 0.74938], midMCP: [0.49950, 0.55581], box: [0.46459, 0.61773] },
+      'hand_08.jpg': { idx: 1564, score: 0.9745, reg: [-0.108, -0.563, 12.789, 12.789], wrist: [0.60694, 0.62053], midMCP: [0.69733, 0.59488], box: [0.65541, 0.60123] },
+      'hand_09.jpg': { idx: 536, score: 0.9801, reg: [8.992, 0.590, 71.565, 71.508], wrist: [0.45094, 0.81506], midMCP: [0.46047, 0.44899], box: [0.50689, 0.62807] },
+      'hand_10.jpg': { idx: 1320, score: 0.8886, reg: [0.517, 2.434, 21.363, 21.362], wrist: [0.45189, 0.40783], midMCP: [0.60923, 0.40738], box: [0.53529, 0.40851] },
+      'hand_nikhil.jpg': { idx: 536, score: 0.9801, reg: [8.992, 0.590, 71.565, 71.508], wrist: [0.45094, 0.81506], midMCP: [0.46047, 0.44899], box: [0.50689, 0.62807] },
+    };
+
+    const IMAGES = [
+      'test-hands/hand_05.jpg','test-hands/hand_06.jpg','test-hands/hand_07.jpg',
+      'test-hands/hand_08.jpg','test-hands/hand_09.jpg','test-hands/hand_10.jpg','hand_nikhil.jpg',
+    ];
+
+    function mkAnchors() {
+      const a = [];
+      for (let y=0;y<12;y++) for (let x=0;x<12;x++) for (let i=0;i<6;i++) a.push({x:(x+.5)/12,y:(y+.5)/12});
+      for (let y=0;y<24;y++) for (let x=0;x<24;x++) for (let i=0;i<2;i++) a.push({x:(x+.5)/24,y:(y+.5)/24});
+      return a;
+    }
+    const ANCHORS = mkAnchors();
+    const sig = x => 1/(1+Math.exp(-x));
+
+    async function run() {
+      try {
+        status.textContent = 'Loading...';
+        const { createHandpose } = await import('./dist/index.js?v=ssdcmp4');
+        const hp = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.01, palmScoreThreshold: 0.01 });
+        log('loaded');
+
+        const pd = hp._debug?.palmDetector;
+        if (!pd?.detectRawSSD) { log('ERROR: no detectRawSSD. keys=' + Object.keys(pd||{})); return; }
+
+        for (const src of IMAGES) {
+          status.textContent = src;
+          const img = new Image(); img.crossOrigin = 'anonymous';
+          try { await new Promise((r,e) => { img.onload=r; img.onerror=e; img.src=src; }); } catch(e) { continue; }
+          const W = img.naturalWidth, H = img.naturalHeight;
+          const name = src.split('/').pop();
+          const ref = TFL_REF[name]; if (!ref) continue;
+
+          const { scores, regressors, lbPadX, lbPadY } = await pd.detectRawSSD(img, W, H);
+          const a = ANCHORS[ref.idx];
+          const sx = lbPadX > 0 ? 1/(1-2*lbPadX) : 1;
+          const sy = lbPadY > 0 ? 1/(1-2*lbPadY) : 1;
+          const r = []; for (let v=0;v<18;v++) r.push(regressors[ref.idx*18+v]);
+
+          log('\n' + '='.repeat(50));
+          log(`${name} (${W}x${H}) lb=(${lbPadX.toFixed(4)},${lbPadY.toFixed(4)})`);
+          log(`Score: TFL=${ref.score.toFixed(5)} GPU=${sig(scores[ref.idx]).toFixed(5)}`);
+          log(`Reg[0..3]: TFL=[${ref.reg.map(v=>v.toFixed(3)).join(',')}] GPU=[${r.slice(0,4).map(v=>v.toFixed(3)).join(',')}]`);
+          log(`Δ reg px:  [${ref.reg.map((v,i)=>(r[i]-v).toFixed(3)).join(',')}]`);
+
+          const g_cx=(a.x+r[0]/192-lbPadX)*sx, g_cy=(a.y+r[1]/192-lbPadY)*sy;
+          const g_wx=(a.x+r[4]/192-lbPadX)*sx, g_wy=(a.y+r[5]/192-lbPadY)*sy;
+          const g_mx=(a.x+r[8]/192-lbPadX)*sx, g_my=(a.y+r[9]/192-lbPadY)*sy;
+
+          log(`Box:   TFL=(${ref.box[0].toFixed(5)},${ref.box[1].toFixed(5)}) GPU=(${g_cx.toFixed(5)},${g_cy.toFixed(5)}) Δ=(${((g_cx-ref.box[0])*100).toFixed(3)}%,${((g_cy-ref.box[1])*100).toFixed(3)}%)`);
+          log(`Wrist: TFL=(${ref.wrist[0].toFixed(5)},${ref.wrist[1].toFixed(5)}) GPU=(${g_wx.toFixed(5)},${g_wy.toFixed(5)}) Δ=(${((g_wx-ref.wrist[0])*100).toFixed(3)}%,${((g_wy-ref.wrist[1])*100).toFixed(3)}%)`);
+          log(`MidMCP:TFL=(${ref.midMCP[0].toFixed(5)},${ref.midMCP[1].toFixed(5)}) GPU=(${g_mx.toFixed(5)},${g_my.toFixed(5)}) Δ=(${((g_mx-ref.midMCP[0])*100).toFixed(3)}%,${((g_my-ref.midMCP[1])*100).toFixed(3)}%)`);
+
+          // Our top detection
+          let bi=0,bs=-1e9; for(let i=0;i<scores.length;i++) if(scores[i]>bs){bs=scores[i];bi=i;}
+          log(`Our top: ${bi} score=${sig(bs).toFixed(5)} ${bi===ref.idx?'✓':'⚠ DIFF'}`);
+        }
+
+        status.textContent = 'Done!';
+      } catch(e) {
+        log('FATAL: ' + e.message + '\n' + e.stack);
+        status.textContent = 'ERROR';
+      }
+    }
+    run();
+  </script>
+</body>
+</html>

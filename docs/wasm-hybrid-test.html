@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WASM Palm + WebGPU Landmarks Hybrid Test</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; margin: 0; }
+    h1 { color: #8af; }
+    #log { white-space: pre-wrap; line-height: 1.6; max-height: 90vh; overflow-y: auto; }
+    .good { color: #3f8; }
+    .bad { color: #f84; }
+    .info { color: #8af; }
+    .dim { color: #888; }
+    table { border-collapse: collapse; margin: 10px 0; }
+    td, th { padding: 4px 12px; text-align: right; border: 1px solid #333; }
+    th { background: #222; color: #8af; }
+    td.label { text-align: left; color: #ccc; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.22.0/dist/tf-core.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu@4.22.0/dist/tf-backend-cpu.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/dist/tf-tflite.min.js"></script>
+</head>
+<body>
+  <h1>🔬 Hybrid: WASM Palm + WebGPU Landmarks</h1>
+  <p>Compares: (A) Full WebGPU pipeline vs (B) WASM palm detection + WebGPU landmarks — both measured against MediaPipe GPU reference.</p>
+  <div id="log">Loading...</div>
+
+  <script type="module">
+    const log = document.getElementById('log');
+    function print(msg, cls) {
+      const span = document.createElement('span');
+      span.className = cls || '';
+      span.textContent = msg + '\n';
+      log.appendChild(span);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    const TEST_IMAGES = [
+      { file: 'test-hands/hand_05.jpg', label: 'Hand Square' },
+      { file: 'test-hands/hand_06.jpg', label: 'Hand Reaching 2' },
+      { file: 'test-hands/hand_07.jpg', label: 'Pointing Finger' },
+      { file: 'test-hands/hand_08.jpg', label: 'Hand Gesture' },
+      { file: 'test-hands/hand_09.jpg', label: 'Nikhil' },
+      { file: 'test-hands/hand_10.jpg', label: 'Test Hand' },
+    ];
+
+    // ============ SSD DECODE (matches palm_detection.ts exactly) ============
+    function generateAnchors() {
+      const anchors = [];
+      for (let y = 0; y < 12; y++)
+        for (let x = 0; x < 12; x++)
+          for (let a = 0; a < 6; a++)
+            anchors.push({ x: (x + 0.5) / 12, y: (y + 0.5) / 12 });
+      for (let y = 0; y < 24; y++)
+        for (let x = 0; x < 24; x++)
+          for (let a = 0; a < 2; a++)
+            anchors.push({ x: (x + 0.5) / 24, y: (y + 0.5) / 24 });
+      return anchors;
+    }
+    const ANCHORS = generateAnchors();
+
+    function sigmoid(x) { return 1 / (1 + Math.exp(-x)); }
+
+    function decodeDetections(scores, regressors, threshold) {
+      const dets = [];
+      for (let i = 0; i < 2016; i++) {
+        const score = sigmoid(scores[i]);
+        if (score < threshold) continue;
+        const a = ANCHORS[i], rb = i * 18;
+        const cx = a.x + regressors[rb] / 192, cy = a.y + regressors[rb + 1] / 192;
+        const w = regressors[rb + 2] / 192, h = regressors[rb + 3] / 192;
+        const kps = [];
+        for (let k = 0; k < 7; k++)
+          kps.push([a.x + regressors[rb + 4 + k * 2] / 192, a.y + regressors[rb + 4 + k * 2 + 1] / 192]);
+        dets.push({ score, box: [cx, cy, w, h], keypoints: kps });
+      }
+      return dets;
+    }
+
+    function computeIoU(a, b) {
+      const ax1 = a.box[0] - a.box[2]/2, ay1 = a.box[1] - a.box[3]/2;
+      const ax2 = a.box[0] + a.box[2]/2, ay2 = a.box[1] + a.box[3]/2;
+      const bx1 = b.box[0] - b.box[2]/2, by1 = b.box[1] - b.box[3]/2;
+      const bx2 = b.box[0] + b.box[2]/2, by2 = b.box[1] + b.box[3]/2;
+      const ix = Math.min(ax2,bx2) - Math.max(ax1,bx1);
+      const iy = Math.min(ay2,by2) - Math.max(ay1,by1);
+      if (ix <= 0 || iy <= 0) return 0;
+      const inter = ix * iy;
+      return inter / ((ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter);
+    }
+
+    function nms(dets, iouThr) {
+      if (!dets.length) return [];
+      const s = [...dets].sort((a,b) => b.score - a.score);
+      const kept = [], sup = new Set();
+      for (let i = 0; i < s.length; i++) {
+        if (sup.has(i)) continue;
+        const cl = [i];
+        for (let j = i+1; j < s.length; j++) {
+          if (!sup.has(j) && computeIoU(s[i],s[j]) > iouThr) { cl.push(j); sup.add(j); }
+        }
+        let tw=0, acx=0,acy=0,aw=0,ah=0;
+        const ak = Array.from({length:7}, ()=>[0,0]);
+        for (const idx of cl) {
+          const d=s[idx], w=d.score;
+          tw+=w; acx+=d.box[0]*w; acy+=d.box[1]*w; aw+=d.box[2]*w; ah+=d.box[3]*w;
+          for (let k=0;k<7;k++) { ak[k][0]+=d.keypoints[k][0]*w; ak[k][1]+=d.keypoints[k][1]*w; }
+        }
+        const inv = 1/tw;
+        kept.push({
+          score: s[i].score,
+          box: [acx*inv, acy*inv, aw*inv, ah*inv],
+          keypoints: ak.map(([x,y])=>[x*inv, y*inv]),
+        });
+      }
+      return kept;
+    }
+
+    function removeLetterbox(det, lbPadX, lbPadY) {
+      const sx = 1 / (1 - 2*lbPadX), sy = 1 / (1 - 2*lbPadY);
+      return {
+        score: det.score,
+        box: [(det.box[0]-lbPadX)*sx, (det.box[1]-lbPadY)*sy, det.box[2]*sx, det.box[3]*sy],
+        keypoints: det.keypoints.map(([kx,ky]) => [(kx-lbPadX)*sx, (ky-lbPadY)*sy]),
+      };
+    }
+
+    // Match hands between two sets of landmarks (greedy by wrist distance)
+    function matchHands(microResults, mpLandmarks) {
+      const pairs = [];
+      const used = new Set();
+      for (const micro of microResults) {
+        let bestJ = -1, bestDist = Infinity;
+        for (let j = 0; j < mpLandmarks.length; j++) {
+          if (used.has(j)) continue;
+          const mp = mpLandmarks[j];
+          const dx = micro.landmarks[0].x - mp[0].x;
+          const dy = micro.landmarks[0].y - mp[0].y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist < bestDist) { bestDist = dist; bestJ = j; }
+        }
+        if (bestJ >= 0 && bestDist < 0.3) {
+          used.add(bestJ);
+          pairs.push({ microLm: micro.landmarks, mpLm: mpLandmarks[bestJ] });
+        }
+      }
+      return pairs;
+    }
+
+    function compareLandmarks(microLm, mpLm) {
+      let total = 0, max = 0;
+      for (let i = 0; i < 21; i++) {
+        const dx = microLm[i].x - mpLm[i].x;
+        const dy = microLm[i].y - mpLm[i].y;
+        const d = Math.sqrt(dx*dx + dy*dy) * 100;
+        total += d;
+        if (d > max) max = d;
+      }
+      return { avg: total / 21, max };
+    }
+
+    async function run() {
+      try {
+        log.textContent = '';
+        print('=== Initializing ===', 'info');
+
+        // 1. Load TFLite WASM
+        await tf.setBackend('cpu');
+        await tf.ready();
+        tflite.setWasmPath('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/wasm/');
+        const wasmModel = await tflite.loadTFLiteModel('weights/palm_detection.tflite');
+        print('✓ TFLite WASM palm detector', 'good');
+
+        // 2. Load WebGPU handpose
+        const { createHandpose } = await import('./dist/index.js?v=hybrid3');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights', scoreThreshold: 0.1, palmScoreThreshold: 0.5,
+        });
+        print('✓ WebGPU handpose', 'good');
+
+        // 3. Load MediaPipe reference
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE', numHands: 4,
+        });
+        print('✓ MediaPipe GPU reference', 'good');
+
+        // ============ PROCESS IMAGES ============
+        const resultsA = []; // Full WebGPU
+        const resultsB = []; // WASM palm + WebGPU landmarks
+
+        for (const { file, label } of TEST_IMAGES) {
+          print(`\n=== ${label} ===`, 'info');
+
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          await new Promise((r,e) => { img.onload=r; img.onerror=e; img.src=file; });
+          const srcW = img.naturalWidth, srcH = img.naturalHeight;
+
+          // MediaPipe reference
+          const mpResults = mpGpu.detect(img);
+          const mpLandmarks = mpResults.landmarks || [];
+          if (mpLandmarks.length === 0) { print(`  No hands (MP)`, 'dim'); continue; }
+
+          // (A) Full WebGPU pipeline
+          handpose.reset(); // reset smoothing for clean comparison
+          const webgpuResults = await handpose.detect(img);
+
+          let distA = null;
+          if (webgpuResults.length > 0) {
+            const pairs = matchHands(webgpuResults, mpLandmarks);
+            if (pairs.length > 0) {
+              const comp = compareLandmarks(pairs[0].microLm, pairs[0].mpLm);
+              distA = comp.avg;
+            }
+          }
+
+          // (B) WASM palm detection + WebGPU landmarks
+          const scale = Math.min(192/srcW, 192/srcH);
+          const dstW = Math.round(srcW*scale), dstH = Math.round(srcH*scale);
+          const offX = (192-dstW)/2, offY = (192-dstH)/2;
+          const lbPadX = offX/192, lbPadY = offY/192;
+
+          const c = new OffscreenCanvas(192,192);
+          const ctx = c.getContext('2d');
+          ctx.clearRect(0,0,192,192);
+          ctx.drawImage(img, offX, offY, dstW, dstH);
+          const imgData = ctx.getImageData(0,0,192,192);
+          const inputArr = new Float32Array(192*192*3);
+          for (let i=0;i<192*192;i++) {
+            inputArr[i*3]   = imgData.data[i*4] / 255;
+            inputArr[i*3+1] = imgData.data[i*4+1] / 255;
+            inputArr[i*3+2] = imgData.data[i*4+2] / 255;
+          }
+          const inputTensor = tf.tensor4d(inputArr, [1,192,192,3]);
+          const wasmOut = wasmModel.predict(inputTensor);
+          inputTensor.dispose();
+
+          const keys = Object.keys(wasmOut);
+          let scoresData, regressorsData;
+          for (const k of keys) {
+            const t = wasmOut[k];
+            if (t.shape[t.shape.length-1] === 1) scoresData = t.dataSync();
+            else if (t.shape[t.shape.length-1] === 18) regressorsData = t.dataSync();
+          }
+          for (const k of keys) wasmOut[k].dispose();
+
+          let distB = null;
+          if (scoresData && regressorsData) {
+            const dets = decodeDetections(scoresData, regressorsData, 0.5);
+            const nmsed = nms(dets, 0.3);
+
+            if (nmsed.length > 0) {
+              // Remove letterbox from all detections
+              const imageDets = nmsed.map(d => removeLetterbox(d, lbPadX, lbPadY));
+
+              // Run landmarks via WebGPU using the WASM-derived detections
+              handpose.reset();
+              const hybridResults = await handpose.detectFromDetections(img, imageDets);
+
+              if (hybridResults.length > 0) {
+                const pairs = matchHands(hybridResults, mpLandmarks);
+                if (pairs.length > 0) {
+                  const comp = compareLandmarks(pairs[0].microLm, pairs[0].mpLm);
+                  distB = comp.avg;
+                }
+              }
+            }
+          }
+
+          // Print results
+          const fmtA = distA !== null ? `${distA.toFixed(3)}%` : 'N/A';
+          const fmtB = distB !== null ? `${distB.toFixed(3)}%` : 'N/A';
+          const clsA = distA !== null ? (distA < 1.5 ? 'good' : 'bad') : 'dim';
+          const clsB = distB !== null ? (distB < 1.5 ? 'good' : 'bad') : 'dim';
+
+          print(`  (A) Full WebGPU:       ${fmtA}`, clsA);
+          print(`  (B) WASM+WebGPU:       ${fmtB}`, clsB);
+          if (distA !== null && distB !== null) {
+            const delta = distB - distA;
+            const better = delta < 0;
+            print(`  Δ(B-A): ${delta > 0 ? '+' : ''}${delta.toFixed(3)}%  ${better ? '(B better!)' : '(A better)'}`, better ? 'good' : 'dim');
+          }
+
+          if (distA !== null) resultsA.push(distA);
+          if (distB !== null) resultsB.push(distB);
+        }
+
+        // ============ SUMMARY ============
+        print('\n' + '='.repeat(60), 'info');
+        print('SUMMARY', 'info');
+        print('='.repeat(60), 'info');
+
+        if (resultsA.length > 0) {
+          const avgA = resultsA.reduce((a,b)=>a+b,0) / resultsA.length;
+          print(`(A) Full WebGPU avg:     ${avgA.toFixed(3)}% (${resultsA.length} images)`, avgA < 1.5 ? 'good' : 'bad');
+        }
+        if (resultsB.length > 0) {
+          const avgB = resultsB.reduce((a,b)=>a+b,0) / resultsB.length;
+          print(`(B) WASM+WebGPU avg:     ${avgB.toFixed(3)}% (${resultsB.length} images)`, avgB < 1.5 ? 'good' : 'bad');
+        }
+        if (resultsA.length > 0 && resultsB.length > 0) {
+          const avgA = resultsA.reduce((a,b)=>a+b,0) / resultsA.length;
+          const avgB = resultsB.reduce((a,b)=>a+b,0) / resultsB.length;
+          const delta = avgB - avgA;
+          print(`\nΔ(B-A): ${delta > 0 ? '+' : ''}${delta.toFixed(3)}%  ${delta < 0 ? '🎉 WASM palm is better!' : '⚠️ Full WebGPU is better'}`,
+            delta < 0 ? 'good' : 'bad');
+        }
+
+        print('\nDone!', 'good');
+      } catch (e) {
+        print(`ERROR: ${e.message}\n${e.stack}`, 'bad');
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

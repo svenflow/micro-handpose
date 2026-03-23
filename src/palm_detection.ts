@@ -293,6 +293,8 @@ export interface PalmDetector {
   detectRaw: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<PalmDetection[]>;
   /** Run palm detection with GPU letterbox resize (matches MediaPipe's bilinear exactly) */
   detectRawWithResize: (source: any, srcW: number, srcH: number) => Promise<{ detections: PalmDetection[]; lbPadX: number; lbPadY: number }>;
+  /** Run palm detection and return raw SSD output tensors (scores + regressors) for debugging */
+  detectRawSSD: (source: any, srcW: number, srcH: number) => Promise<{ scores: Float32Array; regressors: Float32Array; lbPadX: number; lbPadY: number }>;
   /** Get the compiled palm model (for resource sharing) */
   model: CompiledPalmModel;
 }
@@ -339,7 +341,12 @@ export function createPalmDetector(
     return { detections: nms(detections, nmsThreshold).slice(0, maxHands), lbPadX, lbPadY };
   }
 
-  return { detect, detectRaw, detectRawWithResize, model };
+  async function detectRawSSD(source: any, srcW: number, srcH: number): Promise<{ scores: Float32Array; regressors: Float32Array; lbPadX: number; lbPadY: number }> {
+    const { output, lbPadX, lbPadY } = await model.runWithResize(source, srcW, srcH);
+    return { scores: output.scores, regressors: output.regressors, lbPadX, lbPadY };
+  }
+
+  return { detect, detectRaw, detectRawWithResize, detectRawSSD, model };
 }
 
 /**
@@ -422,16 +429,21 @@ export function projectLandmarksToOriginal(
   const wx = physicalSize / srcWidth;  // X span in normalized image coords
   const wy = physicalSize / srcHeight; // Y span in normalized image coords
 
-  // Crop → original: undo rotation R(-θ) in uniform physical space,
-  // then normalize to image coordinates.
-  //   x_out = wx * (cos*(x-0.5) + sin*(y-0.5)) + roi.centerX
-  //   y_out = wy * (-sin*(x-0.5) + cos*(y-0.5)) + roi.centerY
+  // Crop → original: rotate isotropically in centered [-0.5, 0.5] space,
+  // then scale by rect width/height and add center.
+  // Matches MediaPipe's LandmarkProjectionCalculator:
+  //   rotated = R(θ) * [dx, dy]  (isotropic rotation)
+  //   x_out = rotated_x * wx + roi.centerX
+  //   y_out = rotated_y * wy + roi.centerY
   return landmarks.map(lm => {
     const dx = lm.x - 0.5;
     const dy = lm.y - 0.5;
+    // Isotropic rotation first
+    const rx = cos * dx + sin * dy;
+    const ry = -sin * dx + cos * dy;
     return {
-      x: wx * (cos * dx + sin * dy) + roi.centerX,
-      y: wy * (-sin * dx + cos * dy) + roi.centerY,
+      x: rx * wx + roi.centerX,
+      y: ry * wy + roi.centerY,
       z: lm.z,
     };
   });

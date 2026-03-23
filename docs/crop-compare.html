@@ -1,154 +1,398 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Crop Region Comparison</title>
+  <title>Crop-Space Landmark Comparison</title>
   <style>
-    body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; }
-    .row { display: flex; gap: 20px; flex-wrap: wrap; align-items: start; }
-    .box { background: #222; padding: 15px; border-radius: 8px; margin: 10px 0; }
-    canvas { border: 1px solid #444; }
-    #log { white-space: pre-wrap; font-size: 12px; max-height: 800px; overflow-y: auto; background: #111; padding: 10px; border-radius: 5px; }
-    h2 { color: #8af; margin-top: 0; }
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+    pre { background: #222; padding: 10px; border-radius: 6px; font-size: 11px; white-space: pre-wrap; }
+    canvas { border: 1px solid #333; margin: 5px; }
+    .row { display: flex; gap: 10px; align-items: start; }
+    h3 { margin: 10px 0 5px; }
   </style>
 </head>
 <body>
-  <h1>Crop Region Comparison</h1>
-  <p>Shows what 256x256 crop each pipeline feeds to the landmark model.</p>
-
-  <div class="box">
-    <div class="row">
-      <div>
-        <h3>micro-handpose crop (256x256)</h3>
-        <canvas id="micro-crop" width="256" height="256"></canvas>
-      </div>
-      <div>
-        <h3>Pixel difference (amplified 10x)</h3>
-        <canvas id="diff-crop" width="256" height="256"></canvas>
-      </div>
+  <h1>Crop-Space Landmark Comparison: Ours vs MediaPipe</h1>
+  <p>Transforms MediaPipe's image-space landmarks into our crop space to isolate crop vs model differences.</p>
+  <div id="status">Loading...</div>
+  <div class="row">
+    <div>
+      <h3>Our Canvas2D Crop</h3>
+      <canvas id="cpuCrop" width="224" height="224"></canvas>
+    </div>
+    <div>
+      <h3>Overlay (Green=ours, Red=MP)</h3>
+      <canvas id="overlay" width="224" height="224"></canvas>
     </div>
   </div>
-
-  <div class="box">
-    <h2>ROI & Pipeline Details</h2>
-    <div id="log"></div>
-  </div>
+  <pre id="output"></pre>
 
   <script type="module">
-    const log = document.getElementById('log');
-    function addLog(msg) {
-      log.textContent += msg + '\n';
-      console.log(msg);
-    }
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
 
     async function run() {
       try {
-        // Load test image
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        await new Promise((resolve, reject) => {
-          img.onload = resolve;
-          img.onerror = reject;
-          img.src = 'hand_nikhil.jpg';
-        });
-        addLog(`Image: ${img.naturalWidth}x${img.naturalHeight}`);
-        addLog(`Aspect ratio: ${(img.naturalWidth/img.naturalHeight).toFixed(4)}`);
-
-        // === micro-handpose: expose internals ===
-        const { createHandpose } = await import('./dist/index.js?v=cropcompare');
-
-        // Create with f32 to eliminate precision as a variable
+        // Load our model
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=f16v5');
         const handpose = await createHandpose({
           weightsUrl: 'weights',
           scoreThreshold: 0.1,
-          palmScoreThreshold: 0.1,
-          forceF32: true,
+          palmScoreThreshold: 0.5,
         });
-        addLog('micro-handpose loaded (forceF32=true)');
 
-        const microResults = await handpose.detect(img);
-        addLog(`micro-handpose: ${microResults.length} hand(s), score=${microResults[0]?.score.toFixed(4)}`);
-
-        if (microResults.length > 0) {
-          const lm = microResults[0].landmarks;
-          addLog('\nmicro-handpose landmarks:');
-          const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip','index_mcp','index_pip','index_dip','index_tip','middle_mcp','middle_pip','middle_dip','middle_tip','ring_mcp','ring_pip','ring_dip','ring_tip','pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
-          for (let i = 0; i < 21; i++) {
-            addLog(`  [${i}] ${NAMES[i].padEnd(12)} x=${lm[i].x.toFixed(4)} y=${lm[i].y.toFixed(4)}`);
-          }
-        }
-
-        // === MediaPipe ===
+        // Load MediaPipe
+        status.textContent = 'Loading MediaPipe...';
         const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
         const { HandLandmarker, FilesetResolver } = vision;
         const wasmFileset = await FilesetResolver.forVisionTasks(
           'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
         );
-        const mpHandLandmarker = await HandLandmarker.createFromOptions(wasmFileset, {
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
           baseOptions: {
             modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
-            delegate: 'CPU',
+            delegate: 'GPU',
           },
           runningMode: 'IMAGE',
           numHands: 2,
         });
 
-        const mpResults = mpHandLandmarker.detect(img);
-        addLog(`\nMediaPipe: ${mpResults.landmarks?.length || 0} hand(s)`);
+        // Load test image
+        status.textContent = 'Loading test image...';
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = 'test-hands/hand_05.jpg'; });
+        const srcW = img.naturalWidth, srcH = img.naturalHeight;
+        log(`Image: ${srcW}x${srcH}`);
 
-        if (mpResults.landmarks?.length > 0) {
-          const lm = mpResults.landmarks[0];
-          const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip','index_mcp','index_pip','index_dip','index_tip','middle_mcp','middle_pip','middle_dip','middle_tip','ring_mcp','ring_pip','ring_dip','ring_tip','pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
-          addLog('\nMediaPipe landmarks:');
-          for (let i = 0; i < 21; i++) {
-            addLog(`  [${i}] ${NAMES[i].padEnd(12)} x=${lm[i].x.toFixed(4)} y=${lm[i].y.toFixed(4)}`);
+        // Step 1: Run our pipeline with debug info
+        status.textContent = 'Running our pipeline...';
+        const ourResults = await handpose.detectWithDebug(img);
+        if (ourResults.length === 0) { log('No hands detected!'); return; }
+        const ourHand = ourResults[0];
+
+        log(`\n=== Our Pipeline ===`);
+        log(`Palm score: ${ourHand.palmDetection.score.toFixed(6)}`);
+        log(`ROI: center=(${ourHand.roi.centerXpx.toFixed(2)}, ${ourHand.roi.centerYpx.toFixed(2)}) size=${ourHand.roi.sizePx.toFixed(2)}px rot=${(ourHand.roi.rotation*180/Math.PI).toFixed(4)} deg`);
+
+        // Step 2: Run MediaPipe
+        status.textContent = 'Running MediaPipe...';
+        const mpResult = mpGpu.detect(img);
+        const mpLandmarks = mpResult.landmarks || [];
+        if (mpLandmarks.length === 0) { log('MediaPipe detected no hands!'); return; }
+
+        // Match to closest hand
+        let bestIdx = 0, bestDist = Infinity;
+        for (let j = 0; j < mpLandmarks.length; j++) {
+          const d = Math.sqrt(
+            (ourHand.landmarks[0].x - mpLandmarks[j][0].x) ** 2 +
+            (ourHand.landmarks[0].y - mpLandmarks[j][0].y) ** 2
+          );
+          if (d < bestDist) { bestDist = d; bestIdx = j; }
+        }
+        const mpLm = mpLandmarks[bestIdx];
+
+        // Step 3: Transform MediaPipe landmarks into our crop space
+        const roi = ourHand.roi;
+        const cosR = Math.cos(roi.rotation);
+        const sinR = Math.sin(roi.rotation);
+        const scale = 224 / roi.sizePx;
+
+        function imgToOurCrop(imgNormX, imgNormY) {
+          const px = imgNormX * srcW;
+          const py = imgNormY * srcH;
+          const dx = px - roi.centerXpx;
+          const dy = py - roi.centerYpx;
+          const cropX = (cosR * dx + sinR * dy) * scale + 112;
+          const cropY = (-sinR * dx + cosR * dy) * scale + 112;
+          return [cropX / 224, cropY / 224];
+        }
+
+        log(`\n=== Crop-Space Comparison ===`);
+        log(`Our crop-space landmarks (raw from model) vs MediaPipe transformed to our crop space:`);
+
+        const NAMES = [
+          'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+          'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+          'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+          'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+          'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+        ];
+
+        let sumCropDist = 0, maxCropDist = 0, maxCropIdx = 0;
+        let sumCropDx = 0, sumCropDy = 0;
+        const cropSpaceOurs = [];
+        const cropSpaceMP = [];
+
+        log(`\n${'#'.padStart(3)} ${'Name'.padEnd(12)} ${'CropDist'.padStart(10)} ${'CropDx'.padStart(10)} ${'CropDy'.padStart(10)}  Ours(crop)           MP->crop`);
+        for (let i = 0; i < 21; i++) {
+          const ours = ourHand.cropLandmarks[i];
+          const [mpCropX, mpCropY] = imgToOurCrop(mpLm[i].x, mpLm[i].y);
+
+          const dx = ours.x - mpCropX;
+          const dy = ours.y - mpCropY;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          sumCropDist += d;
+          sumCropDx += dx;
+          sumCropDy += dy;
+          if (d > maxCropDist) { maxCropDist = d; maxCropIdx = i; }
+
+          cropSpaceOurs.push([ours.x, ours.y]);
+          cropSpaceMP.push([mpCropX, mpCropY]);
+
+          log(`${i.toString().padStart(3)} ${NAMES[i].padEnd(12)} ${(d*100).toFixed(4).padStart(10)} ${(dx*100).toFixed(4).padStart(10)} ${(dy*100).toFixed(4).padStart(10)}  (${ours.x.toFixed(4)},${ours.y.toFixed(4)})  (${mpCropX.toFixed(4)},${mpCropY.toFixed(4)})`);
+        }
+
+        const avgCropDist = sumCropDist / 21;
+        const avgCropDx = sumCropDx / 21;
+        const avgCropDy = sumCropDy / 21;
+
+        log(`\nAvg crop-space distance: ${(avgCropDist*100).toFixed(4)}%`);
+        log(`Max crop-space distance: ${(maxCropDist*100).toFixed(4)}% (${NAMES[maxCropIdx]})`);
+        log(`Mean crop-space shift: dx=${(avgCropDx*100).toFixed(4)}%, dy=${(avgCropDy*100).toFixed(4)}%`);
+        log(`Mean shift in crop pixels: dx=${(avgCropDx*224).toFixed(2)}px, dy=${(avgCropDy*224).toFixed(2)}px`);
+
+        // Residuals after removing mean shift
+        log(`\n=== Residuals after removing crop-space mean shift ===`);
+        let maxResid = 0;
+        for (let i = 0; i < 21; i++) {
+          const dx = cropSpaceOurs[i][0] - cropSpaceMP[i][0] - avgCropDx;
+          const dy = cropSpaceOurs[i][1] - cropSpaceMP[i][1] - avgCropDy;
+          const d = Math.sqrt(dx*dx + dy*dy);
+          if (d > maxResid) maxResid = d;
+          log(`  [${i.toString().padStart(2)}] ${NAMES[i].padEnd(12)}: residual=${(d*100).toFixed(4)}% dx=${(dx*100).toFixed(4)}% dy=${(dy*100).toFixed(4)}%`);
+        }
+        log(`Max residual: ${(maxResid*100).toFixed(4)}%`);
+
+        // Image-space comparison for reference
+        log(`\n=== Image-Space Comparison (reference) ===`);
+        let sumImgDist = 0;
+        for (let i = 0; i < 21; i++) {
+          const dx = ourHand.landmarks[i].x - mpLm[i].x;
+          const dy = ourHand.landmarks[i].y - mpLm[i].y;
+          sumImgDist += Math.sqrt(dx*dx + dy*dy);
+        }
+        log(`Avg image-space distance: ${(sumImgDist/21*100).toFixed(4)}%`);
+
+        // Step 4: Estimate MediaPipe's ROI from its landmarks + our crop landmarks
+        log(`\n=== MediaPipe ROI Estimation (assumes same model) ===`);
+
+        // Least-squares: img_px = A*cdx - B*cdy + cx, img_py = B*cdx + A*cdy + cy
+        let n = 21;
+        let sumCd2 = 0;
+        let S_ixcx = 0, S_ixcy = 0, S_iycx = 0, S_iycy = 0;
+        let S_ix = 0, S_iy = 0, S_cx = 0, S_cy = 0;
+
+        for (let i = 0; i < 21; i++) {
+          const cdx = (ourHand.cropLandmarks[i].x - 0.5) * roi.sizePx;
+          const cdy = (ourHand.cropLandmarks[i].y - 0.5) * roi.sizePx;
+          const ix = mpLm[i].x * srcW;
+          const iy = mpLm[i].y * srcH;
+          sumCd2 += cdx*cdx + cdy*cdy;
+          S_ixcx += ix*cdx; S_ixcy += ix*cdy;
+          S_iycx += iy*cdx; S_iycy += iy*cdy;
+          S_ix += ix; S_iy += iy;
+          S_cx += cdx; S_cy += cdy;
+        }
+
+        const denom2 = sumCd2 - (S_cx*S_cx + S_cy*S_cy)/n;
+        const Aest = (S_ixcx + S_iycy - (S_ix*S_cx + S_iy*S_cy)/n) / denom2;
+        const Best = (S_iycx - S_ixcy - (S_iy*S_cx - S_ix*S_cy)/n) / denom2;
+        const Cxest = (S_ix - Aest*S_cx + Best*S_cy) / n;
+        const Cyest = (S_iy - Best*S_cx - Aest*S_cy) / n;
+
+        const estScale2 = Math.sqrt(Aest*Aest + Best*Best);
+        const estRot = Math.atan2(Best, Aest);
+        const estSize = estScale2 * 224;
+
+        log(`Estimated MP ROI (least-squares, all 21 landmarks):`);
+        log(`  center: (${Cxest.toFixed(2)}, ${Cyest.toFixed(2)}) px`);
+        log(`  size: ${estSize.toFixed(2)} px`);
+        log(`  rotation: ${(estRot*180/Math.PI).toFixed(4)} deg`);
+
+        log(`\nOur ROI:`);
+        log(`  center: (${roi.centerXpx.toFixed(2)}, ${roi.centerYpx.toFixed(2)}) px`);
+        log(`  size: ${roi.sizePx.toFixed(2)} px`);
+        log(`  rotation: ${(roi.rotation*180/Math.PI).toFixed(4)} deg`);
+
+        const dcx = Cxest - roi.centerXpx;
+        const dcy = Cyest - roi.centerYpx;
+        log(`\nROI Differences:`);
+        log(`  center delta: (${dcx.toFixed(2)}, ${dcy.toFixed(2)}) px = (${(dcx/roi.sizePx*100).toFixed(3)}%, ${(dcy/roi.sizePx*100).toFixed(3)}%) of crop`);
+        log(`  size delta: ${(estSize - roi.sizePx).toFixed(2)} px (${((estSize/roi.sizePx-1)*100).toFixed(4)}%)`);
+        log(`  rotation delta: ${((estRot - roi.rotation)*180/Math.PI).toFixed(4)} deg`);
+
+        // Reconstruction error
+        let sumReconDist = 0, maxReconDist = 0;
+        for (let i = 0; i < 21; i++) {
+          const cdx = (ourHand.cropLandmarks[i].x - 0.5) * roi.sizePx;
+          const cdy = (ourHand.cropLandmarks[i].y - 0.5) * roi.sizePx;
+          const reconX = (Aest * cdx - Best * cdy + Cxest) / srcW;
+          const reconY = (Best * cdx + Aest * cdy + Cyest) / srcH;
+          const dx = reconX - mpLm[i].x;
+          const dy = reconY - mpLm[i].y;
+          const d = Math.sqrt(dx*dx + dy*dy);
+          sumReconDist += d;
+          if (d > maxReconDist) maxReconDist = d;
+        }
+        log(`\nReconstruction: our_crop_lm + estimated_mp_roi -> MP landmarks`);
+        log(`  Avg error: ${(sumReconDist/21*100).toFixed(4)}%`);
+        log(`  Max error: ${(maxReconDist*100).toFixed(4)}%`);
+        log(`  (Near 0% = same model, different crop. Large = different model outputs.)`);
+
+        // Step 5: Draw Canvas2D crop
+        try {
+          const cpuCropCanvas = handpose._debug.cropHandRegion(img, ourHand.roi);
+          const cpuCtx = document.getElementById('cpuCrop').getContext('2d');
+          cpuCtx.drawImage(cpuCropCanvas, 0, 0);
+        } catch(e) {
+          log(`\nCould not draw CPU crop: ${e.message}`);
+        }
+
+        // Step 6: Draw overlay
+        const overlayCanvas = document.getElementById('overlay');
+        const octx = overlayCanvas.getContext('2d');
+        try {
+          const cpuCropCanvas = handpose._debug.cropHandRegion(img, ourHand.roi);
+          octx.drawImage(cpuCropCanvas, 0, 0);
+          octx.fillStyle = 'rgba(0,0,0,0.5)';
+          octx.fillRect(0, 0, 224, 224);
+        } catch(e) {
+          octx.fillStyle = '#222';
+          octx.fillRect(0, 0, 224, 224);
+        }
+
+        const CONNECTIONS = [
+          [0,1],[1,2],[2,3],[3,4],
+          [0,5],[5,6],[6,7],[7,8],
+          [0,9],[9,10],[10,11],[11,12],
+          [0,13],[13,14],[14,15],[15,16],
+          [0,17],[17,18],[18,19],[19,20],
+          [5,9],[9,13],[13,17],
+        ];
+
+        function drawHand(ctx, points, color, lw) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = lw;
+          for (const [a, b] of CONNECTIONS) {
+            ctx.beginPath();
+            ctx.moveTo(points[a][0]*224, points[a][1]*224);
+            ctx.lineTo(points[b][0]*224, points[b][1]*224);
+            ctx.stroke();
+          }
+          ctx.fillStyle = color;
+          for (const [x, y] of points) {
+            ctx.beginPath();
+            ctx.arc(x*224, y*224, 3, 0, Math.PI*2);
+            ctx.fill();
           }
         }
 
-        // Compare with f32
-        if (microResults.length > 0 && mpResults.landmarks?.length > 0) {
-          const microLm = microResults[0].landmarks;
-          const mpLm = mpResults.landmarks[0];
-          let totalDist = 0;
-          let maxDist = 0;
-          let maxIdx = 0;
-          const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip','index_mcp','index_pip','index_dip','index_tip','middle_mcp','middle_pip','middle_dip','middle_tip','ring_mcp','ring_pip','ring_dip','ring_tip','pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
+        drawHand(octx, cropSpaceMP, 'rgba(255,80,80,0.9)', 1.5);
+        drawHand(octx, cropSpaceOurs, 'rgba(80,255,80,0.9)', 1.5);
 
-          addLog('\n=== F32 COMPARISON ===');
-          for (let i = 0; i < 21; i++) {
-            const dx = microLm[i].x - mpLm[i].x;
-            const dy = microLm[i].y - mpLm[i].y;
-            const dist = Math.sqrt(dx*dx + dy*dy);
-            totalDist += dist;
-            if (dist > maxDist) { maxDist = dist; maxIdx = i; }
-          }
-          addLog(`Avg distance (f32): ${(totalDist/21).toFixed(4)}`);
-          addLog(`Max distance (f32): ${maxDist.toFixed(4)} at ${NAMES[maxIdx]}`);
+        octx.font = '11px monospace';
+        octx.fillStyle = '#0f0';
+        octx.fillText('Green=Ours', 5, 15);
+        octx.fillStyle = '#f55';
+        octx.fillText('Red=MP', 5, 28);
 
-          let microMeanX = 0, mpMeanX = 0, microMeanY = 0, mpMeanY = 0;
-          for (let i = 0; i < 21; i++) {
-            microMeanX += microLm[i].x; mpMeanX += mpLm[i].x;
-            microMeanY += microLm[i].y; mpMeanY += mpLm[i].y;
-          }
-          addLog(`Center offset: dx=${((microMeanX-mpMeanX)/21).toFixed(4)}, dy=${((microMeanY-mpMeanY)/21).toFixed(4)}`);
+        // Step 7: Compare GPU crop affine transform with MediaPipe's transform
+        log(`\n=== Affine Transform Comparison ===`);
+
+        // Our transform (from handpose.ts):
+        const s_our = roi.sizePx / 224;
+        const a_our = cosR * s_our / srcW;
+        const b_our = -sinR * s_our / srcW;
+        const tx_our = roi.centerXpx / srcW - 112 * (a_our + b_our);
+        const c_our = sinR * s_our / srcH;
+        const d_our = cosR * s_our / srcH;
+        const ty_our = roi.centerYpx / srcH - 112 * (c_our + d_our);
+
+        log(`Our affine (crop pixel -> source normalized [0,1]):`);
+        log(`  a=${a_our.toFixed(10)}, b=${b_our.toFixed(10)}, tx=${tx_our.toFixed(10)}`);
+        log(`  c=${c_our.toFixed(10)}, d=${d_our.toFixed(10)}, ty=${ty_our.toFixed(10)}`);
+
+        // MediaPipe's GetRotatedSubRectToRectTransformMatrix:
+        // Maps NORMALIZED destination [0,1] -> source PIXEL coords (or UV, depending on texture setup)
+        // width,height are ROI dimensions in PIXELS
+        // Verified from C++ source: matrix maps (normal_x, normal_y) -> source UV for texture2D
+        //
+        // In MP's matrix:
+        //   matrix[0] = width * cos / rect_width
+        //   matrix[1] = -height * sin / rect_width
+        //   matrix[3] = (-0.5*width*cos + 0.5*height*sin + center_x) / rect_width
+        //   matrix[4] = width * sin / rect_height
+        //   matrix[5] = height * cos / rect_height
+        //   matrix[7] = (-0.5*height*cos - 0.5*width*sin + center_y) / rect_height
+        //
+        // MP input: normal_x = (gid.x + 0.5) / out_width
+        // Our input: fx = gid.x + 0.5
+        //
+        // To compare: convert MP to use pixel input fx = normal_x * out_width
+        // Then MP becomes: src = (matrix[0]/rect_width) * fx + ...
+        // which is: src = (width*cos / rect_width^2) * fx
+
+        // Actually, let me just compute what both transforms give for specific crop pixels
+        log(`\nTransform comparison at specific crop pixels:`);
+        const testPixels = [[0, 0], [112, 112], [223, 223], [0, 223], [223, 0]];
+        for (const [px, py] of testPixels) {
+          const fx = px + 0.5;
+          const fy = py + 0.5;
+          const our_u = a_our * fx + b_our * fy + tx_our;
+          const our_v = c_our * fx + d_our * fy + ty_our;
+          log(`  pixel (${px},${py}): src_uv = (${our_u.toFixed(6)}, ${our_v.toFixed(6)}) = (${(our_u*srcW).toFixed(1)}, ${(our_v*srcH).toFixed(1)}) px`);
         }
 
-        // Now let's trace the letterbox computation
-        const srcW = img.naturalWidth;
-        const srcH = img.naturalHeight;
-        const scale = Math.min(192 / srcW, 192 / srcH);
-        const dstW = Math.round(srcW * scale);
-        const dstH = Math.round(srcH * scale);
-        const offsetX = (192 - dstW) / 2;
-        const offsetY = (192 - dstH) / 2;
+        // Verify: center pixel (112,112) should map to ROI center
+        const cx_check = a_our * 112.5 + b_our * 112.5 + tx_our;
+        const cy_check = c_our * 112.5 + d_our * 112.5 + ty_our;
+        log(`\nCenter pixel (112,112) -> fx=112.5 -> src=(${(cx_check*srcW).toFixed(2)}, ${(cy_check*srcH).toFixed(2)}) px`);
+        log(`Expected ROI center: (${roi.centerXpx.toFixed(2)}, ${roi.centerYpx.toFixed(2)}) px`);
+        log(`Diff: (${(cx_check*srcW - roi.centerXpx).toFixed(4)}, ${(cy_check*srcH - roi.centerYpx).toFixed(4)}) px`);
 
-        addLog(`\n=== LETTERBOX INFO ===`);
-        addLog(`scale: ${scale.toFixed(6)}`);
-        addLog(`dstW: ${dstW}, dstH: ${dstH}`);
-        addLog(`offsetX: ${offsetX}, offsetY: ${offsetY}`);
-        addLog(`padX: ${(offsetX/192).toFixed(6)}, padY: ${(offsetY/192).toFixed(6)}`);
+        // Check: does crop top-center map to where we expect?
+        // Top center of crop = (112, 0) -> maps to midMCP direction in source
+        const top_u = a_our * 112.5 + b_our * 0.5 + tx_our;
+        const top_v = c_our * 112.5 + d_our * 0.5 + ty_our;
+        log(`\nTop-center (112,0) -> src=(${(top_u*srcW).toFixed(2)}, ${(top_v*srcH).toFixed(2)}) px`);
+        // Bottom center = (112, 223) -> maps to wrist direction
+        const bot_u = a_our * 112.5 + b_our * 223.5 + tx_our;
+        const bot_v = c_our * 112.5 + d_our * 223.5 + ty_our;
+        log(`Bottom-center (112,223) -> src=(${(bot_u*srcW).toFixed(2)}, ${(bot_v*srcH).toFixed(2)}) px`);
 
+        // Palm keypoints for reference
+        const wristKp = ourHand.palmDetection.keypoints[0];
+        const midMcpKp = ourHand.palmDetection.keypoints[2];
+        log(`Palm wrist kp: (${(wristKp[0]*srcW).toFixed(2)}, ${(wristKp[1]*srcH).toFixed(2)}) px`);
+        log(`Palm midMCP kp: (${(midMcpKp[0]*srcW).toFixed(2)}, ${(midMcpKp[1]*srcH).toFixed(2)}) px`);
+
+        // Direction check: in the crop, fingers should point UP (toward y=0)
+        // So the midMCP direction should be toward the TOP of the crop
+        // Wrist should be toward the BOTTOM
+        // Let's verify this is correct
+        const dirToMcp = [midMcpKp[0]*srcW - roi.centerXpx, midMcpKp[1]*srcH - roi.centerYpx];
+        const dirToWrist = [wristKp[0]*srcW - roi.centerXpx, wristKp[1]*srcH - roi.centerYpx];
+        log(`\nDirection from ROI center to midMCP: (${dirToMcp[0].toFixed(2)}, ${dirToMcp[1].toFixed(2)}) px`);
+        log(`Direction from ROI center to wrist: (${dirToWrist[0].toFixed(2)}, ${dirToWrist[1].toFixed(2)}) px`);
+
+        // In the crop, the top-center direction vector is:
+        const cropTopDir_u = top_u - cx_check;
+        const cropTopDir_v = top_v - cy_check;
+        log(`\nCrop top-center direction in source: (${(cropTopDir_u*srcW).toFixed(2)}, ${(cropTopDir_v*srcH).toFixed(2)}) px`);
+        log(`This should align with midMCP direction (fingers toward top of crop).`);
+
+        // Dot product check
+        const dotTop = cropTopDir_u*srcW*dirToMcp[0] + cropTopDir_v*srcH*dirToMcp[1];
+        log(`Dot(crop_top_dir, mcp_dir) = ${dotTop.toFixed(2)} (positive = same direction, correct)`);
+
+        status.textContent = 'Done!';
       } catch (e) {
-        addLog(`ERROR: ${e.message}\n${e.stack}`);
+        status.textContent = `Error: ${e.message}`;
+        log(`\nERROR: ${e.message}\n${e.stack}`);
+        console.error(e);
       }
     }
 

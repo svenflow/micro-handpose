@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Landmark Model Comparison</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+    pre { background: #222; padding: 10px; border-radius: 6px; font-size: 11px; white-space: pre-wrap; }
+    canvas { border: 1px solid #333; }
+  </style>
+</head>
+<body>
+  <h1>Direct Landmark Comparison</h1>
+  <p>Step-by-step comparison: same image → both pipelines → where exactly do they diverge?</p>
+  <div id="status">Loading...</div>
+  <canvas id="crop" width="224" height="224"></canvas>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    async function run() {
+      try {
+        // Load our model
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=lmcompare1');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
+        });
+
+        // Load MediaPipe
+        status.textContent = 'Loading MediaPipe...';
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+        });
+
+        // Load test image
+        status.textContent = 'Loading test image...';
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = 'test-hands/hand_05.jpg'; });
+        const srcW = img.naturalWidth, srcH = img.naturalHeight;
+        log(`Image: ${srcW}×${srcH}`);
+
+        // Step 1: Run our full pipeline with debug
+        status.textContent = 'Running our pipeline...';
+        const ourResults = await handpose.detectWithDebug(img);
+
+        if (ourResults.length === 0) { log('No hands detected!'); return; }
+        const ourHand = ourResults[0];
+
+        log(`\n=== Step 1: Our Palm Detection ===`);
+        log(`Score: ${ourHand.palmDetection.score.toFixed(6)}`);
+        log(`Box: [${ourHand.palmDetection.box.map(v=>v.toFixed(6)).join(', ')}]`);
+        for (let k = 0; k < 7; k++) {
+          log(`  kp[${k}]: (${ourHand.palmDetection.keypoints[k][0].toFixed(6)}, ${ourHand.palmDetection.keypoints[k][1].toFixed(6)})`);
+        }
+
+        log(`\n=== Step 2: Our ROI ===`);
+        log(`Center: (${ourHand.roi.centerXpx.toFixed(4)}, ${ourHand.roi.centerYpx.toFixed(4)}) px`);
+        log(`Size: ${ourHand.roi.sizePx.toFixed(4)} px`);
+        log(`Rotation: ${ourHand.roi.rotation.toFixed(6)} rad (${(ourHand.roi.rotation * 180 / Math.PI).toFixed(2)}°)`);
+
+        // Step 2b: Compute affine transform (same as handpose.ts)
+        const cosR = Math.cos(ourHand.roi.rotation);
+        const sinR = Math.sin(ourHand.roi.rotation);
+        const s = ourHand.roi.sizePx / 224; // sizePx / LANDMARK_SIZE
+        const a = cosR * s / srcW;
+        const b = -sinR * s / srcW;
+        const tx = ourHand.roi.centerXpx / srcW - 112 * (a + b);
+        const c = sinR * s / srcH;
+        const d = cosR * s / srcH;
+        const ty = ourHand.roi.centerYpx / srcH - 112 * (c + d);
+
+        log(`\n=== Step 3: Affine Transform ===`);
+        log(`[a, b, tx] = [${a.toFixed(8)}, ${b.toFixed(8)}, ${tx.toFixed(8)}]`);
+        log(`[c, d, ty] = [${c.toFixed(8)}, ${d.toFixed(8)}, ${ty.toFixed(8)}]`);
+
+        // Verify: crop center (112, 112) should map to ROI center
+        const verCx = a * 112.5 + b * 112.5 + tx;
+        const verCy = c * 112.5 + d * 112.5 + ty;
+        log(`Verify center (112.5, 112.5) → src normalized: (${verCx.toFixed(6)}, ${verCy.toFixed(6)})`);
+        log(`Expected: (${(ourHand.roi.centerXpx/srcW).toFixed(6)}, ${(ourHand.roi.centerYpx/srcH).toFixed(6)})`);
+        log(`Diff: (${(verCx - ourHand.roi.centerXpx/srcW).toFixed(10)}, ${(verCy - ourHand.roi.centerYpx/srcH).toFixed(10)})`);
+
+        // Show what a few corner pixels map to
+        log(`\nCrop pixel mapping (pixel → source normalized):`);
+        const testPts = [[0.5, 0.5], [223.5, 0.5], [0.5, 223.5], [223.5, 223.5], [112, 112]];
+        for (const [fx, fy] of testPts) {
+          const sx = a * fx + b * fy + tx;
+          const sy = c * fx + d * fy + ty;
+          log(`  (${fx}, ${fy}) → (${sx.toFixed(6)}, ${sy.toFixed(6)}) = (${(sx*srcW).toFixed(1)}, ${(sy*srcH).toFixed(1)}) px`);
+        }
+
+        log(`\n=== Step 4: Our Landmarks (image-normalized) ===`);
+        for (let i = 0; i < 21; i++) {
+          log(`  [${i.toString().padStart(2)}]: (${ourHand.landmarks[i].x.toFixed(6)}, ${ourHand.landmarks[i].y.toFixed(6)})`);
+        }
+
+        // Step 5: Run MediaPipe
+        status.textContent = 'Running MediaPipe...';
+        const mpResult = mpGpu.detect(img);
+        const mpLandmarks = mpResult.landmarks || [];
+
+        if (mpLandmarks.length === 0) { log('MediaPipe detected no hands!'); return; }
+
+        // Match
+        let bestIdx = 0, bestDist = Infinity;
+        for (let j = 0; j < mpLandmarks.length; j++) {
+          const d = Math.sqrt(
+            (ourHand.landmarks[0].x - mpLandmarks[j][0].x) ** 2 +
+            (ourHand.landmarks[0].y - mpLandmarks[j][0].y) ** 2
+          );
+          if (d < bestDist) { bestDist = d; bestIdx = j; }
+        }
+        const mpLm = mpLandmarks[bestIdx];
+
+        log(`\n=== Step 5: MediaPipe Landmarks ===`);
+        for (let i = 0; i < 21; i++) {
+          log(`  [${i.toString().padStart(2)}]: (${mpLm[i].x.toFixed(6)}, ${mpLm[i].y.toFixed(6)})`);
+        }
+
+        // Step 6: Compute per-landmark errors
+        log(`\n=== Step 6: Error Analysis ===`);
+        let sumDx = 0, sumDy = 0, sumDist = 0;
+        for (let i = 0; i < 21; i++) {
+          const dx = ourHand.landmarks[i].x - mpLm[i].x;
+          const dy = ourHand.landmarks[i].y - mpLm[i].y;
+          sumDx += dx;
+          sumDy += dy;
+          sumDist += Math.sqrt(dx*dx + dy*dy);
+        }
+        const avgDx = sumDx / 21;
+        const avgDy = sumDy / 21;
+        const avgDist = sumDist / 21;
+
+        log(`Avg distance: ${(avgDist*100).toFixed(4)}%`);
+        log(`Mean shift (dx, dy): (${(avgDx*100).toFixed(4)}%, ${(avgDy*100).toFixed(4)}%)`);
+        log(`Mean shift in pixels: (${(avgDx*srcW).toFixed(2)}, ${(avgDy*srcH).toFixed(2)}) px`);
+
+        // What this shift means for the crop:
+        const cropShiftPx = avgDx * srcW / s; // convert to crop pixels
+        log(`\nMean shift in CROP pixels: (${(avgDx*srcW/s).toFixed(2)}, ${(avgDy*srcH/s).toFixed(2)})`);
+        log(`Crop pixel size in source pixels: ${s.toFixed(4)} (${(s/srcW*100).toFixed(4)}% of image)`);
+
+        // Step 7: Back-compute what MediaPipe's crop center must be
+        // If our landmarks are shifted by (avgDx, avgDy), it means our crop center
+        // differs from MP's crop center by approximately (avgDx*srcW, avgDy*srcH) pixels.
+        const inferredMpCx = ourHand.roi.centerXpx - avgDx * srcW;
+        const inferredMpCy = ourHand.roi.centerYpx - avgDy * srcH;
+        log(`\n=== Step 7: Inferred MediaPipe Crop Center ===`);
+        log(`Our crop center: (${ourHand.roi.centerXpx.toFixed(2)}, ${ourHand.roi.centerYpx.toFixed(2)}) px`);
+        log(`Inferred MP center: (${inferredMpCx.toFixed(2)}, ${inferredMpCy.toFixed(2)}) px`);
+        log(`Difference: (${(avgDx*srcW).toFixed(2)}, ${(avgDy*srcH).toFixed(2)}) px`);
+        log(`This is ${(avgDx*srcW / ourHand.roi.sizePx * 100).toFixed(3)}% of crop size`);
+
+        // Also show the "residual" after removing mean shift
+        // If the shift is purely from crop center, residuals should be near zero
+        log(`\n=== Residuals after removing mean shift ===`);
+        let maxResid = 0;
+        for (let i = 0; i < 21; i++) {
+          const dx = ourHand.landmarks[i].x - mpLm[i].x - avgDx;
+          const dy = ourHand.landmarks[i].y - mpLm[i].y - avgDy;
+          const d = Math.sqrt(dx*dx + dy*dy);
+          if (d > maxResid) maxResid = d;
+          log(`  [${i.toString().padStart(2)}]: residual=(${(dx*100).toFixed(4)}%, ${(dy*100).toFixed(4)}%) dist=${(d*100).toFixed(4)}%`);
+        }
+        log(`Max residual: ${(maxResid*100).toFixed(4)}%`);
+        log(`\nIf residuals are near zero → pure crop center shift.`);
+        log(`If residuals are large → landmark model or rotation difference.`);
+
+        status.textContent = 'Done!';
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        log(`\nERROR: ${e.message}\n${e.stack}`);
+        console.error(e);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

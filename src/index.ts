@@ -20,7 +20,7 @@
 export { createHandpose } from './handpose.js';
 export { createLandmarkSmoother } from './filter.js';
 export { toKeypoints, LANDMARK_NAMES } from './types.js';
-export type { Handpose, HandposeResult, HandposeOptions, Landmark, Keypoints, HandposeInput } from './types.js';
+export type { Handpose, HandposeResult, HandposeDebugResult, HandposeOptions, Landmark, Keypoints, HandposeInput } from './types.js';
 export type { LandmarkSmoother, SmootherOptions } from './filter.js';
 export { compileFullModel } from './model_full.js';
 export { loadWeightsFromBuffer } from './model.js';

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Color Space Test</title>
+  <style>body { font-family: monospace; background: #111; color: #eee; padding: 20px; } pre { background: #222; padding: 10px; border-radius: 6px; }</style>
+</head>
+<body>
+  <h1>Color Space / ImageBitmap Test</h1>
+  <pre id="output">Loading...</pre>
+  <script>
+    const out = document.getElementById('output');
+    function log(msg) { out.textContent += msg + '\n'; }
+
+    async function run() {
+      out.textContent = '';
+
+      // Load test image
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = 'test-hands/hand_192.png'; });
+      log(`Image loaded: ${img.naturalWidth}x${img.naturalHeight}`);
+
+      // Create ImageBitmaps with different options
+      const bmpDefault = await createImageBitmap(img);
+      const bmpNoConvert = await createImageBitmap(img, { colorSpaceConversion: 'none' });
+      const bmpNoPremultiply = await createImageBitmap(img, { premultiplyAlpha: 'none' });
+      const bmpBoth = await createImageBitmap(img, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+
+      log(`\nImageBitmap sizes: default=${bmpDefault.width}x${bmpDefault.height}`);
+
+      // Get WebGPU device
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+      log(`WebGPU device: ${adapter.info?.device || 'ok'}`);
+
+      // Helper: upload to texture and read back
+      async function readPixels(bitmap, label) {
+        const tex = device.createTexture({
+          size: [192, 192],
+          format: 'rgba8unorm',
+          usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+
+        device.queue.copyExternalImageToTexture(
+          { source: bitmap },
+          { texture: tex },
+          [192, 192],
+        );
+
+        // Read back
+        const bytesPerRow = Math.ceil(192 * 4 / 256) * 256;
+        const buf = device.createBuffer({ size: bytesPerRow * 192, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const enc = device.createCommandEncoder();
+        enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow }, [192, 192]);
+        device.queue.submit([enc.finish()]);
+        await buf.mapAsync(GPUMapMode.READ);
+        const data = new Uint8Array(buf.getMappedRange()).slice(); // copy before unmap
+
+        // Extract first 10 pixels
+        const pixels = [];
+        for (let i = 0; i < 10; i++) {
+          const row = Math.floor(i / 192);
+          const col = i % 192;
+          const offset = row * bytesPerRow + col * 4;
+          pixels.push([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
+        }
+
+        // Also get pixel at (96, 96) - center
+        const centerOffset = 96 * bytesPerRow + 96 * 4;
+        const centerPixel = [data[centerOffset], data[centerOffset+1], data[centerOffset+2], data[centerOffset+3]];
+
+        buf.unmap();
+        tex.destroy();
+        buf.destroy();
+
+        return { pixels, centerPixel, rawFirst20: Array.from(data.slice(0, 20)) };
+      }
+
+      // Also try with explicit colorSpace on destination
+      // readPixelsWithColorSpace removed - not needed
+
+      // Test all combinations
+      const tests = [
+        { bmp: bmpDefault, label: 'default createImageBitmap' },
+        { bmp: bmpNoConvert, label: 'colorSpaceConversion: none' },
+        { bmp: bmpNoPremultiply, label: 'premultiplyAlpha: none' },
+        { bmp: bmpBoth, label: 'both: none' },
+      ];
+
+      const results = {};
+      for (const { bmp, label } of tests) {
+        results[label] = await readPixels(bmp, label);
+        log(`\n${label}:`);
+        log(`  First 5 pixels (R,G,B,A):`);
+        for (let i = 0; i < 5; i++) {
+          const [r,g,b,a] = results[label].pixels[i];
+          log(`    [${i}]: (${r}, ${g}, ${b}, ${a})`);
+        }
+        log(`  Center pixel: (${results[label].centerPixel.join(', ')})`);
+      }
+
+      // Compare: default vs noConvert
+      log(`\n=== COMPARISON: default vs colorSpaceConversion:none ===`);
+      const def = results['default createImageBitmap'];
+      const noConv = results['colorSpaceConversion: none'];
+      let diffs = 0, maxDiff = 0;
+      for (let i = 0; i < 10; i++) {
+        for (let c = 0; c < 3; c++) {
+          const d = Math.abs(def.pixels[i][c] - noConv.pixels[i][c]);
+          if (d > 0) diffs++;
+          if (d > maxDiff) maxDiff = d;
+        }
+      }
+      log(`  Differing channels in first 10 pixels: ${diffs}/30`);
+      log(`  Max diff: ${maxDiff}`);
+
+      if (maxDiff === 0) {
+        log(`\n⚠️ No color space difference detected!`);
+        log(`This means createImageBitmap color conversion is not the issue.`);
+      } else {
+        log(`\n✅ Color space conversion DOES change pixel values!`);
+        log(`Max diff = ${maxDiff}/255 = ${(maxDiff/255*100).toFixed(2)}%`);
+      }
+
+      // Also test WebGL for comparison with MediaPipe
+      log(`\n=== WebGL pixel values (how MediaPipe sees the image) ===`);
+      const canvas = new OffscreenCanvas(192, 192);
+      const gl = canvas.getContext('webgl2');
+      if (gl) {
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmpDefault);
+
+        // Read back
+        const fb = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+        const pixels = new Uint8Array(192 * 192 * 4);
+        gl.readPixels(0, 0, 192, 192, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        gl.deleteTexture(tex);
+        gl.deleteFramebuffer(fb);
+
+        log(`  WebGL first 5 pixels:`);
+        // Note: WebGL readPixels is bottom-up, so first row is bottom of image
+        // Row 0 in WebGL = bottom row of image. Top row = row 191.
+        // Let's read the top-left corner (row 191 in readback)
+        for (let i = 0; i < 5; i++) {
+          const offset = 191 * 192 * 4 + i * 4; // top row
+          log(`    [${i}]: (${pixels[offset]}, ${pixels[offset+1]}, ${pixels[offset+2]}, ${pixels[offset+3]})`);
+        }
+
+        // Compare WebGL with WebGPU (default)
+        log(`\n=== WebGPU vs WebGL pixel comparison ===`);
+        let wgVsGlDiffs = 0, wgVsGlMaxDiff = 0;
+        for (let i = 0; i < 5; i++) {
+          const wgpu = def.pixels[i];
+          const glOffset = 191 * 192 * 4 + i * 4;
+          const glPx = [pixels[glOffset], pixels[glOffset+1], pixels[glOffset+2]];
+          for (let c = 0; c < 3; c++) {
+            const d = Math.abs(wgpu[c] - glPx[c]);
+            if (d > 0) wgVsGlDiffs++;
+            if (d > wgVsGlMaxDiff) wgVsGlMaxDiff = d;
+          }
+          log(`    [${i}] WebGPU=(${wgpu[0]},${wgpu[1]},${wgpu[2]}) WebGL=(${glPx[0]},${glPx[1]},${glPx[2]}) diff=${Math.abs(wgpu[0]-glPx[0])},${Math.abs(wgpu[1]-glPx[1])},${Math.abs(wgpu[2]-glPx[2])}`);
+        }
+        log(`  Total diffs: ${wgVsGlDiffs}/15, max: ${wgVsGlMaxDiff}`);
+
+        if (wgVsGlMaxDiff > 0) {
+          log(`\n🔍 WebGPU and WebGL produce DIFFERENT pixel values!`);
+          log(`This could explain the difference with MediaPipe (which uses WebGL).`);
+        } else {
+          log(`\n✅ WebGPU and WebGL produce IDENTICAL pixel values.`);
+        }
+      } else {
+        log(`  WebGL2 not available on OffscreenCanvas`);
+      }
+
+      // Also read via Canvas2D for comparison
+      log(`\n=== Canvas2D pixel values ===`);
+      const c2d = new OffscreenCanvas(192, 192);
+      const ctx = c2d.getContext('2d');
+      ctx.drawImage(img, 0, 0, 192, 192);
+      const imgData = ctx.getImageData(0, 0, 192, 192);
+      log(`  Canvas2D first 5 pixels:`);
+      for (let i = 0; i < 5; i++) {
+        const o = i * 4;
+        log(`    [${i}]: (${imgData.data[o]}, ${imgData.data[o+1]}, ${imgData.data[o+2]}, ${imgData.data[o+3]})`);
+      }
+
+      // Compare Canvas2D with WebGPU
+      log(`\n=== WebGPU vs Canvas2D ===`);
+      for (let i = 0; i < 5; i++) {
+        const wgpu = def.pixels[i];
+        const o = i * 4;
+        const c2dPx = [imgData.data[o], imgData.data[o+1], imgData.data[o+2]];
+        log(`    [${i}] WebGPU=(${wgpu[0]},${wgpu[1]},${wgpu[2]}) C2D=(${c2dPx[0]},${c2dPx[1]},${c2dPx[2]}) diff=${Math.abs(wgpu[0]-c2dPx[0])},${Math.abs(wgpu[1]-c2dPx[1])},${Math.abs(wgpu[2]-c2dPx[2])}`);
+      }
+    }
+
+    run().catch(e => { out.textContent = 'Error: ' + e.message; console.error(e); });
+  </script>
+</body>
+</html>

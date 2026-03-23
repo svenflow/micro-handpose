@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Activation Comparison: WGSL vs MediaPipe CPU/GPU</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; margin: 0; }
+    h1 { color: #8af; margin-bottom: 5px; }
+    .subtitle { color: #888; margin-bottom: 20px; font-size: 13px; }
+    #status { color: #888; margin-bottom: 20px; }
+    .section { background: #1a1a1a; border: 1px solid #333; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .section h2 { color: #8af; margin: 0 0 12px 0; font-size: 14px; }
+    pre { background: #222; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 11px; white-space: pre-wrap; }
+    .good { color: #3f8; }
+    .mid { color: #fe8; }
+    .bad { color: #f84; }
+    table { border-collapse: collapse; width: 100%; font-size: 11px; margin: 8px 0; }
+    td, th { border: 1px solid #333; padding: 4px 8px; }
+    th { background: #222; color: #aaa; }
+    .metric { display: inline-block; background: #222; padding: 8px 14px; border-radius: 8px; margin: 4px; text-align: center; }
+    .metric .label { font-size: 10px; color: #888; }
+    .metric .value { font-size: 18px; font-weight: bold; }
+    h3 { color: #aaa; font-size: 12px; margin: 12px 0 4px 0; }
+  </style>
+</head>
+<body>
+  <h1>🔬 Activation Comparison: WGSL Internals + SSD Output Analysis</h1>
+  <p class="subtitle">Dumps per-layer activation stats from our WGSL palm model, raw SSD outputs, and compares final detections with MediaPipe GPU &amp; CPU.</p>
+  <div id="status">Initializing...</div>
+  <div id="results"></div>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const resultsDiv = document.getElementById('results');
+
+    const TEST_IMAGES = [
+      { file: 'test-hands/hand_05.jpg', label: 'Hand Square' },
+      { file: 'test-hands/hand_07.jpg', label: 'Pointing Finger' },
+      { file: 'test-hands/hand_08.jpg', label: 'Hand Gesture' },
+      { file: 'test-hands/hand_09.jpg', label: 'Nikhil' },
+      { file: 'test-hands/hand_10.jpg', label: 'Test Hand' },
+    ];
+
+    function log(msg) { status.textContent = msg; console.log(msg); }
+
+    async function loadImage(src) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      return new Promise((resolve, reject) => {
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`Failed: ${src}`));
+        img.src = src;
+      });
+    }
+
+    function fmtSci(v) { return v == null ? '?' : v.toExponential(3); }
+    function cls(v, lo=0.001, hi=0.01) { return v < lo ? 'good' : v < hi ? 'mid' : 'bad'; }
+
+    function arrayStats(arr) {
+      if (!arr || arr.length === 0) return null;
+      let min = Infinity, max = -Infinity, sum = 0, sumSq = 0;
+      let nanCount = 0, infCount = 0;
+      for (let i = 0; i < arr.length; i++) {
+        const v = arr[i];
+        if (isNaN(v)) { nanCount++; continue; }
+        if (!isFinite(v)) { infCount++; continue; }
+        if (v < min) min = v;
+        if (v > max) max = v;
+        sum += v;
+        sumSq += v * v;
+      }
+      const n = arr.length - nanCount - infCount;
+      const mean = sum / n;
+      const std = Math.sqrt(sumSq / n - mean * mean);
+      return { min, max, mean, std, l2: Math.sqrt(sumSq), nanCount, infCount, length: arr.length };
+    }
+
+    function compareArrays(a, b, name) {
+      const n = Math.min(a.length, b.length);
+      let sumAbsDiff = 0, maxAbsDiff = 0, maxIdx = 0;
+      let sumSqDiff = 0;
+      const diffs = new Float32Array(n);
+
+      for (let i = 0; i < n; i++) {
+        const diff = Math.abs(a[i] - b[i]);
+        diffs[i] = diff;
+        sumAbsDiff += diff;
+        sumSqDiff += diff * diff;
+        if (diff > maxAbsDiff) { maxAbsDiff = diff; maxIdx = i; }
+      }
+
+      // Percentiles
+      const sorted = Array.from(diffs).sort((x, y) => x - y);
+      const p50 = sorted[Math.floor(n * 0.5)];
+      const p90 = sorted[Math.floor(n * 0.9)];
+      const p99 = sorted[Math.floor(n * 0.99)];
+      const p999 = sorted[Math.floor(n * 0.999)];
+
+      return {
+        name, length: n,
+        meanAbsDiff: sumAbsDiff / n,
+        maxAbsDiff, maxIdx,
+        rmsDiff: Math.sqrt(sumSqDiff / n),
+        p50, p90, p99, p999,
+        aAtMax: a[maxIdx], bAtMax: b[maxIdx],
+      };
+    }
+
+    async function run() {
+      try {
+        // === Load our WGSL model ===
+        log('Loading micro-handpose...');
+        const { createHandpose } = await import('./dist/index.js?v=rebuild10');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
+        });
+        const palmModel = handpose._debug.palmDetector.model;
+        const palmDetector = handpose._debug.palmDetector;
+
+        // === Load MediaPipe GPU and CPU ===
+        log('Loading MediaPipe GPU + CPU...');
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 4,
+        });
+
+        const mpCpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'CPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 4,
+        });
+
+        let allHtml = '';
+
+        // === Determinism check first ===
+        log('Determinism check (5 runs)...');
+        const detImg = await loadImage(TEST_IMAGES[0].file);
+        const runs = [];
+        for (let r = 0; r < 5; r++) {
+          runs.push(await palmModel.debugRun(detImg));
+        }
+
+        let detHtml = `<div class="section"><h2>🎯 Determinism Check: ${TEST_IMAGES[0].label} (5 WGSL runs)</h2>`;
+
+        // Compare raw SSD outputs across runs
+        const scoreSpread = [];
+        const regSpread = [];
+        for (let i = 0; i < runs[0].rawScores.length; i++) {
+          const vals = runs.map(r => r.rawScores[i]);
+          scoreSpread.push(Math.max(...vals) - Math.min(...vals));
+        }
+        for (let i = 0; i < runs[0].rawRegressors.length; i++) {
+          const vals = runs.map(r => r.rawRegressors[i]);
+          regSpread.push(Math.max(...vals) - Math.min(...vals));
+        }
+
+        const maxScoreSpread = Math.max(...scoreSpread);
+        const maxRegSpread = Math.max(...regSpread);
+        const avgScoreSpread = scoreSpread.reduce((a,b) => a+b, 0) / scoreSpread.length;
+        const avgRegSpread = regSpread.reduce((a,b) => a+b, 0) / regSpread.length;
+
+        detHtml += `<pre>`;
+        detHtml += `Score logits (2016): max spread = ${fmtSci(maxScoreSpread)}, avg spread = ${fmtSci(avgScoreSpread)}\n`;
+        detHtml += `Regressors (36288):  max spread = ${fmtSci(maxRegSpread)}, avg spread = ${fmtSci(avgRegSpread)}\n`;
+        detHtml += maxScoreSpread === 0 && maxRegSpread === 0
+          ? `\n✅ PERFECTLY DETERMINISTIC — all 5 runs produce identical outputs`
+          : `\n⚠️ NON-DETERMINISTIC — GPU produces different results across runs`;
+        detHtml += `</pre>`;
+
+        // Per-layer determinism
+        const layerOrder = [
+          'input', 'initConv', 'block0', 'block4', 'block9', 'block14', 'block18', 'block19', 'block23',
+          'fpnUpsample6to12', 'fpn6to12Conv', 'backbone12Skip', 'fpnAdd12', 'fpn12Block1', 'fpn12Block2',
+          'cls16', 'reg16',
+          'fpnUpsample12to24', 'fpn12to24Conv', 'backbone24Skip', 'fpnAdd24', 'fpn24Block1', 'fpn24Block2',
+          'cls8', 'reg8'
+        ];
+
+        detHtml += `<table><tr><th>Layer</th><th>Mean Spread</th><th>Max Spread</th><th>Verdict</th></tr>`;
+        for (const key of layerOrder) {
+          if (!runs[0][key]?.sample) continue;
+          const vals = runs.map(r => r[key].sample);
+          let maxSp = 0, totalSp = 0, cnt = 0;
+          for (let i = 0; i < vals[0].length; i++) {
+            const vs = vals.map(v => v[i]);
+            const sp = Math.max(...vs) - Math.min(...vs);
+            totalSp += sp; maxSp = Math.max(maxSp, sp); cnt++;
+          }
+          const meanSp = totalSp / cnt;
+          const verdict = maxSp === 0 ? '<span class="good">DETERMINISTIC</span>' :
+                          maxSp < 1e-6 ? '<span class="mid">~deterministic</span>' :
+                          `<span class="bad">VARIES (${maxSp.toExponential(3)})</span>`;
+          detHtml += `<tr><td>${key}</td><td>${meanSp.toExponential(3)}</td><td>${maxSp.toExponential(3)}</td><td>${verdict}</td></tr>`;
+        }
+        detHtml += `</table></div>`;
+        allHtml = detHtml;
+        resultsDiv.innerHTML = allHtml;
+
+        // === Per-image analysis ===
+        for (const { file, label } of TEST_IMAGES) {
+          log(`Processing: ${label}...`);
+          const img = await loadImage(file);
+          const srcW = img.naturalWidth, srcH = img.naturalHeight;
+
+          // Run our WGSL model with debug
+          const debugResult = await palmModel.debugRun(img);
+
+          // Run MediaPipe GPU and CPU
+          const mpGpuResult = mpGpu.detect(img);
+          const mpCpuResult = mpCpu.detect(img);
+
+          // Run our full pipeline
+          const ourResult = await palmDetector.detectRawWithResize(img, srcW, srcH);
+          const ourDets = ourResult.detections;
+
+          let html = `<div class="section"><h2>${label} (${srcW}×${srcH})</h2>`;
+
+          // === Section 0: Compare GPU letterbox input vs CPU letterbox ===
+          if (debugResult.rawInput) {
+            const gpuInput = debugResult.rawInput;
+            // Create CPU letterbox reference
+            const scale = Math.min(192 / srcW, 192 / srcH);
+            const scaledW = Math.round(srcW * scale);
+            const scaledH = Math.round(srcH * scale);
+            const offsetX = Math.floor((192 - scaledW) / 2);
+            const offsetY = Math.floor((192 - scaledH) / 2);
+            const canvas = new OffscreenCanvas(192, 192);
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, 192, 192);
+            ctx.drawImage(img, 0, 0, srcW, srcH, offsetX, offsetY, scaledW, scaledH);
+            const imageData = ctx.getImageData(0, 0, 192, 192);
+            const pixels = imageData.data;
+            const cpuInput = new Float32Array(3 * 192 * 192);
+            for (let y = 0; y < 192; y++) {
+              for (let x = 0; x < 192; x++) {
+                const srcIdx = (y * 192 + x) * 4;
+                const dstIdx = y * 192 + x;
+                cpuInput[0 * 192 * 192 + dstIdx] = pixels[srcIdx] / 255;
+                cpuInput[1 * 192 * 192 + dstIdx] = pixels[srcIdx + 1] / 255;
+                cpuInput[2 * 192 * 192 + dstIdx] = pixels[srcIdx + 2] / 255;
+              }
+            }
+            const inputComp = compareArrays(gpuInput, cpuInput, 'Letterbox Input (GPU vs CPU Canvas)');
+            html += `<h3>Input Preprocessing: GPU Letterbox vs CPU Canvas2D</h3>`;
+            html += `<pre>`;
+            html += `Total elements: ${inputComp.length} (3×192×192)\n`;
+            html += `Mean |diff|: ${fmtSci(inputComp.meanAbsDiff)}\n`;
+            html += `Max  |diff|: ${fmtSci(inputComp.maxAbsDiff)} at idx ${inputComp.maxIdx}\n`;
+            html += `RMS diff:    ${fmtSci(inputComp.rmsDiff)}\n`;
+            html += `p50/p90/p99: ${fmtSci(inputComp.p50)} / ${fmtSci(inputComp.p90)} / ${fmtSci(inputComp.p99)}\n`;
+            html += `At max: GPU=${inputComp.aAtMax.toFixed(6)} vs CPU=${inputComp.bAtMax.toFixed(6)}\n`;
+            html += inputComp.maxAbsDiff < 0.004 ? `✅ Input preprocessing matches well (within 1/255 quantization)\n`
+                  : `⚠️ Significant input divergence — this propagates through all layers!\n`;
+            html += `</pre>`;
+          }
+
+          // === Section 1: WGSL Layer Activations ===
+          html += `<h3>WGSL Model Layer Activations</h3>`;
+          html += `<table><tr><th>Layer</th><th>Mean</th><th>Min</th><th>Max</th><th>Range</th><th>NonZero</th><th>First 8 values</th></tr>`;
+
+          for (const key of layerOrder) {
+            const s = debugResult[key];
+            if (!s) continue;
+            const range = (s.max - s.min);
+            html += `<tr>
+              <td><b>${key}</b></td>
+              <td>${s.mean?.toFixed(6) ?? '?'}</td>
+              <td>${s.min?.toFixed(6) ?? '?'}</td>
+              <td>${s.max?.toFixed(6) ?? '?'}</td>
+              <td>${range?.toFixed(4) ?? '?'}</td>
+              <td>${s.nonZero ?? '?'}</td>
+              <td style="font-size:9px">${s.sample?.slice(0, 8).map(v => v.toFixed(4)).join(', ') ?? '?'}</td>
+            </tr>`;
+          }
+          html += `</table>`;
+
+          // === Section 2: Raw SSD Output Analysis ===
+          const rawScores = debugResult.rawScores;
+          const rawRegs = debugResult.rawRegressors;
+
+          if (rawScores && rawRegs) {
+            const scoreStats = arrayStats(rawScores);
+            const regStats = arrayStats(rawRegs);
+
+            html += `<h3>Raw SSD Outputs</h3>`;
+            html += `<pre>`;
+            html += `Scores (${rawScores.length}): mean=${scoreStats.mean.toFixed(4)}, std=${scoreStats.std.toFixed(4)}, range=[${scoreStats.min.toFixed(4)}, ${scoreStats.max.toFixed(4)}]\n`;
+            html += `Regressors (${rawRegs.length}): mean=${regStats.mean.toFixed(4)}, std=${regStats.std.toFixed(4)}, range=[${regStats.min.toFixed(4)}, ${regStats.max.toFixed(4)}]\n`;
+
+            // Score distribution
+            let above0 = 0, above1 = 0, above2 = 0, above3 = 0;
+            for (let i = 0; i < rawScores.length; i++) {
+              const sig = 1 / (1 + Math.exp(-rawScores[i]));
+              if (sig > 0.1) above0++;
+              if (sig > 0.3) above1++;
+              if (sig > 0.5) above2++;
+              if (sig > 0.8) above3++;
+            }
+            html += `\nScore sigmoid distribution:\n`;
+            html += `  > 0.1: ${above0}/${rawScores.length}\n`;
+            html += `  > 0.3: ${above1}/${rawScores.length}\n`;
+            html += `  > 0.5: ${above2}/${rawScores.length}\n`;
+            html += `  > 0.8: ${above3}/${rawScores.length}\n`;
+
+            // Top 10 highest-scoring anchors
+            const anchorScores = [];
+            for (let i = 0; i < rawScores.length; i++) {
+              anchorScores.push({ idx: i, logit: rawScores[i], sig: 1 / (1 + Math.exp(-rawScores[i])) });
+            }
+            anchorScores.sort((a, b) => b.sig - a.sig);
+            html += `\nTop 10 anchors by score:\n`;
+            for (let i = 0; i < Math.min(10, anchorScores.length); i++) {
+              const a = anchorScores[i];
+              const layer = a.idx < 864 ? '12x12' : '24x24';
+              // Decode the box for this anchor
+              const regOffset = a.idx * 18;
+              const cx = rawRegs[regOffset]; // raw offset
+              const cy = rawRegs[regOffset + 1];
+              const w = rawRegs[regOffset + 2];
+              const h = rawRegs[regOffset + 3];
+              html += `  #${a.idx} (${layer}): sig=${a.sig.toFixed(4)}, logit=${a.logit.toFixed(4)}, box_reg=[${cx.toFixed(2)}, ${cy.toFixed(2)}, ${w.toFixed(2)}, ${h.toFixed(2)}]\n`;
+            }
+            html += `</pre>`;
+          }
+
+          // === Section 3: Detection Comparison ===
+          const mpGpuLm = mpGpuResult.landmarks || [];
+          const mpCpuLm = mpCpuResult.landmarks || [];
+
+          html += `<h3>Detection Count Comparison</h3>`;
+          html += `<pre>`;
+          html += `Our WGSL:     ${ourDets.length} palm detections\n`;
+          html += `MediaPipe GPU: ${mpGpuLm.length} hands\n`;
+          html += `MediaPipe CPU: ${mpCpuLm.length} hands\n`;
+          html += `</pre>`;
+
+          // Compare our detections
+          if (ourDets.length > 0) {
+            html += `<h3>Our Palm Detections</h3><pre>`;
+            for (let d = 0; d < ourDets.length; d++) {
+              const det = ourDets[d];
+              html += `#${d}: score=${det.score.toFixed(4)}, box=[${det.box.map(v => v.toFixed(4)).join(', ')}]\n`;
+              html += `     kp0(wrist)=(${det.keypoints[0][0].toFixed(4)}, ${det.keypoints[0][1].toFixed(4)})\n`;
+            }
+            html += `</pre>`;
+          }
+
+          // MediaPipe GPU vs CPU landmark comparison (noise floor)
+          if (mpGpuLm.length > 0 && mpCpuLm.length > 0) {
+            // Match by wrist
+            for (let g = 0; g < mpGpuLm.length; g++) {
+              let bestC = 0, bestD = Infinity;
+              for (let c = 0; c < mpCpuLm.length; c++) {
+                const d = Math.sqrt(
+                  (mpGpuLm[g][0].x - mpCpuLm[c][0].x) ** 2 +
+                  (mpGpuLm[g][0].y - mpCpuLm[c][0].y) ** 2
+                );
+                if (d < bestD) { bestD = d; bestC = c; }
+              }
+
+              const gpuLm = mpGpuLm[g];
+              const cpuLm = mpCpuLm[bestC];
+              let totalErr = 0;
+              let errs = [];
+              for (let i = 0; i < 21; i++) {
+                const e = Math.sqrt(
+                  (gpuLm[i].x - cpuLm[i].x) ** 2 +
+                  (gpuLm[i].y - cpuLm[i].y) ** 2
+                );
+                totalErr += e;
+                errs.push(e);
+              }
+              const avgErr = totalErr / 21;
+              const maxErr = Math.max(...errs);
+
+              html += `<h3>MediaPipe GPU vs CPU (hand ${g}) — inherent GPU noise floor</h3>`;
+              html += `<pre>`;
+              html += `Average error: ${(avgErr * 100).toFixed(4)}%\n`;
+              html += `Max error:     ${(maxErr * 100).toFixed(4)}%\n`;
+              html += `This is the MINIMUM achievable error for any GPU implementation.\n`;
+              html += `</pre>`;
+            }
+          }
+
+          // Compare our full landmarks vs MediaPipe
+          const ourFullResult = await handpose.detectWithDebug(img);
+          if (ourFullResult.length > 0 && mpGpuLm.length > 0) {
+            const micro = ourFullResult[0];
+            let bestIdx = 0, bestD = Infinity;
+            for (let j = 0; j < mpGpuLm.length; j++) {
+              const d = Math.sqrt(
+                (micro.landmarks[0].x - mpGpuLm[j][0].x) ** 2 +
+                (micro.landmarks[0].y - mpGpuLm[j][0].y) ** 2
+              );
+              if (d < bestD) { bestD = d; bestIdx = j; }
+            }
+            const mpLm = mpGpuLm[bestIdx];
+            let totalErr = 0;
+            for (let i = 0; i < 21; i++) {
+              totalErr += Math.sqrt(
+                (micro.landmarks[i].x - mpLm[i].x) ** 2 +
+                (micro.landmarks[i].y - mpLm[i].y) ** 2
+              );
+            }
+            const avgErr = totalErr / 21;
+
+            // Also compare with CPU
+            let cpuErr = null;
+            if (mpCpuLm.length > 0) {
+              let bestC = 0, bestCD = Infinity;
+              for (let j = 0; j < mpCpuLm.length; j++) {
+                const d = Math.sqrt(
+                  (micro.landmarks[0].x - mpCpuLm[j][0].x) ** 2 +
+                  (micro.landmarks[0].y - mpCpuLm[j][0].y) ** 2
+                );
+                if (d < bestCD) { bestCD = d; bestC = j; }
+              }
+              let cpuTotal = 0;
+              for (let i = 0; i < 21; i++) {
+                cpuTotal += Math.sqrt(
+                  (micro.landmarks[i].x - mpCpuLm[bestC][i].x) ** 2 +
+                  (micro.landmarks[i].y - mpCpuLm[bestC][i].y) ** 2
+                );
+              }
+              cpuErr = cpuTotal / 21;
+            }
+
+            html += `<h3>Full Pipeline: Our WGSL vs MediaPipe</h3>`;
+            html += `<pre>`;
+            html += `vs MP GPU: ${(avgErr * 100).toFixed(4)}%\n`;
+            if (cpuErr != null) html += `vs MP CPU: ${(cpuErr * 100).toFixed(4)}%\n`;
+            html += `</pre>`;
+          }
+
+          html += `</div>`;
+          allHtml += html;
+          resultsDiv.innerHTML = detHtml + allHtml.replace(detHtml, '');
+        }
+
+        // === Summary ===
+        resultsDiv.innerHTML = detHtml + allHtml.replace(detHtml, '');
+        log('Done!');
+
+      } catch(e) {
+        log('Error: ' + e.message);
+        console.error(e);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

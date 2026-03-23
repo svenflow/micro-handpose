@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WASM Palm Detection + WebGPU Landmarks Test</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; margin: 0; }
+    h1 { color: #8af; }
+    #log { white-space: pre-wrap; line-height: 1.6; }
+    .good { color: #3f8; }
+    .bad { color: #f84; }
+    .info { color: #8af; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.22.0/dist/tf-core.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu@4.22.0/dist/tf-backend-cpu.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/dist/tf-tflite.min.js"></script>
+</head>
+<body>
+  <h1>WASM Palm Detection Test</h1>
+  <p>Runs palm detection via TFLite WASM, compares raw SSD outputs with our WebGPU pipeline.</p>
+  <div id="log">Loading...</div>
+
+  <script type="module">
+    const log = document.getElementById('log');
+    function print(msg, cls) {
+      const span = document.createElement('span');
+      span.className = cls || '';
+      span.textContent = msg + '\n';
+      log.appendChild(span);
+    }
+
+    async function run() {
+      try {
+        log.textContent = '';
+        print('=== Setting up TFLite WASM ===', 'info');
+
+        await tf.setBackend('cpu');
+        await tf.ready();
+        print('tfjs CPU backend ready');
+
+        tflite.setWasmPath('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/wasm/');
+        print('TFLite WASM path set');
+
+        // Load the palm detection model
+        print('Loading palm_detection.tflite...');
+        const wasmModel = await tflite.loadTFLiteModel('weights/palm_detection.tflite');
+        print('Palm detection WASM model loaded!', 'good');
+
+        // Check model info
+        if (wasmModel.modelRunner) {
+          const runner = wasmModel.modelRunner;
+          print(`Inputs: ${runner.getInputCount?.() || 'unknown'}`);
+          print(`Outputs: ${runner.getOutputCount?.() || 'unknown'}`);
+        }
+
+        // Load test image
+        print('\n=== Loading test image ===', 'info');
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = 'test-hands/hand_10.jpg'; // Test Hand — best image
+        });
+        print(`Image: ${img.naturalWidth}x${img.naturalHeight}`);
+
+        // Letterbox resize to 192x192
+        const srcW = img.naturalWidth, srcH = img.naturalHeight;
+        const scale = Math.min(192 / srcW, 192 / srcH);
+        const dstW = Math.round(srcW * scale);
+        const dstH = Math.round(srcH * scale);
+        const offsetX = Math.round((192 - dstW) / 2);
+        const offsetY = Math.round((192 - dstH) / 2);
+
+        const canvas = new OffscreenCanvas(192, 192);
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, 192, 192);
+        ctx.drawImage(img, offsetX, offsetY, dstW, dstH);
+        const imageData = ctx.getImageData(0, 0, 192, 192);
+
+        // Convert to [1, 192, 192, 3] float32 in [0,1]
+        const inputData = new Float32Array(1 * 192 * 192 * 3);
+        for (let i = 0; i < 192 * 192; i++) {
+          inputData[i * 3 + 0] = imageData.data[i * 4 + 0] / 255.0;
+          inputData[i * 3 + 1] = imageData.data[i * 4 + 1] / 255.0;
+          inputData[i * 3 + 2] = imageData.data[i * 4 + 2] / 255.0;
+        }
+        const inputTensor = tf.tensor4d(inputData, [1, 192, 192, 3]);
+        print(`Input tensor shape: ${inputTensor.shape}`);
+
+        // Run WASM inference
+        print('\n=== Running WASM palm detection ===', 'info');
+        const t0 = performance.now();
+        const wasmOutputs = wasmModel.predict(inputTensor);
+        const wasmTime = performance.now() - t0;
+        print(`WASM inference: ${wasmTime.toFixed(1)}ms`);
+
+        // Examine outputs
+        if (wasmOutputs instanceof tf.Tensor) {
+          print(`Single output: shape=${wasmOutputs.shape}`);
+          const data = wasmOutputs.dataSync();
+          print(`Data: length=${data.length}`);
+          // Find top scores
+          const numAnchors = 2016;
+          if (data.length === numAnchors || data.length === numAnchors * 19) {
+            print('Looks like flattened output');
+          }
+        } else {
+          const keys = Object.keys(wasmOutputs);
+          print(`Output keys: ${keys.join(', ')}`);
+          for (const key of keys) {
+            const t = wasmOutputs[key];
+            const data = t.dataSync();
+            print(`  ${key}: shape=${t.shape} length=${data.length}`);
+            // Show stats
+            let min = Infinity, max = -Infinity;
+            for (let i = 0; i < data.length; i++) {
+              if (data[i] < min) min = data[i];
+              if (data[i] > max) max = data[i];
+            }
+            print(`    range: [${min.toFixed(4)}, ${max.toFixed(4)}]`);
+
+            // For scores tensor, count positive logits (above 0 = above 50% after sigmoid)
+            if (t.shape[t.shape.length - 1] === 1 && data.length <= 2016) {
+              let positiveCount = 0;
+              let topScore = -Infinity, topIdx = 0;
+              for (let i = 0; i < data.length; i++) {
+                if (data[i] > 0) positiveCount++;
+                if (data[i] > topScore) { topScore = data[i]; topIdx = i; }
+              }
+              print(`    Positive logits: ${positiveCount}/${data.length}`);
+              print(`    Top score: sigmoid(${topScore.toFixed(4)}) = ${(1 / (1 + Math.exp(-topScore))).toFixed(6)} at anchor ${topIdx}`);
+            }
+          }
+
+          // Decode WASM detections
+          print('\n=== Decoding WASM SSD outputs ===', 'info');
+          const outputKeys = keys;
+          let scoresData, regressorsData;
+
+          for (const key of outputKeys) {
+            const t = wasmOutputs[key];
+            const data = t.dataSync();
+            if (t.shape[t.shape.length - 1] === 1) {
+              scoresData = data;
+              print(`Scores tensor: ${key}`);
+            } else if (t.shape[t.shape.length - 1] === 18) {
+              regressorsData = data;
+              print(`Regressors tensor: ${key}`);
+            }
+          }
+
+          if (scoresData && regressorsData) {
+            // Generate anchors
+            const anchors = [];
+            for (let y = 0; y < 12; y++) {
+              for (let x = 0; x < 12; x++) {
+                for (let a = 0; a < 6; a++) {
+                  anchors.push({ x: (x + 0.5) / 12, y: (y + 0.5) / 12 });
+                }
+              }
+            }
+            for (let y = 0; y < 24; y++) {
+              for (let x = 0; x < 24; x++) {
+                for (let a = 0; a < 2; a++) {
+                  anchors.push({ x: (x + 0.5) / 24, y: (y + 0.5) / 24 });
+                }
+              }
+            }
+
+            // Decode detections
+            const detections = [];
+            for (let i = 0; i < 2016; i++) {
+              const score = 1 / (1 + Math.exp(-scoresData[i]));
+              if (score < 0.5) continue;
+              const anchor = anchors[i];
+              const regBase = i * 18;
+              const cx = anchor.x + regressorsData[regBase] / 192;
+              const cy = anchor.y + regressorsData[regBase + 1] / 192;
+              const w = regressorsData[regBase + 2] / 192;
+              const h = regressorsData[regBase + 3] / 192;
+              const kps = [];
+              for (let k = 0; k < 7; k++) {
+                kps.push([
+                  anchor.x + regressorsData[regBase + 4 + k * 2] / 192,
+                  anchor.y + regressorsData[regBase + 4 + k * 2 + 1] / 192,
+                ]);
+              }
+              detections.push({ score, cx, cy, w, h, kps, anchorIdx: i });
+            }
+
+            print(`\nWASM detections (score > 0.5): ${detections.length}`);
+            detections.sort((a, b) => b.score - a.score);
+            for (const det of detections.slice(0, 5)) {
+              print(`  score=${det.score.toFixed(4)} box=(${det.cx.toFixed(3)},${det.cy.toFixed(3)},${det.w.toFixed(3)},${det.h.toFixed(3)}) anchor=${det.anchorIdx}`);
+              print(`    kp0=(${det.kps[0][0].toFixed(4)},${det.kps[0][1].toFixed(4)}) kp2=(${det.kps[2][0].toFixed(4)},${det.kps[2][1].toFixed(4)})`);
+            }
+          }
+        }
+
+        // Run full comparison with MediaPipe
+        print('\n=== Loading MediaPipe for full comparison ===', 'info');
+        const { createHandpose } = await import('./dist/index.js?v=wasm-test2');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
+        });
+        const webgpuResults = await handpose.detect(img);
+        print(`WebGPU detected ${webgpuResults.length} hands`);
+
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 4,
+        });
+        const mpResults = mpGpu.detect(img);
+        print(`MediaPipe detected ${mpResults.landmarks.length} hands`);
+
+        if (webgpuResults.length > 0 && mpResults.landmarks.length > 0) {
+          const micro = webgpuResults[0].landmarks;
+          const mp = mpResults.landmarks[0];
+          let totalDist = 0;
+          for (let i = 0; i < 21; i++) {
+            const dx = micro[i].x - mp[i].x;
+            const dy = micro[i].y - mp[i].y;
+            totalDist += Math.sqrt(dx * dx + dy * dy) * 100;
+          }
+          print(`WebGPU vs MediaPipe: ${(totalDist / 21).toFixed(3)}%`, totalDist / 21 < 1.5 ? 'good' : 'bad');
+        }
+
+        print('\nDone!', 'good');
+      } catch (e) {
+        print(`ERROR: ${e.message}\n${e.stack}`, 'bad');
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

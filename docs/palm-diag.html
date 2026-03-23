@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Palm Detection Diagnostic</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; margin: 0; }
+    h1 { color: #8af; margin-bottom: 5px; }
+    .subtitle { color: #888; margin-bottom: 20px; font-size: 13px; }
+    #status { color: #888; margin-bottom: 20px; }
+    .section { background: #1a1a1a; border: 1px solid #333; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .section h2 { color: #8af; margin: 0 0 12px 0; font-size: 14px; }
+    .good { color: #3f8; }
+    .mid { color: #fe8; }
+    .bad { color: #f84; }
+    pre { background: #222; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 11px; max-height: 400px; overflow-y: auto; }
+    .canvases { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+    .canvases canvas { border: 1px solid #333; border-radius: 4px; }
+    .metric { display: inline-block; background: #222; padding: 8px 14px; border-radius: 8px; margin: 4px; text-align: center; }
+    .metric .label { font-size: 10px; color: #888; }
+    .metric .value { font-size: 22px; font-weight: bold; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; margin: 12px 0; }
+    td, th { border: 1px solid #333; padding: 4px 8px; }
+    th { background: #222; color: #aaa; }
+  </style>
+</head>
+<body>
+  <h1>Palm Detection Diagnostic</h1>
+  <p class="subtitle">Raw palm detection scores and comparison with MediaPipe for each test image.</p>
+  <div id="status">Initializing...</div>
+  <div id="results"></div>
+
+  <script type="module">
+    const TEST_IMAGES = [
+      { file: 'test-hands/hand_01.jpg', label: 'Hand 01 (640x427)' },
+      { file: 'test-hands/hand_02.jpg', label: 'Hand 02 (640x427)' },
+      { file: 'test-hands/hand_03.jpg', label: 'Hand 03 (640x457)' },
+      { file: 'test-hands/hand_04.jpg', label: 'Hand 04 (640x426)' },
+      { file: 'test-hands/hand_05.jpg', label: 'Hand 05 (1500x1500)' },
+      { file: 'test-hands/hand_06.jpg', label: 'Hand 06 (640x427)' },
+      { file: 'test-hands/hand_07.jpg', label: 'Hand 07 (640x427)' },
+      { file: 'test-hands/hand_08.jpg', label: 'Hand 08 (640x960)' },
+      { file: 'test-hands/hand_09.jpg', label: 'Hand 09 (1500x2000)' },
+      { file: 'test-hands/hand_10.jpg', label: 'Hand 10 (640x960)' },
+    ];
+
+    const status = document.getElementById('status');
+    const resultsDiv = document.getElementById('results');
+
+    async function loadImage(src) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      return new Promise((resolve, reject) => {
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`Failed: ${src}`));
+        img.src = src;
+      });
+    }
+
+    async function run() {
+      try {
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=rebuild2');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.01,       // Very low to see all detections
+          palmScoreThreshold: 0.01,   // Very low to see all raw scores
+        });
+
+        status.textContent = 'Loading MediaPipe...';
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 4,
+        });
+
+        let totalMicro = 0, totalMP = 0, bothDetected = 0, microOnly = 0, mpOnly = 0;
+
+        for (let imgIdx = 0; imgIdx < TEST_IMAGES.length; imgIdx++) {
+          const { file, label } = TEST_IMAGES[imgIdx];
+          status.textContent = `Processing ${imgIdx + 1}/${TEST_IMAGES.length}: ${label}...`;
+
+          const img = await loadImage(file);
+          const srcW = img.naturalWidth, srcH = img.naturalHeight;
+
+          // Run micro-handpose with debug
+          const microResults = await handpose.detectWithDebug(img);
+
+          // Run MediaPipe
+          const mpResults = mpGpu.detect(img);
+          const mpLandmarks = mpResults.landmarks || [];
+
+          const microCount = microResults.length;
+          const mpCount = mpLandmarks.length;
+
+          totalMicro += microCount;
+          totalMP += mpCount;
+          if (microCount > 0 && mpCount > 0) bothDetected++;
+          if (microCount > 0 && mpCount === 0) microOnly++;
+          if (microCount === 0 && mpCount > 0) mpOnly++;
+
+          let html = `<div class="section">
+            <h2>${imgIdx + 1}. ${label}</h2>
+            <div>
+              <div class="metric"><div class="label">Micro detections</div><div class="value ${microCount > 0 ? 'good' : 'bad'}">${microCount}</div></div>
+              <div class="metric"><div class="label">MediaPipe detections</div><div class="value ${mpCount > 0 ? 'good' : 'bad'}">${mpCount}</div></div>
+            </div>`;
+
+          if (microResults.length > 0) {
+            html += `<table><tr><th>#</th><th>Palm Score</th><th>Hand Score</th><th>Handedness</th><th>Box (cx,cy,w,h)</th><th>ROI center</th><th>ROI size</th><th>ROI rot</th></tr>`;
+            for (let i = 0; i < microResults.length; i++) {
+              const r = microResults[i];
+              const pd = r.palmDetection;
+              html += `<tr>
+                <td>${i}</td>
+                <td class="${pd.score > 0.5 ? 'good' : pd.score > 0.1 ? 'mid' : 'bad'}">${pd.score.toFixed(4)}</td>
+                <td class="${r.score > 0.5 ? 'good' : r.score > 0.1 ? 'mid' : 'bad'}">${r.score.toFixed(4)}</td>
+                <td>${r.handedness}</td>
+                <td>${pd.box.map(v => v.toFixed(4)).join(', ')}</td>
+                <td>(${r.roi.centerXpx.toFixed(1)}, ${r.roi.centerYpx.toFixed(1)})</td>
+                <td>${r.roi.sizePx.toFixed(1)}</td>
+                <td>${(r.roi.rotation * 180 / Math.PI).toFixed(1)}&deg;</td>
+              </tr>`;
+            }
+            html += `</table>`;
+          }
+
+          if (mpLandmarks.length > 0 && microResults.length > 0) {
+            // Compare matched hands
+            html += `<pre>Landmark comparison:\n`;
+            for (let mi = 0; mi < microResults.length; mi++) {
+              const microLm = microResults[mi].landmarks;
+              // Find closest MP hand by wrist distance
+              let bestJ = 0, bestDist = Infinity;
+              for (let j = 0; j < mpLandmarks.length; j++) {
+                const d = Math.sqrt(
+                  (microLm[0].x - mpLandmarks[j][0].x) ** 2 +
+                  (microLm[0].y - mpLandmarks[j][0].y) ** 2
+                );
+                if (d < bestDist) { bestDist = d; bestJ = j; }
+              }
+              const mp = mpLandmarks[bestJ];
+              const errors = [];
+              for (let k = 0; k < 21; k++) {
+                errors.push(Math.sqrt(
+                  (microLm[k].x - mp[k].x) ** 2 +
+                  (microLm[k].y - mp[k].y) ** 2
+                ));
+              }
+              const avg = errors.reduce((s,v) => s+v, 0) / 21;
+              const max = Math.max(...errors);
+              html += `  Hand ${mi}: avg=${(avg*100).toFixed(3)}% max=${(max*100).toFixed(3)}% (matched MP hand ${bestJ})\n`;
+            }
+            html += `</pre>`;
+          } else if (microResults.length === 0 && mpLandmarks.length > 0) {
+            html += `<pre class="bad">MISSED: MediaPipe found ${mpCount} hand(s) but micro-handpose found none!</pre>`;
+          } else if (microResults.length > 0 && mpLandmarks.length === 0) {
+            html += `<pre class="mid">EXTRA: micro-handpose found ${microCount} hand(s) but MediaPipe found none.</pre>`;
+          }
+
+          html += `</div>`;
+          resultsDiv.innerHTML += html;
+        }
+
+        // Summary
+        const summaryHtml = `<div class="section" style="border-color: #8af;">
+          <h2>Summary</h2>
+          <div>
+            <div class="metric"><div class="label">Total micro detections</div><div class="value">${totalMicro}</div></div>
+            <div class="metric"><div class="label">Total MP detections</div><div class="value">${totalMP}</div></div>
+            <div class="metric"><div class="label">Both detected</div><div class="value good">${bothDetected}</div></div>
+            <div class="metric"><div class="label">Micro only</div><div class="value mid">${microOnly}</div></div>
+            <div class="metric"><div class="label">MP only (missed)</div><div class="value ${mpOnly > 0 ? 'bad' : 'good'}">${mpOnly}</div></div>
+          </div>
+        </div>`;
+        resultsDiv.innerHTML = summaryHtml + resultsDiv.innerHTML;
+
+        status.textContent = 'Done!';
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        console.error(e);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

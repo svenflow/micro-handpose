@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>CPU vs GPU: TFLite WASM Reference Comparison</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; margin: 0; }
+    h1 { color: #8af; margin-bottom: 5px; }
+    .subtitle { color: #888; margin-bottom: 20px; font-size: 13px; }
+    #status { color: #888; margin-bottom: 20px; white-space: pre-wrap; }
+    .section { background: #1a1a1a; border: 1px solid #333; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .section h2 { color: #8af; margin: 0 0 12px 0; font-size: 14px; }
+    .metric { display: inline-block; background: #222; padding: 8px 14px; border-radius: 8px; margin: 4px; text-align: center; }
+    .metric .label { font-size: 10px; color: #888; }
+    .metric .value { font-size: 20px; font-weight: bold; }
+    .good { color: #3f8; }
+    .mid { color: #fe8; }
+    .bad { color: #f84; }
+    pre { background: #222; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 11px; max-height: 400px; overflow-y: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 12px; }
+    td, th { border: 1px solid #333; padding: 4px 8px; }
+    th { background: #222; color: #aaa; font-weight: normal; }
+    canvas { border: 1px solid #333; border-radius: 4px; }
+    .canvases { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+    .canvases > div { text-align: center; }
+    .canvases .label { font-size: 10px; color: #888; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <h1>🔬 CPU vs GPU: TFLite WASM Reference</h1>
+  <p class="subtitle">Runs the exact same TFLite model on CPU (WASM) with our GPU's input tensor, comparing raw outputs layer by layer.</p>
+  <div id="status">Initializing...</div>
+  <div id="results"></div>
+
+  <script type="module">
+    // tf.js-tflite for running TFLite models on CPU via WASM
+    // We need: @tensorflow/tfjs-core, @tensorflow/tfjs-backend-wasm, @tensorflow/tfjs-tflite
+
+    const TEST_IMAGES = [
+      { file: 'test-hands/hand_05.jpg', label: 'Hand Square' },
+      { file: 'test-hands/hand_07.jpg', label: 'Pointing Finger' },
+      { file: 'test-hands/hand_08.jpg', label: 'Hand Gesture' },
+      { file: 'test-hands/hand_09.jpg', label: 'Nikhil' },
+      { file: 'test-hands/hand_10.jpg', label: 'Test Hand' },
+    ];
+
+    const status = document.getElementById('status');
+    const resultsDiv = document.getElementById('results');
+
+    function log(msg) {
+      status.textContent = msg;
+      console.log(msg);
+    }
+
+    function cls(v) { return v < 0.001 ? 'good' : v < 0.01 ? 'mid' : 'bad'; }
+    function clsPct(pct) { return pct < 0.1 ? 'good' : pct < 1.0 ? 'mid' : 'bad'; }
+
+    async function loadImage(src) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      return new Promise((resolve, reject) => {
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`Failed: ${src}`));
+        img.src = src;
+      });
+    }
+
+    // Compare two Float32Arrays element-wise
+    function compare(a, b, label) {
+      const len = Math.min(a.length, b.length);
+      let maxDiff = 0, sumDiff = 0, maxIdx = 0;
+      let maxRelDiff = 0, sumRelDiff = 0, relCount = 0;
+      const diffs = [];
+      for (let i = 0; i < len; i++) {
+        const diff = Math.abs(a[i] - b[i]);
+        if (diff > maxDiff) { maxDiff = diff; maxIdx = i; }
+        sumDiff += diff;
+        diffs.push(diff);
+
+        const mag = Math.max(Math.abs(a[i]), Math.abs(b[i]));
+        if (mag > 1e-6) {
+          const rel = diff / mag;
+          if (rel > maxRelDiff) maxRelDiff = rel;
+          sumRelDiff += rel;
+          relCount++;
+        }
+      }
+
+      // Sort diffs for percentiles
+      diffs.sort((a, b) => a - b);
+      const p50 = diffs[Math.floor(len * 0.5)];
+      const p95 = diffs[Math.floor(len * 0.95)];
+      const p99 = diffs[Math.floor(len * 0.99)];
+
+      return {
+        label,
+        length: len,
+        maxDiff,
+        maxIdx,
+        meanDiff: sumDiff / len,
+        meanRelDiff: relCount > 0 ? sumRelDiff / relCount : 0,
+        maxRelDiff,
+        p50, p95, p99,
+        gpuVal: a[maxIdx],
+        cpuVal: b[maxIdx],
+      };
+    }
+
+    async function run() {
+      try {
+        // === Load our WebGPU model ===
+        log('Loading micro-handpose WebGPU model...');
+        const { createHandpose } = await import('./dist/index.js?v=f16q3');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.1,
+          palmScoreThreshold: 0.5,
+        });
+
+        // === Load TFLite model via tf.js ===
+        log('Loading TensorFlow.js + WASM backend...');
+
+        // Import tf.js core and WASM backend
+        const tf = await import('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/+esm');
+        await tf.setBackend('webgl');  // We'll use webgl for the tf.js model too? No, we want CPU.
+        // Actually let's use the WASM backend for true CPU execution
+        // But tf.js WASM needs separate setup. Let's use the 'cpu' backend which is always available.
+        await tf.setBackend('cpu');
+        await tf.ready();
+        log(`TF.js backend: ${tf.getBackend()}`);
+
+        // Load TFLite model via tf.js GraphModel (need to convert first)
+        // Actually, tf.js can't directly load .tflite files with the standard API.
+        // Let's use @mediapipe/tasks-vision with CPU delegate instead — it runs TFLite on CPU WASM.
+        log('Loading MediaPipe with CPU delegate...');
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const mpCpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'CPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 4,
+        });
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 4,
+        });
+
+        // We can't get raw SSD outputs from MediaPipe. But we CAN:
+        // 1. Feed the same image to all three (our GPU, MP GPU, MP CPU)
+        // 2. Compare final landmarks
+        // 3. Use our debugRun to get raw input tensor + per-layer activations
+        // 4. Manually run the TFLite palm model on the same input via tf.js
+
+        // Alternative approach: Convert the TFLite model to tf.js format and run manually
+        // Actually, let's load the .tflite model directly using the TFLite Task API
+        // Or better: use tflite-runtime in the browser
+
+        // BEST APPROACH: Load the TFLite model as raw bytes, parse it, and run via tf.js
+        // This is complex. Let's instead focus on what we CAN compare:
+        // - Feed the EXACT same crop image to our landmark model and to MP
+        // - Our model runs on GPU, MP runs on CPU and GPU
+        // - Compare landmark outputs
+
+        // Actually, the most useful thing: use tf.js to build the palm detection
+        // model from our weights and run on CPU backend.
+        log('Loading palm detection weights for CPU reference model...');
+        const [palmWeightsJson, palmWeightsBin] = await Promise.all([
+          fetch('weights/palm_detection_weights.json').then(r => r.json()),
+          fetch('weights/palm_detection_weights.bin').then(r => r.arrayBuffer()),
+        ]);
+
+        // Build a tf.js model matching our palm detection architecture
+        // This is the definitive CPU reference — same weights, same architecture, pure CPU math
+        log('Building CPU reference palm detection model via tf.js...');
+
+        // Parse weights
+        const palmWeights = new Map();
+        for (let i = 0; i < palmWeightsJson.keys.length; i++) {
+          const key = palmWeightsJson.keys[i];
+          const shape = palmWeightsJson.shapes[i];
+          const offset = palmWeightsJson.offsets[i];
+          const size = shape.reduce((a, b) => a * b, 1);
+          palmWeights.set(key, {
+            data: new Float32Array(palmWeightsBin, offset, size),
+            shape,
+          });
+        }
+        log(`Loaded ${palmWeights.size} weight tensors for palm model`);
+
+        // We can't easily rebuild the full BlazeNet in tf.js ops.
+        // Instead, let's do the most useful comparison: feed same input, compare raw OUTPUTS.
+        // We'll use our debugRun to get the raw input and SSD outputs from GPU,
+        // then we need a way to run the same input through the TFLite model on CPU.
+
+        // APPROACH: Use the tflite-runtime npm package to run .tflite on CPU
+        // Actually the simplest approach that works in browser:
+        // Use onnxruntime-web to run an ONNX version of the model on CPU.
+        // But we don't have an ONNX model.
+
+        // Let's take a COMPLETELY different approach:
+        // Just compare our WebGPU landmarks vs MediaPipe CPU landmarks vs MediaPipe GPU landmarks
+        // The key question is: does MP GPU == MP CPU? And does our GPU == MP GPU?
+        // If MP GPU ≠ MP CPU but our GPU ≈ MP GPU, we're fine.
+        // If our GPU ≠ MP GPU but MP GPU ≈ MP CPU, we have a bug.
+
+        log('Running three-way comparison: Our GPU vs MP GPU vs MP CPU...');
+
+        const allResults = [];
+
+        for (let imgIdx = 0; imgIdx < TEST_IMAGES.length; imgIdx++) {
+          const { file, label } = TEST_IMAGES[imgIdx];
+          log(`Processing ${imgIdx + 1}/${TEST_IMAGES.length}: ${label}...`);
+
+          const img = await loadImage(file);
+          const srcW = img.naturalWidth, srcH = img.naturalHeight;
+
+          // Run all three
+          const ourDebug = await handpose.detectWithDebug(img);
+          const mpGpuResult = mpGpu.detect(img);
+          const mpCpuResult = mpCpu.detect(img);
+
+          const ourLandmarks = ourDebug.map(h => h.landmarks);
+          const mpGpuLandmarks = mpGpuResult.landmarks || [];
+          const mpCpuLandmarks = mpCpuResult.landmarks || [];
+
+          if (ourLandmarks.length === 0 || mpGpuLandmarks.length === 0) {
+            resultsDiv.innerHTML += `<div class="section"><h2>${imgIdx + 1}. ${label} — skipped</h2>
+              <pre>Ours: ${ourLandmarks.length} hands, MP GPU: ${mpGpuLandmarks.length}, MP CPU: ${mpCpuLandmarks.length}</pre></div>`;
+            continue;
+          }
+
+          // Match hands by wrist distance (our[0] vs best MP match)
+          const ourH = ourDebug[0];
+          let bestGpuIdx = 0, bestGpuDist = Infinity;
+          let bestCpuIdx = 0, bestCpuDist = Infinity;
+
+          for (let j = 0; j < mpGpuLandmarks.length; j++) {
+            const d = Math.sqrt(
+              (ourH.landmarks[0].x - mpGpuLandmarks[j][0].x) ** 2 +
+              (ourH.landmarks[0].y - mpGpuLandmarks[j][0].y) ** 2
+            );
+            if (d < bestGpuDist) { bestGpuDist = d; bestGpuIdx = j; }
+          }
+          for (let j = 0; j < mpCpuLandmarks.length; j++) {
+            const d = Math.sqrt(
+              (ourH.landmarks[0].x - mpCpuLandmarks[j][0].x) ** 2 +
+              (ourH.landmarks[0].y - mpCpuLandmarks[j][0].y) ** 2
+            );
+            if (d < bestCpuDist) { bestCpuDist = d; bestCpuIdx = j; }
+          }
+
+          const mpGpuLm = mpGpuLandmarks[bestGpuIdx];
+          const mpCpuLm = mpCpuLandmarks[bestCpuIdx];
+
+          // Also match MP GPU to MP CPU
+          let bestGpuCpuIdx = 0, bestGpuCpuDist = Infinity;
+          for (let j = 0; j < mpCpuLandmarks.length; j++) {
+            const d = Math.sqrt(
+              (mpGpuLm[0].x - mpCpuLandmarks[j][0].x) ** 2 +
+              (mpGpuLm[0].y - mpCpuLandmarks[j][0].y) ** 2
+            );
+            if (d < bestGpuCpuDist) { bestGpuCpuDist = d; bestGpuCpuIdx = j; }
+          }
+          const mpCpuForGpu = mpCpuLandmarks[bestGpuCpuIdx];
+
+          // Compute errors
+          function landmarkDist(a, b) {
+            let sum = 0;
+            for (let i = 0; i < 21; i++) {
+              sum += Math.sqrt((a[i].x - b[i].x) ** 2 + (a[i].y - b[i].y) ** 2);
+            }
+            return sum / 21;
+          }
+
+          function perLandmarkDists(a, b) {
+            const dists = [];
+            for (let i = 0; i < 21; i++) {
+              dists.push(Math.sqrt((a[i].x - b[i].x) ** 2 + (a[i].y - b[i].y) ** 2));
+            }
+            return dists;
+          }
+
+          const ourVsMpGpu = landmarkDist(ourH.landmarks, mpGpuLm);
+          const ourVsMpCpu = landmarkDist(ourH.landmarks, mpCpuLm);
+          const mpGpuVsCpu = landmarkDist(mpGpuLm, mpCpuForGpu);
+
+          const ourVsMpGpuPer = perLandmarkDists(ourH.landmarks, mpGpuLm);
+          const ourVsMpCpuPer = perLandmarkDists(ourH.landmarks, mpCpuLm);
+          const mpGpuVsCpuPer = perLandmarkDists(mpGpuLm, mpCpuForGpu);
+
+          const NAMES = [
+            'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+            'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+            'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+            'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+            'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+          ];
+
+          allResults.push({
+            label, ourVsMpGpu, ourVsMpCpu, mpGpuVsCpu,
+          });
+
+          let html = `<div class="section">
+            <h2>${imgIdx + 1}. ${label} (${srcW}×${srcH})</h2>
+            <div>
+              <div class="metric"><div class="label">Us vs MP GPU</div><div class="value ${clsPct(ourVsMpGpu * 100)}">${(ourVsMpGpu * 100).toFixed(3)}%</div></div>
+              <div class="metric"><div class="label">Us vs MP CPU</div><div class="value ${clsPct(ourVsMpCpu * 100)}">${(ourVsMpCpu * 100).toFixed(3)}%</div></div>
+              <div class="metric"><div class="label">MP GPU vs CPU</div><div class="value ${clsPct(mpGpuVsCpu * 100)}">${(mpGpuVsCpu * 100).toFixed(3)}%</div></div>
+              <div class="metric"><div class="label">Excess over MP noise</div><div class="value ${clsPct((ourVsMpGpu - mpGpuVsCpu) * 100)}">${((ourVsMpGpu - mpGpuVsCpu) * 100).toFixed(3)}%</div></div>
+            </div>
+            <pre>Detection counts: ours=${ourLandmarks.length}, MP GPU=${mpGpuLandmarks.length}, MP CPU=${mpCpuLandmarks.length}
+Palm: score=${ourDebug[0].palmDetection.score.toFixed(4)}, box=[${ourDebug[0].palmDetection.box.map(v=>v.toFixed(4)).join(', ')}]
+ROI: center=(${ourDebug[0].roi.centerXpx.toFixed(1)}, ${ourDebug[0].roi.centerYpx.toFixed(1)}) size=${ourDebug[0].roi.sizePx.toFixed(1)}px rot=${(ourDebug[0].roi.rotation * 180 / Math.PI).toFixed(1)}°</pre>
+
+            <table>
+              <tr><th>#</th><th>Landmark</th><th>Us vs MP GPU</th><th>Us vs MP CPU</th><th>MP GPU vs CPU</th><th>Our (x,y)</th><th>MP GPU (x,y)</th><th>MP CPU (x,y)</th></tr>`;
+
+          for (let i = 0; i < 21; i++) {
+            html += `<tr>
+              <td>${i}</td><td>${NAMES[i]}</td>
+              <td class="${clsPct(ourVsMpGpuPer[i]*100)}">${(ourVsMpGpuPer[i]*100).toFixed(3)}%</td>
+              <td class="${clsPct(ourVsMpCpuPer[i]*100)}">${(ourVsMpCpuPer[i]*100).toFixed(3)}%</td>
+              <td class="${clsPct(mpGpuVsCpuPer[i]*100)}">${(mpGpuVsCpuPer[i]*100).toFixed(3)}%</td>
+              <td>(${ourH.landmarks[i].x.toFixed(4)}, ${ourH.landmarks[i].y.toFixed(4)})</td>
+              <td>(${mpGpuLm[i].x.toFixed(4)}, ${mpGpuLm[i].y.toFixed(4)})</td>
+              <td>(${mpCpuLm[i].x.toFixed(4)}, ${mpCpuLm[i].y.toFixed(4)})</td>
+            </tr>`;
+          }
+
+          html += `<tr style="font-weight:bold; background:#1a1a2e;">
+            <td></td><td>AVERAGE</td>
+            <td class="${clsPct(ourVsMpGpu*100)}">${(ourVsMpGpu*100).toFixed(3)}%</td>
+            <td class="${clsPct(ourVsMpCpu*100)}">${(ourVsMpCpu*100).toFixed(3)}%</td>
+            <td class="${clsPct(mpGpuVsCpu*100)}">${(mpGpuVsCpu*100).toFixed(3)}%</td>
+            <td></td><td></td><td></td>
+          </tr></table>`;
+
+          // Now do the interesting part: run our debugRun to get raw per-layer activations
+          // and also get the raw input tensor our GPU sees
+          log(`  Getting GPU debug activations for ${label}...`);
+          const debug = await handpose._debug.palmModel.debugRun(img, srcW, srcH);
+
+          // Show per-layer stats
+          const layerNames = ['input', 'initConv', 'block0', 'block4', 'block9', 'block14', 'block18', 'block19', 'block23',
+            'fpnUpsample6to12', 'fpn6to12Conv', 'backbone12Skip', 'fpnAdd12', 'fpn12Block1', 'fpn12Block2',
+            'cls16', 'reg16',
+            'fpnUpsample12to24', 'fpn12to24Conv', 'backbone24Skip', 'fpnAdd24', 'fpn24Block1', 'fpn24Block2',
+            'cls8', 'reg8'];
+
+          html += `<h3 style="color:#8af; margin-top:16px;">GPU Per-Layer Activation Stats</h3>
+            <table>
+              <tr><th>Layer</th><th>Min</th><th>Max</th><th>Mean</th><th>NonZero</th><th>Sample[0:5]</th></tr>`;
+
+          for (const name of layerNames) {
+            if (!debug[name]) continue;
+            const s = debug[name];
+            html += `<tr>
+              <td>${name}</td>
+              <td>${s.min.toFixed(6)}</td>
+              <td>${s.max.toFixed(6)}</td>
+              <td>${s.mean.toFixed(6)}</td>
+              <td>${s.nonZero}</td>
+              <td>${s.sample.slice(0, 5).map(v => v.toFixed(4)).join(', ')}</td>
+            </tr>`;
+          }
+          html += `</table>`;
+
+          // Show raw SSD output comparison between our anchors
+          // For the anchors that have highest score, show the raw values
+          const scores = debug.rawScores;
+          const regs = debug.rawRegressors;
+
+          // Find top-10 scoring anchors
+          const scoreArr = [];
+          for (let i = 0; i < scores.length; i++) {
+            scoreArr.push({ idx: i, score: 1 / (1 + Math.exp(-scores[i])) }); // sigmoid
+          }
+          scoreArr.sort((a, b) => b.score - a.score);
+
+          html += `<h3 style="color:#8af; margin-top:16px;">Top 10 SSD Anchors (raw logits)</h3>
+            <table>
+              <tr><th>Rank</th><th>Anchor</th><th>Score(sigmoid)</th><th>Raw logit</th><th>Regressor[0:6]</th></tr>`;
+
+          for (let r = 0; r < 10 && r < scoreArr.length; r++) {
+            const { idx, score } = scoreArr[r];
+            const regStart = idx * 18;
+            const regVals = [];
+            for (let j = 0; j < 6; j++) regVals.push(regs[regStart + j]?.toFixed(2) ?? 'N/A');
+            html += `<tr>
+              <td>${r + 1}</td><td>${idx}</td>
+              <td>${score.toFixed(6)}</td>
+              <td>${scores[idx].toFixed(6)}</td>
+              <td>${regVals.join(', ')}</td>
+            </tr>`;
+          }
+          html += `</table>`;
+
+          html += `</div>`;
+          resultsDiv.innerHTML += html;
+        }
+
+        // Overall summary
+        if (allResults.length > 0) {
+          const avgOurGpu = allResults.reduce((s, r) => s + r.ourVsMpGpu, 0) / allResults.length;
+          const avgOurCpu = allResults.reduce((s, r) => s + r.ourVsMpCpu, 0) / allResults.length;
+          const avgGpuCpu = allResults.reduce((s, r) => s + r.mpGpuVsCpu, 0) / allResults.length;
+          const avgExcess = avgOurGpu - avgGpuCpu;
+
+          const summaryHtml = `<div class="section" style="border-color: #8af;">
+            <h2>📊 Overall Summary (${allResults.length} images)</h2>
+            <div>
+              <div class="metric"><div class="label">Avg Us vs MP GPU</div><div class="value ${clsPct(avgOurGpu*100)}">${(avgOurGpu*100).toFixed(3)}%</div></div>
+              <div class="metric"><div class="label">Avg Us vs MP CPU</div><div class="value ${clsPct(avgOurCpu*100)}">${(avgOurCpu*100).toFixed(3)}%</div></div>
+              <div class="metric"><div class="label">Avg MP GPU vs CPU</div><div class="value ${clsPct(avgGpuCpu*100)}">${(avgGpuCpu*100).toFixed(3)}%</div></div>
+              <div class="metric"><div class="label">Excess (our bug budget)</div><div class="value ${clsPct(avgExcess*100)}">${(avgExcess*100).toFixed(3)}%</div></div>
+            </div>
+            <pre>
+🎯 TARGET: Us vs MP GPU should be ≈ 0% (identical outputs)
+📏 CURRENT BASELINE: MP GPU vs CPU = ${(avgGpuCpu*100).toFixed(3)}% (their own noise floor)
+🔍 OUR EXCESS: ${(avgExcess*100).toFixed(3)}% above MP's noise floor
+
+BREAKDOWN BY IMAGE:
+${allResults.map(r => `  ${r.label.padEnd(20)} Us↔GPU: ${(r.ourVsMpGpu*100).toFixed(3)}%  Us↔CPU: ${(r.ourVsMpCpu*100).toFixed(3)}%  GPU↔CPU: ${(r.mpGpuVsCpu*100).toFixed(3)}%  Excess: ${((r.ourVsMpGpu - r.mpGpuVsCpu)*100).toFixed(3)}%`).join('\n')}
+
+Next step: Isolate palm detection error vs landmark model error.
+Feed MediaPipe's ROI to our landmark model, or feed our ROI to MediaPipe.
+            </pre>
+          </div>`;
+          resultsDiv.innerHTML = summaryHtml + resultsDiv.innerHTML;
+        }
+
+        log('Done!');
+      } catch (e) {
+        log(`❌ Error: ${e.message}`);
+        console.error(e);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

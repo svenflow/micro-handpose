@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Resize Path Comparison: Canvas2D vs GPU</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 10px; font-size: 11px; }
+    pre { background: #222; padding: 8px; border-radius: 4px; font-size: 10px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h2>Canvas2D vs GPU Letterbox Resize → Palm Detection Comparison</h2>
+  <div id="status">Starting...</div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    const IMAGES = [
+      'test-hands/hand_05.jpg','test-hands/hand_06.jpg',
+      'test-hands/hand_07.jpg','test-hands/hand_08.jpg','test-hands/hand_09.jpg',
+      'test-hands/hand_10.jpg','hand_nikhil.jpg',
+    ];
+
+    function sigmoid(x) { return 1/(1+Math.exp(-x)); }
+
+    async function run() {
+      try {
+        const { createHandpose } = await import('./dist/index.js?v=rzcmp1');
+        const handpose = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.01, palmScoreThreshold: 0.01 });
+        log('loaded');
+
+        const pd = handpose._debug?.palmDetector;
+        if (!pd?.detectRawSSD || !pd?.model) { log('ERROR: need detectRawSSD and model'); return; }
+
+        for (const src of IMAGES) {
+          status.textContent = src;
+          const img = new Image(); img.crossOrigin = 'anonymous';
+          try { await new Promise((r,e) => { img.onload=r; img.onerror=e; img.src=src; }); } catch(e) { continue; }
+          const W = img.naturalWidth, H = img.naturalHeight;
+          const name = src.split('/').pop();
+
+          // === Path A: GPU letterbox resize ===
+          const { scores: gpuScores, regressors: gpuRegs, lbPadX, lbPadY } = await pd.detectRawSSD(img, W, H);
+
+          // === Path B: Canvas2D letterbox resize + model.run() ===
+          const scale = Math.min(192 / W, 192 / H);
+          const scaledW = Math.round(W * scale);
+          const scaledH = Math.round(H * scale);
+          const offsetX = Math.floor((192 - scaledW) / 2);
+          const offsetY = Math.floor((192 - scaledH) / 2);
+
+          const canvas = new OffscreenCanvas(192, 192);
+          const ctx = canvas.getContext('2d');
+          ctx.clearRect(0, 0, 192, 192);
+          ctx.drawImage(img, 0, 0, W, H, offsetX, offsetY, scaledW, scaledH);
+
+          const canvasOutput = await pd.model.run(canvas);
+          const canvasScores = canvasOutput.scores;
+          const canvasRegs = canvasOutput.regressors;
+
+          // Find top anchor for each
+          let gpuTopIdx = 0, gpuTopScore = -Infinity;
+          let canvasTopIdx = 0, canvasTopScore = -Infinity;
+          for (let i = 0; i < gpuScores.length; i++) {
+            if (gpuScores[i] > gpuTopScore) { gpuTopScore = gpuScores[i]; gpuTopIdx = i; }
+            if (canvasScores[i] > canvasTopScore) { canvasTopScore = canvasScores[i]; canvasTopIdx = i; }
+          }
+
+          log('\n' + '='.repeat(50));
+          log(`${name} (${W}x${H}) lb=(${lbPadX.toFixed(4)},${lbPadY.toFixed(4)})`);
+          log(`GPU top:    idx=${gpuTopIdx} score=${sigmoid(gpuTopScore).toFixed(5)}`);
+          log(`Canvas top: idx=${canvasTopIdx} score=${sigmoid(canvasTopScore).toFixed(5)}`);
+          log(`Same anchor: ${gpuTopIdx === canvasTopIdx ? '✓' : '⚠ DIFF'}`);
+
+          // Compare regressors at the GPU top anchor
+          const gi = gpuTopIdx * 18;
+          const ci = gpuTopIdx * 18;
+          const gpuReg = Array.from(gpuRegs.slice(gi, gi+18));
+          const canvasReg = Array.from(canvasRegs.slice(ci, ci+18));
+          const delta = gpuReg.map((v,i) => v - canvasReg[i]);
+          log(`GPU   reg[0..3]: [${gpuReg.slice(0,4).map(v=>v.toFixed(3)).join(',')}]`);
+          log(`Canvas reg[0..3]: [${canvasReg.slice(0,4).map(v=>v.toFixed(3)).join(',')}]`);
+          log(`Delta reg[0..3]: [${delta.slice(0,4).map(v=>v.toFixed(3)).join(',')}]`);
+          log(`Delta norm: ${Math.sqrt(delta.slice(0,4).reduce((s,v)=>s+v*v,0)).toFixed(4)}`);
+
+          // Overall score correlation
+          let sumSqDiff = 0, count = 0;
+          for (let i = 0; i < gpuScores.length; i++) {
+            const d = sigmoid(gpuScores[i]) - sigmoid(canvasScores[i]);
+            sumSqDiff += d*d;
+            count++;
+          }
+          log(`Score RMSE: ${Math.sqrt(sumSqDiff/count).toFixed(6)}`);
+
+          // Compare top 5 regressors (center offsets only)
+          let regDiffSum = 0, regCount = 0;
+          for (let i = 0; i < gpuScores.length; i++) {
+            if (sigmoid(gpuScores[i]) > 0.5) {
+              for (let j = 0; j < 4; j++) {
+                const d = gpuRegs[i*18+j] - canvasRegs[i*18+j];
+                regDiffSum += d*d;
+                regCount++;
+              }
+            }
+          }
+          if (regCount > 0) {
+            log(`High-score reg RMSE (cx,cy,w,h): ${Math.sqrt(regDiffSum/regCount).toFixed(4)}`);
+          }
+        }
+
+        status.textContent = 'Done!';
+      } catch(e) {
+        log('FATAL: ' + e.message + '\n' + e.stack);
+        status.textContent = 'ERROR';
+      }
+    }
+    run();
+  </script>
+</body>
+</html>

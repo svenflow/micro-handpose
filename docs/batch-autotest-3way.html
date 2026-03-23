@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>3-Way Comparison</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 10px; font-size: 11px; }
+    pre { background: #222; padding: 8px; border-radius: 4px; font-size: 10px; white-space: pre-wrap; }
+    .error { color: #ff6b6b; }
+    .ok { color: #34d399; }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+    td, th { border: 1px solid #333; padding: 4px 8px; text-align: left; font-size: 11px; }
+    th { background: #222; }
+  </style>
+</head>
+<body>
+  <h2>3-Way: micro-handpose vs MediaPipe GPU vs MediaPipe CPU</h2>
+  <div id="status">Starting...</div>
+  <div id="results"></div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    const resultsDiv = document.getElementById('results');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip',
+      'index_mcp','index_pip','index_dip','index_tip',
+      'middle_mcp','middle_pip','middle_dip','middle_tip',
+      'ring_mcp','ring_pip','ring_dip','ring_tip',
+      'pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
+
+    const IMAGES = [
+      'test-hands/hand_05.jpg','test-hands/hand_06.jpg',
+      'test-hands/hand_07.jpg','test-hands/hand_08.jpg','test-hands/hand_09.jpg',
+      'test-hands/hand_10.jpg','hand_nikhil.jpg',
+    ];
+
+    function computeError(lmA, lmB) {
+      let sum = 0, maxD = 0, maxIdx = 0;
+      for (let i = 0; i < 21; i++) {
+        const dx = (lmA[i].x - lmB[i].x) * 100;
+        const dy = (lmA[i].y - lmB[i].y) * 100;
+        const d = Math.sqrt(dx*dx + dy*dy);
+        sum += d;
+        if (d > maxD) { maxD = d; maxIdx = i; }
+      }
+      return { avg: sum / 21, max: maxD, maxName: NAMES[maxIdx] };
+    }
+
+    function matchHand(ourLm, mpHands) {
+      let bestIdx = 0, bestD = Infinity;
+      for (let j = 0; j < mpHands.length; j++) {
+        const d = Math.hypot(ourLm[0].x - mpHands[j][0].x, ourLm[0].y - mpHands[j][0].y);
+        if (d < bestD) { bestD = d; bestIdx = j; }
+      }
+      return mpHands[bestIdx];
+    }
+
+    async function run() {
+      try {
+        log('Loading micro-handpose...');
+        const { createHandpose } = await import('./dist/index.js?v=batch8');
+        const handpose = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.1, palmScoreThreshold: 0.5 });
+        log('micro-handpose loaded');
+
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const wasmFileset = await vision.FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+
+        log('Loading MediaPipe GPU...');
+        let mpGpu;
+        try {
+          mpGpu = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+              delegate: 'GPU',
+            },
+            runningMode: 'IMAGE', numHands: 2,
+          });
+          log('MediaPipe GPU loaded');
+        } catch(e) {
+          log('MediaPipe GPU FAILED: ' + e.message);
+          mpGpu = null;
+        }
+
+        log('Loading MediaPipe CPU...');
+        const mpCpu = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'CPU',
+          },
+          runningMode: 'IMAGE', numHands: 2,
+        });
+        log('MediaPipe CPU loaded');
+
+        log('\n' + 'Image'.padEnd(20) + 'us→GPU   us→CPU   GPU→CPU');
+        log('─'.repeat(60));
+
+        for (const imgSrc of IMAGES) {
+          status.textContent = `Testing ${imgSrc}...`;
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          try {
+            await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = imgSrc; });
+          } catch(e) { continue; }
+
+          handpose.reset();
+          const microHands = await handpose.detect(img);
+          const gpuResult = mpGpu ? mpGpu.detect(img) : { landmarks: [] };
+          const cpuResult = mpCpu.detect(img);
+          const gpuHands = gpuResult.landmarks || [];
+          const cpuHands = cpuResult.landmarks || [];
+
+          if (microHands.length === 0) { log(imgSrc.split('/').pop().padEnd(20) + 'no detection'); continue; }
+
+          const ourLm = microHands[0].landmarks;
+          const name = imgSrc.split('/').pop().padEnd(20);
+
+          let usGpu = '  N/A   ', usCpu = '  N/A   ', gpuCpu = '  N/A   ';
+
+          if (gpuHands.length > 0) {
+            const gpuLm = matchHand(ourLm, gpuHands);
+            const e = computeError(ourLm, gpuLm);
+            usGpu = e.avg.toFixed(3) + '%';
+          }
+          if (cpuHands.length > 0) {
+            const cpuLm = matchHand(ourLm, cpuHands);
+            const e = computeError(ourLm, cpuLm);
+            usCpu = e.avg.toFixed(3) + '%';
+          }
+          if (gpuHands.length > 0 && cpuHands.length > 0) {
+            // Compare GPU vs CPU landmarks directly
+            const gpuLm0 = gpuHands[0];
+            const cpuLm = matchHand(gpuLm0, cpuHands);
+            const e = computeError(gpuLm0, cpuLm);
+            gpuCpu = e.avg.toFixed(3) + '%';
+          }
+
+          log(name + usGpu.padEnd(9) + usCpu.padEnd(9) + gpuCpu);
+        }
+
+        status.textContent = 'Done!';
+      } catch(e) {
+        log('FATAL: ' + e.message + '\n' + e.stack);
+        status.textContent = 'ERROR';
+      }
+    }
+    run();
+  </script>
+</body>
+</html>

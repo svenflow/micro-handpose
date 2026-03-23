@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Palm Detection: WebGPU vs TFLite Reference</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 10px; font-size: 11px; }
+    pre { background: #222; padding: 8px; border-radius: 4px; font-size: 10px; white-space: pre-wrap; }
+    .error { color: #ff6b6b; }
+    .ok { color: #34d399; }
+    canvas { border: 1px solid #333; margin: 2px; }
+  </style>
+</head>
+<body>
+  <h2>Palm Detection Raw Output Comparison</h2>
+  <div id="status">Starting...</div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    const IMAGES = [
+      'test-hands/hand_05.jpg', 'test-hands/hand_06.jpg',
+      'test-hands/hand_07.jpg', 'test-hands/hand_08.jpg',
+      'test-hands/hand_09.jpg', 'test-hands/hand_10.jpg',
+      'hand_nikhil.jpg',
+    ];
+
+    // Anchor generation (must match palm_detection.ts)
+    function generateAnchors() {
+      const anchors = [];
+      // Layer 0: 12x12, 6 anchors per cell
+      for (let y = 0; y < 12; y++)
+        for (let x = 0; x < 12; x++)
+          for (let a = 0; a < 6; a++)
+            anchors.push({ x: (x + 0.5) / 12, y: (y + 0.5) / 12 });
+      // Layer 1: 24x24, 2 anchors per cell
+      for (let y = 0; y < 24; y++)
+        for (let x = 0; x < 24; x++)
+          for (let a = 0; a < 2; a++)
+            anchors.push({ x: (x + 0.5) / 24, y: (y + 0.5) / 24 });
+      return anchors;
+    }
+
+    function sigmoid(x) { return 1 / (1 + Math.exp(-x)); }
+
+    function decodeDetection(scores, regressors, anchors) {
+      // Find top detection
+      let topIdx = 0, topScore = -Infinity;
+      for (let i = 0; i < scores.length; i++) {
+        if (scores[i] > topScore) { topScore = scores[i]; topIdx = i; }
+      }
+
+      const anchor = anchors[topIdx];
+      const regBase = topIdx * 18;
+      const cx = anchor.x + regressors[regBase + 0] / 192;
+      const cy = anchor.y + regressors[regBase + 1] / 192;
+      const w = regressors[regBase + 2] / 192;
+      const h = regressors[regBase + 3] / 192;
+
+      const kps = [];
+      for (let k = 0; k < 7; k++) {
+        kps.push({
+          x: anchor.x + regressors[regBase + 4 + k * 2] / 192,
+          y: anchor.y + regressors[regBase + 5 + k * 2] / 192,
+        });
+      }
+
+      return { idx: topIdx, rawScore: topScore, score: sigmoid(topScore), cx, cy, w, h, kps, anchor };
+    }
+
+    async function run() {
+      try {
+        // Load our WebGPU model
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=palmcmp1');
+        const handpose = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.01, palmScoreThreshold: 0.01 });
+        log('micro-handpose loaded');
+
+        // Load tfjs + tflite model for reference
+        status.textContent = 'Loading TFLite reference...';
+
+        // Use tfjs to run the TFLite model
+        const tf = await import('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.fused.min.js');
+        await import('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/dist/tf-tflite.min.js');
+
+        log('Loading TFLite model...');
+        const tfliteModel = await tflite.loadTFLiteModel('weights/palm_detection.tflite');
+        log('TFLite model loaded');
+        log('Input: ' + JSON.stringify(tfliteModel.inputs.map(i => ({name: i.name, shape: i.shape, dtype: i.dtype}))));
+        log('Output: ' + JSON.stringify(tfliteModel.outputs.map(o => ({name: o.name, shape: o.shape, dtype: o.dtype}))));
+
+        const anchors = generateAnchors();
+
+        for (const imgSrc of IMAGES) {
+          status.textContent = `Testing ${imgSrc}...`;
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          try {
+            await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = imgSrc; });
+          } catch(e) { log(`Skip ${imgSrc}`); continue; }
+
+          const W = img.naturalWidth, H = img.naturalHeight;
+
+          // Create letterbox input (same as our pipeline)
+          const scale = Math.min(192 / W, 192 / H);
+          const scaledW = Math.round(W * scale);
+          const scaledH = Math.round(H * scale);
+          const offsetX = Math.floor((192 - scaledW) / 2);
+          const offsetY = Math.floor((192 - scaledH) / 2);
+
+          const canvas = new OffscreenCanvas(192, 192);
+          const ctx = canvas.getContext('2d');
+          ctx.clearRect(0, 0, 192, 192);
+          ctx.drawImage(img, 0, 0, W, H, offsetX, offsetY, scaledW, scaledH);
+
+          // Get pixel data for TFLite reference
+          const imageData = ctx.getImageData(0, 0, 192, 192);
+          const inputTensor = tf.tidy(() => {
+            const t = tf.browser.fromPixels(imageData);
+            return t.toFloat().div(255.0).expandDims(0); // [1, 192, 192, 3]
+          });
+
+          // Run TFLite reference
+          const refOutputs = tfliteModel.predict(inputTensor);
+          const refScores = await (Array.isArray(refOutputs) ? refOutputs[0] : refOutputs['classificators']).data();
+          const refRegs = await (Array.isArray(refOutputs) ? refOutputs[1] : refOutputs['regressors']).data();
+          inputTensor.dispose();
+
+          // Run our WebGPU model
+          handpose.reset();
+          const debugHands = await handpose.detectWithDebug(img);
+
+          // Decode both
+          const refDet = decodeDetection(refScores, refRegs, anchors);
+
+          const name = imgSrc.split('/').pop();
+          log('\n═══════════════════════════════════════');
+          log(`${name} (${W}x${H})`);
+          log(`Letterbox: scale=${scale.toFixed(6)}, scaled=${scaledW}x${scaledH}, offset=(${offsetX},${offsetY})`);
+
+          log(`\nTFLite top: anchor=${refDet.idx}, score=${refDet.score.toFixed(4)}`);
+          log(`  box: cx=${refDet.cx.toFixed(5)}, cy=${refDet.cy.toFixed(5)}, w=${refDet.w.toFixed(5)}, h=${refDet.h.toFixed(5)}`);
+          log(`  kp0(wrist): (${refDet.kps[0].x.toFixed(5)}, ${refDet.kps[0].y.toFixed(5)})`);
+          log(`  kp2(midMCP): (${refDet.kps[2].x.toFixed(5)}, ${refDet.kps[2].y.toFixed(5)})`);
+
+          if (debugHands.length > 0) {
+            const palm = debugHands[0].palmDetection;
+            log(`\nWebGPU palm: score=${palm.score.toFixed(4)}`);
+            log(`  box: cx=${palm.box[0].toFixed(5)}, cy=${palm.box[1].toFixed(5)}, w=${palm.box[2].toFixed(5)}, h=${palm.box[3].toFixed(5)}`);
+            log(`  kp0(wrist): (${palm.keypoints[0][0].toFixed(5)}, ${palm.keypoints[0][1].toFixed(5)})`);
+            log(`  kp2(midMCP): (${palm.keypoints[2][0].toFixed(5)}, ${palm.keypoints[2][1].toFixed(5)})`);
+
+            // Compute deltas (these are in letterbox space, before letterbox removal)
+            log(`\nDELTAS (before letterbox removal):`);
+            log(`  box cx: ${((palm.box[0] - refDet.cx)*100).toFixed(4)}%`);
+            log(`  box cy: ${((palm.box[1] - refDet.cy)*100).toFixed(4)}%`);
+            log(`  kp0 dx: ${((palm.keypoints[0][0] - refDet.kps[0].x)*100).toFixed(4)}%`);
+            log(`  kp0 dy: ${((palm.keypoints[0][1] - refDet.kps[0].y)*100).toFixed(4)}%`);
+            log(`  kp2 dx: ${((palm.keypoints[2][0] - refDet.kps[2].x)*100).toFixed(4)}%`);
+            log(`  kp2 dy: ${((palm.keypoints[2][1] - refDet.kps[2].y)*100).toFixed(4)}%`);
+          } else {
+            log('\nWebGPU: NO DETECTION');
+          }
+
+          // Also show our raw SSD output for the top TFLite anchor
+          if (debugHands.length > 0 && debugHands[0].rawSSD) {
+            const raw = debugHands[0].rawSSD;
+            log(`\nRaw SSD comparison at TFLite top anchor ${refDet.idx}:`);
+            log(`  TFLite raw score: ${refDet.rawScore.toFixed(4)}`);
+            log(`  WebGPU raw score: ${raw.scores[refDet.idx]?.toFixed(4) || 'N/A'}`);
+          }
+        }
+
+        status.textContent = 'Done!';
+      } catch(e) {
+        log('FATAL: ' + e.message + '\n' + e.stack);
+        status.textContent = 'ERROR';
+      }
+    }
+    run();
+  </script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Batch Auto-Test</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 10px; font-size: 11px; }
+    canvas { border: 1px solid #333; display: block; margin: 5px 0; max-width: 100%; }
+    pre { background: #222; padding: 8px; border-radius: 4px; font-size: 10px; white-space: pre-wrap; }
+    .error { color: #ff6b6b; }
+    .ok { color: #34d399; }
+    .warn { color: #ffd93d; }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+    td, th { border: 1px solid #333; padding: 4px 8px; text-align: left; font-size: 11px; }
+    th { background: #222; }
+  </style>
+</head>
+<body>
+  <h2>Batch: micro-handpose vs MediaPipe CPU (all images)</h2>
+  <div id="status">Starting...</div>
+  <div id="results"></div>
+  <canvas id="overlay" width="300" height="300"></canvas>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    const resultsDiv = document.getElementById('results');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17],
+    ];
+
+    const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip',
+      'index_mcp','index_pip','index_dip','index_tip',
+      'middle_mcp','middle_pip','middle_dip','middle_tip',
+      'ring_mcp','ring_pip','ring_dip','ring_tip',
+      'pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
+
+    function drawLm(ctx, lm, w, h, color) {
+      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      for (const [a, b] of CONNECTIONS) {
+        ctx.beginPath();
+        ctx.moveTo(lm[a].x * w, lm[a].y * h);
+        ctx.lineTo(lm[b].x * w, lm[b].y * h);
+        ctx.stroke();
+      }
+      for (let i = 0; i < lm.length; i++) {
+        ctx.beginPath();
+        ctx.arc(lm[i].x * w, lm[i].y * h, 2, 0, Math.PI * 2);
+        ctx.fillStyle = color; ctx.fill();
+      }
+    }
+
+    const IMAGES = [
+      'test-hands/hand_01.jpg','test-hands/hand_02.jpg','test-hands/hand_03.jpg',
+      'test-hands/hand_04.jpg','test-hands/hand_05.jpg','test-hands/hand_06.jpg',
+      'test-hands/hand_07.jpg','test-hands/hand_08.jpg','test-hands/hand_09.jpg',
+      'test-hands/hand_10.jpg','hand_nikhil.jpg',
+    ];
+
+    async function run() {
+      try {
+        log('UA: ' + navigator.userAgent.substring(0, 80));
+        log('WebGPU: ' + (navigator.gpu ? 'YES' : 'NO'));
+
+        if (!navigator.gpu) {
+          status.textContent = 'NO WebGPU'; status.className = 'error';
+          log('ERROR: No WebGPU'); return;
+        }
+
+        // Load models
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=batch8');
+        const handpose = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.1, palmScoreThreshold: 0.5 });
+        log('micro-handpose loaded');
+
+        status.textContent = 'Loading MediaPipe...';
+        let mpGpu = null;
+        {
+          const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+          const wasmFileset = await vision.FilesetResolver.forVisionTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+          );
+          mpGpu = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+              delegate: 'CPU',
+            },
+            runningMode: 'IMAGE', numHands: 2,
+          });
+          log('MediaPipe CPU loaded (forced)');
+        }
+
+        // Test each image
+        const allResults = [];
+        for (let imgIdx = 0; imgIdx < IMAGES.length; imgIdx++) {
+          const imgSrc = IMAGES[imgIdx];
+          status.textContent = `Testing ${imgIdx+1}/${IMAGES.length}: ${imgSrc}...`;
+
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          try {
+            await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = imgSrc; });
+          } catch(e) { log('Skip ' + imgSrc + ' (load failed)'); continue; }
+
+          const W = img.naturalWidth, H = img.naturalHeight;
+
+          // Reset temporal smoother between unrelated images
+          handpose.reset();
+
+          // Run both
+          const microHands = await handpose.detect(img);
+          const mpResult = mpGpu.detect(img);
+          const mpHands = mpResult.landmarks || [];
+
+          if (microHands.length === 0 || mpHands.length === 0) {
+            log(imgSrc + ': micro=' + microHands.length + ' MP=' + mpHands.length + ' (skipped)');
+            allResults.push({ img: imgSrc, avg: -1, max: -1, note: 'detection mismatch' });
+            continue;
+          }
+
+          // Match hands and compute error
+          const ourLm = microHands[0].landmarks;
+          let bestMp = 0, bestD = Infinity;
+          for (let j = 0; j < mpHands.length; j++) {
+            const d = Math.hypot(ourLm[0].x - mpHands[j][0].x, ourLm[0].y - mpHands[j][0].y);
+            if (d < bestD) { bestD = d; bestMp = j; }
+          }
+          const mpLm = mpHands[bestMp];
+
+          let sumDist = 0, maxDist = 0, maxIdx = 0;
+          const perLandmark = [];
+          for (let i = 0; i < 21; i++) {
+            const dx = (ourLm[i].x - mpLm[i].x) * 100;
+            const dy = (ourLm[i].y - mpLm[i].y) * 100;
+            const d = Math.sqrt(dx*dx + dy*dy);
+            sumDist += d;
+            if (d > maxDist) { maxDist = d; maxIdx = i; }
+            perLandmark.push({ name: NAMES[i], d, dx, dy });
+          }
+          const avgDist = sumDist / 21;
+
+          allResults.push({ img: imgSrc, avg: avgDist, max: maxDist, maxName: NAMES[maxIdx], perLandmark });
+          log(imgSrc.padEnd(25) + ' avg=' + avgDist.toFixed(3) + '% max=' + maxDist.toFixed(3) + '% (' + NAMES[maxIdx] + ')');
+
+          // Draw overlay for last image
+          const canvas = document.getElementById('overlay');
+          const scale = Math.min(300 / W, 300 / H);
+          canvas.width = Math.round(W * scale);
+          canvas.height = Math.round(H * scale);
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          drawLm(ctx, mpLm, canvas.width, canvas.height, '#34d399');
+          drawLm(ctx, ourLm, canvas.width, canvas.height, '#7c6aef');
+        }
+
+        // Summary table
+        let html = '<h3>Results Summary</h3><table><tr><th>Image</th><th>Avg %</th><th>Max %</th><th>Worst</th></tr>';
+        let totalAvg = 0, count = 0;
+        for (const r of allResults) {
+          const cls = r.avg < 0 ? 'error' : r.avg < 1.5 ? 'ok' : r.avg < 3 ? 'warn' : 'error';
+          html += `<tr><td>${r.img.split('/').pop()}</td>`;
+          html += `<td class="${cls}">${r.avg < 0 ? 'N/A' : r.avg.toFixed(3)}</td>`;
+          html += `<td>${r.max < 0 ? 'N/A' : r.max.toFixed(3)}</td>`;
+          html += `<td>${r.maxName || r.note || ''}</td></tr>`;
+          if (r.avg >= 0) { totalAvg += r.avg; count++; }
+        }
+        html += `<tr><th>OVERALL</th><th>${(totalAvg/count).toFixed(3)}%</th><th></th><th>${count} images</th></tr>`;
+        html += '</table>';
+        resultsDiv.innerHTML = html;
+
+        status.textContent = 'Done! Overall avg: ' + (totalAvg/count).toFixed(2) + '%';
+        status.className = (totalAvg/count) < 2 ? 'ok' : 'error';
+
+        // Per-landmark average across all images
+        log('\n=== Per-landmark average across all images ===');
+        const lmAvgs = new Array(21).fill(0);
+        let lmCount = 0;
+        for (const r of allResults) {
+          if (r.perLandmark) {
+            for (let i = 0; i < 21; i++) lmAvgs[i] += r.perLandmark[i].d;
+            lmCount++;
+          }
+        }
+        for (let i = 0; i < 21; i++) {
+          log(NAMES[i].padEnd(12) + ' ' + (lmAvgs[i]/lmCount).toFixed(3) + '%');
+        }
+
+      } catch(e) {
+        log('FATAL: ' + e.message + '\n' + e.stack);
+        status.textContent = 'ERROR'; status.className = 'error';
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

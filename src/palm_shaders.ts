@@ -109,8 +109,10 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 
 /**
  * Pointwise 1x1 conv + channel-padding skip + PReLU.
- * Uses vec4 packing for 4x fewer loop iterations and hardware dot() for
- * deterministic accumulation matching MediaPipe's WebGL matmul shaders.
+ * Uses sequential multiply-add accumulation matching MediaPipe's WebGL
+ * CONV macro pattern: R += S.x * f0; R += S.y * f1; ...
+ * This produces identical FMA instruction sequences on Metal, matching
+ * ANGLE's GLSL→MSL compilation output for better numerical agreement.
  *
  * Skip connection uses zero-padding: if oc < in_channels, skip from input;
  * if oc >= in_channels, skip is 0 (the padded channels).
@@ -137,7 +139,6 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   var sum:f32=0.0;
   let dw_base=batch*params.in_channels*params.height*params.width+out_y*params.width+out_x;
   let w_base=oc*params.in_channels; let spatial_stride=params.height*params.width;
-  // vec4 dot product accumulation: 4x fewer iterations, deterministic hardware dot()
   let ic4=params.in_channels/4u;
   for(var i:u32=0u;i<ic4;i=i+1u){
     let ic=i*4u;
@@ -233,6 +234,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 
 /**
  * Bilinear upsample 2x with optional skip-add.
+ * Uses half_pixel_centers=true to match the TFLite model's RESIZE_BILINEAR ops.
  */
 export const PALM_UPSAMPLE_2X_ADD_SHADER = S(`
 struct UpsampleParams { batch:u32, channels:u32, in_height:u32, in_width:u32, out_height:u32, out_width:u32, }
@@ -246,10 +248,12 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let c=c_batch%params.channels; let batch=c_batch/params.channels;
   if(out_x>=params.out_width||out_y>=params.out_height||batch>=params.batch){return;}
   let scale_y=f32(params.in_height)/f32(params.out_height); let scale_x=f32(params.in_width)/f32(params.out_width);
+  // TFLite ResizeBilinear: half_pixel_centers=true, align_corners=false
+  // src = (dst + 0.5) * scale - 0.5
   let src_y=(f32(out_y)+0.5)*scale_y-0.5; let src_x=(f32(out_x)+0.5)*scale_x-0.5;
   let y0=u32(max(0.0,floor(src_y))); let x0=u32(max(0.0,floor(src_x)));
   let y1=min(y0+1u,params.in_height-1u); let x1=min(x0+1u,params.in_width-1u);
-  let ly=max(0.0,src_y)-f32(y0); let lx=max(0.0,src_x)-f32(x0);
+  let ly=max(0.0,src_y-f32(y0)); let lx=max(0.0,src_x-f32(x0));
   let base=batch*params.channels*params.in_height*params.in_width+c*params.in_height*params.in_width;
   let v00=input[base+y0*params.in_width+x0]; let v01=input[base+y0*params.in_width+x1];
   let v10=input[base+y1*params.in_width+x0]; let v11=input[base+y1*params.in_width+x1];
@@ -356,6 +360,7 @@ struct LBParams {
 @group(0)@binding(0) var input_tex:texture_2d<f32>;
 @group(0)@binding(1) var<storage,read_write> output:array<f32>;
 @group(0)@binding(2) var<uniform> params:LBParams;
+@group(0)@binding(3) var input_sampler:sampler;
 @compute @workgroup_size(16,16,1)
 fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let dx=gid.x; let dy=gid.y;
@@ -380,32 +385,35 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
     return;
   }
 
-  // Bilinear interpolation matching GL_LINEAR
-  let x0=i32(floor(src_x));
-  let y0=i32(floor(src_y));
-  let x1=x0+1;
-  let y1=y0+1;
-  let fx=src_x-f32(x0);
-  let fy=src_y-f32(y0);
-
-  let sw=i32(params.src_w);
-  let sh=i32(params.src_h);
-
-  // Clamp coordinates to valid range
-  let cx0=clamp(x0,0,sw-1);
-  let cx1=clamp(x1,0,sw-1);
-  let cy0=clamp(y0,0,sh-1);
-  let cy1=clamp(y1,0,sh-1);
-
-  let p00=textureLoad(input_tex,vec2<u32>(u32(cx0),u32(cy0)),0);
-  let p10=textureLoad(input_tex,vec2<u32>(u32(cx1),u32(cy0)),0);
-  let p01=textureLoad(input_tex,vec2<u32>(u32(cx0),u32(cy1)),0);
-  let p11=textureLoad(input_tex,vec2<u32>(u32(cx1),u32(cy1)),0);
-
-  let pixel=p00*(1.0-fx)*(1.0-fy) + p10*fx*(1.0-fy) + p01*(1.0-fx)*fy + p11*fx*fy;
+  // Hardware bilinear sampling via textureSampleLevel
+  // Matches MediaPipe's OpenGL GL_LINEAR + GL_CLAMP_TO_EDGE exactly
+  // (uses same GPU texture filtering hardware)
+  let u = (src_x + 0.5) / f32(params.src_w);
+  let v = (src_y + 0.5) / f32(params.src_h);
+  let pixel = textureSampleLevel(input_tex, input_sampler, vec2<f32>(u, v), 0.0);
 
   output[0u*out_stride+dy*params.dst_size+dx]=pixel.r;
   output[1u*out_stride+dy*params.dst_size+dx]=pixel.g;
   output[2u*out_stride+dy*params.dst_size+dx]=pixel.b;
+}
+`);
+
+/**
+ * Quantize f32 buffer values to f16 precision in-place.
+ * This matches MediaPipe's GPU delegate behavior where intermediate
+ * tensor values are stored in RGBA16F textures, causing implicit
+ * f32→f16→f32 rounding at every layer boundary.
+ *
+ * Uses pack2x16float/unpack2x16float to perform the f16 roundtrip.
+ */
+export const QUANTIZE_F16_SHADER = S(`
+@group(0)@binding(0) var<storage,read_write> buf:array<f32>;
+@group(0)@binding(1) var<uniform> count:u32;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid:vec3<u32>){
+  let idx=gid.x;
+  if(idx>=count){return;}
+  let v=buf[idx];
+  buf[idx]=unpack2x16float(pack2x16float(vec2(v,0.0))).x;
 }
 `);

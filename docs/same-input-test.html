@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Same-Input Model Comparison</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+    pre { background: #222; padding: 10px; border-radius: 6px; font-size: 11px; white-space: pre-wrap; }
+    canvas { border: 1px solid #333; margin: 5px; }
+    .row { display: flex; gap: 10px; align-items: start; flex-wrap: wrap; }
+    h3 { margin: 10px 0 5px; }
+  </style>
+</head>
+<body>
+  <h1>Same-Input Model Comparison</h1>
+  <p>Compares our model output via Canvas2D path vs GPU crop path, and both vs MediaPipe.</p>
+  <div id="status">Loading...</div>
+  <div class="row">
+    <div>
+      <h3>Input (224x224 crop)</h3>
+      <canvas id="inputCanvas" width="224" height="224"></canvas>
+    </div>
+    <div>
+      <h3>Overlay</h3>
+      <canvas id="overlay" width="224" height="224"></canvas>
+    </div>
+  </div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    async function run() {
+      try {
+        // Load our model
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=f16v5');
+        const handpose = await createHandpose({
+          weightsUrl: 'weights',
+          scoreThreshold: 0.01,
+          palmScoreThreshold: 0.3,
+        });
+
+        // Load source image
+        const srcImg = new Image();
+        srcImg.crossOrigin = 'anonymous';
+        await new Promise((r, e) => { srcImg.onload = r; srcImg.onerror = e; srcImg.src = 'test-hands/hand_05.jpg'; });
+
+        // Run full pipeline to get ROI and crop landmarks
+        status.textContent = 'Running full pipeline...';
+        const ourResults = await handpose.detectWithDebug(srcImg);
+        if (ourResults.length === 0) { log('No hands detected!'); return; }
+        const ourHand = ourResults[0];
+        const roi = ourHand.roi;
+
+        log(`Source: ${srcImg.naturalWidth}x${srcImg.naturalHeight}`);
+        log(`ROI: center=(${roi.centerXpx.toFixed(2)}, ${roi.centerYpx.toFixed(2)}) size=${roi.sizePx.toFixed(2)}px rot=${(roi.rotation*180/Math.PI).toFixed(4)} deg`);
+        log(`Pipeline handflag: ${ourHand.handflag?.toFixed(6)}`);
+
+        // Test 1: Run landmark model directly via Canvas2D path
+        status.textContent = 'Running Canvas2D path...';
+        const cropCanvas = handpose._debug.cropHandRegion(srcImg, roi);
+        const canvasResult = await handpose._debug.landmarkModel.runFromCanvas(cropCanvas);
+        log(`\n=== Canvas2D Path ===`);
+        log(`handflag: ${canvasResult.handflag[0].toFixed(6)}, handedness: ${canvasResult.handedness[0].toFixed(6)}`);
+
+        // Draw input
+        document.getElementById('inputCanvas').getContext('2d').drawImage(cropCanvas, 0, 0, 224, 224);
+
+        // Test 2: Get GPU crop path landmarks (from the pipeline)
+        // The pipeline already ran via GPU crop — cropLandmarks are in [0,1]
+        log(`\n=== GPU Crop Path (from pipeline) ===`);
+        log(`handflag: ${ourHand.handflag?.toFixed(6)}`);
+
+        // Compare Canvas2D vs GPU crop landmarks
+        const NAMES = [
+          'wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip',
+          'index_mcp', 'index_pip', 'index_dip', 'index_tip',
+          'middle_mcp', 'middle_pip', 'middle_dip', 'middle_tip',
+          'ring_mcp', 'ring_pip', 'ring_dip', 'ring_tip',
+          'pinky_mcp', 'pinky_pip', 'pinky_dip', 'pinky_tip',
+        ];
+
+        log(`\n=== Canvas2D vs GPU Crop (our model, same ROI, different pixel sampling) ===`);
+        log(`${'#'.padStart(3)} ${'Name'.padEnd(12)} ${'Dist%'.padStart(10)} ${'Dx%'.padStart(10)} ${'Dy%'.padStart(10)}`);
+        let sumD = 0, maxD = 0, maxI = 0;
+        for (let i = 0; i < 21; i++) {
+          const cx = canvasResult.landmarks[i * 3];
+          const cy = canvasResult.landmarks[i * 3 + 1];
+          const gx = ourHand.cropLandmarks[i].x;
+          const gy = ourHand.cropLandmarks[i].y;
+          const dx = cx - gx, dy = cy - gy;
+          const d = Math.sqrt(dx*dx + dy*dy);
+          sumD += d;
+          if (d > maxD) { maxD = d; maxI = i; }
+          log(`${i.toString().padStart(3)} ${NAMES[i].padEnd(12)} ${(d*100).toFixed(4).padStart(10)} ${(dx*100).toFixed(4).padStart(10)} ${(dy*100).toFixed(4).padStart(10)}`);
+        }
+        log(`\nCanvas2D vs GPU crop: Avg=${(sumD/21*100).toFixed(4)}% Max=${(maxD*100).toFixed(4)}% (${NAMES[maxI]})`);
+
+        // Test 3: Run MediaPipe on the SAME source image
+        status.textContent = 'Loading MediaPipe...';
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const mpGpu = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+        });
+
+        // Run MediaPipe on source image
+        status.textContent = 'Running MediaPipe...';
+        const mpResult = mpGpu.detect(srcImg);
+        const mpLandmarks = mpResult.landmarks || [];
+        if (mpLandmarks.length === 0) { log('MediaPipe: no hands!'); return; }
+
+        // Match closest hand
+        let bestIdx = 0, bestDist = Infinity;
+        for (let j = 0; j < mpLandmarks.length; j++) {
+          const d = Math.sqrt((ourHand.landmarks[0].x - mpLandmarks[j][0].x)**2 + (ourHand.landmarks[0].y - mpLandmarks[j][0].y)**2);
+          if (d < bestDist) { bestDist = d; bestIdx = j; }
+        }
+        const mpLm = mpLandmarks[bestIdx];
+
+        // Transform MP landmarks to our crop space
+        const srcW = srcImg.naturalWidth, srcH = srcImg.naturalHeight;
+        const cosR = Math.cos(roi.rotation), sinR = Math.sin(roi.rotation);
+        const scale = 224 / roi.sizePx;
+        function imgToOurCrop(imgNormX, imgNormY) {
+          const px = imgNormX * srcW, py = imgNormY * srcH;
+          const dx = px - roi.centerXpx, dy = py - roi.centerYpx;
+          return [(cosR*dx + sinR*dy) * scale/224 + 0.5, (-sinR*dx + cosR*dy) * scale/224 + 0.5];
+        }
+
+        // Compare Canvas2D vs MP in crop space
+        log(`\n=== Canvas2D output vs MP (in crop space) ===`);
+        log(`${'#'.padStart(3)} ${'Name'.padEnd(12)} ${'Dist%'.padStart(10)} ${'Dx%'.padStart(10)} ${'Dy%'.padStart(10)}`);
+        let sumDmp = 0, maxDmp = 0, maxImp = 0;
+        const canvasXY = [], mpCropXY = [];
+        for (let i = 0; i < 21; i++) {
+          const cx = canvasResult.landmarks[i * 3];
+          const cy = canvasResult.landmarks[i * 3 + 1];
+          const [mpCropX, mpCropY] = imgToOurCrop(mpLm[i].x, mpLm[i].y);
+          const dx = cx - mpCropX, dy = cy - mpCropY;
+          const d = Math.sqrt(dx*dx + dy*dy);
+          sumDmp += d;
+          if (d > maxDmp) { maxDmp = d; maxImp = i; }
+          canvasXY.push([cx, cy]);
+          mpCropXY.push([mpCropX, mpCropY]);
+          log(`${i.toString().padStart(3)} ${NAMES[i].padEnd(12)} ${(d*100).toFixed(4).padStart(10)} ${(dx*100).toFixed(4).padStart(10)} ${(dy*100).toFixed(4).padStart(10)}`);
+        }
+        log(`\nCanvas2D vs MP: Avg=${(sumDmp/21*100).toFixed(4)}% Max=${(maxDmp*100).toFixed(4)}% (${NAMES[maxImp]})`);
+
+        // Compare GPU crop vs MP in crop space
+        log(`\n=== GPU crop output vs MP (in crop space) ===`);
+        let sumDgpu = 0, maxDgpu = 0, maxIgpu = 0;
+        for (let i = 0; i < 21; i++) {
+          const gx = ourHand.cropLandmarks[i].x, gy = ourHand.cropLandmarks[i].y;
+          const dx = gx - mpCropXY[i][0], dy = gy - mpCropXY[i][1];
+          const d = Math.sqrt(dx*dx + dy*dy);
+          sumDgpu += d;
+          if (d > maxDgpu) { maxDgpu = d; maxIgpu = i; }
+        }
+        log(`GPU crop vs MP: Avg=${(sumDgpu/21*100).toFixed(4)}% Max=${(maxDgpu*100).toFixed(4)}% (${NAMES[maxIgpu]})`);
+
+        // Summary
+        log(`\n=== SUMMARY ===`);
+        log(`Canvas2D vs GPU crop (pixel sampling diff): ${(sumD/21*100).toFixed(4)}%`);
+        log(`Canvas2D vs MP (model output diff):         ${(sumDmp/21*100).toFixed(4)}%`);
+        log(`GPU crop vs MP (model output diff):          ${(sumDgpu/21*100).toFixed(4)}%`);
+
+        // Draw overlay
+        const octx = document.getElementById('overlay').getContext('2d');
+        octx.drawImage(cropCanvas, 0, 0, 224, 224);
+        octx.font = '11px monospace';
+        // Canvas2D landmarks (green)
+        octx.fillStyle = 'lime';
+        for (const [x,y] of canvasXY) { octx.beginPath(); octx.arc(x*224, y*224, 3, 0, 2*Math.PI); octx.fill(); }
+        octx.fillText('Green=Canvas2D', 5, 15);
+        // MP landmarks (red)
+        octx.fillStyle = 'red';
+        for (const [x,y] of mpCropXY) { octx.beginPath(); octx.arc(x*224, y*224, 3, 0, 2*Math.PI); octx.fill(); }
+        octx.fillText('Red=MP', 5, 30);
+
+        status.textContent = 'Done!';
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        console.error(e);
+        log(`\nError: ${e.message}\n${e.stack}`);
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

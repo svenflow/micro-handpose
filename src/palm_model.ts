@@ -29,6 +29,7 @@ import {
   PALM_CONV1X1_PRELU_SHADER,
   PALM_CANVAS_INPUT_SHADER,
   PALM_LETTERBOX_RESIZE_SHADER,
+  QUANTIZE_F16_SHADER,
 } from './palm_shaders.js';
 import type { Tensor, WeightsMetadata } from './model.js';
 
@@ -42,7 +43,7 @@ export interface CompiledPalmModel {
   run: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<PalmDetectionOutput>;
   /** Run with GPU-based letterbox resize matching MediaPipe's bilinear interpolation exactly */
   runWithResize: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap | HTMLVideoElement | HTMLImageElement, srcW: number, srcH: number) => Promise<{ output: PalmDetectionOutput; lbPadX: number; lbPadY: number }>;
-  debugRun: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<any>;
+  debugRun: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap | HTMLImageElement, srcW?: number, srcH?: number) => Promise<any>;
 }
 
 // Weight key helper: find key by substring
@@ -117,10 +118,19 @@ export async function compilePalmModel(
     return device.createBindGroupLayout({
       entries: types.map((t, i) => {
         if (t === 't') return { binding: i, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' as const } };
+        if (t === 'sm') return { binding: i, visibility: GPUShaderStage.COMPUTE, sampler: {} };
         return { binding: i, visibility: GPUShaderStage.COMPUTE, buffer: { type: BT[t]! } };
       }),
     });
   }
+
+  // Linear sampler for hardware bilinear interpolation (matches MediaPipe's GL_LINEAR)
+  const linearSampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+    addressModeU: 'clamp-to-edge',
+    addressModeV: 'clamp-to-edge',
+  });
   const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   const SO = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC;
   const SOC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC;
@@ -195,6 +205,7 @@ export async function compilePalmModel(
   const upsampleAddMod = device.createShaderModule({ code: PALM_UPSAMPLE_2X_ADD_SHADER });
   const canvasInputMod = device.createShaderModule({ code: PALM_CANVAS_INPUT_SHADER });
   const letterboxResizeMod = device.createShaderModule({ code: PALM_LETTERBOX_RESIZE_SHADER });
+  const quantizeF16Mod = device.createShaderModule({ code: QUANTIZE_F16_SHADER });
 
   // ============ Create Layouts ============
   const inputConvLayout = makeLayout(['r', 'r', 'r', 'r', 's', 'u']);  // input, weight, bias, alpha, output, params
@@ -204,7 +215,8 @@ export async function compilePalmModel(
   const conv1x1PreluLayout = makeLayout(['r', 'r', 'r', 'r', 's', 'u']); // input, weight, bias, alpha, output, params
   const upsampleAddLayout = makeLayout(['r', 'r', 's', 'u']);          // input, skip, output, params
   const canvasInputLayout = makeLayout(['t', 's', 'u']);
-  const letterboxResizeLayout = makeLayout(['t', 's', 'u']);
+  const letterboxResizeLayout = makeLayout(['t', 's', 'u', 'sm']);
+  const quantizeF16Layout = makeLayout(['s', 'u']);
 
   // ============ Create Pipelines ============
   function makePipe(layout: GPUBindGroupLayout, mod: GPUShaderModule): GPUComputePipeline {
@@ -222,6 +234,7 @@ export async function compilePalmModel(
   const upsampleAddPipe = makePipe(upsampleAddLayout, upsampleAddMod);
   const canvasInputPipe = makePipe(canvasInputLayout, canvasInputMod);
   const letterboxResizePipe = makePipe(letterboxResizeLayout, letterboxResizeMod);
+  const quantizeF16Pipe = makePipe(quantizeF16Layout, quantizeF16Mod);
 
   // ============ Load and upload weights ============
 
@@ -466,6 +479,18 @@ export async function compilePalmModel(
   // Zero buffer for upsample-without-add (same size as largest upsample output)
   const zeroBuf = makeBuf(24 * 24 * 256 * 4, SO);  // Pre-zeroed by WebGPU
 
+  // f16 quantization uniforms — one per unique element count
+  const q16UniformCache = new Map<number, GPUBuffer>();
+  function getQ16Uniform(count: number): GPUBuffer {
+    let buf = q16UniformCache.get(count);
+    if (!buf) {
+      buf = makeBuf(4, UC);
+      writeBuf(buf, 0, new Uint32Array([count]));
+      q16UniformCache.set(count, buf);
+    }
+    return buf;
+  }
+
   // Save buffers for skip connections
   const backbone12SkipBuf = makeBuf(12 * 12 * 256 * 4, SO | GPUBufferUsage.COPY_DST); // After block 18 (12x12x256)
   const backbone24SkipBuf = makeBuf(24 * 24 * 128 * 4, SO | GPUBufferUsage.COPY_DST); // After block 13 (24x24x128)
@@ -618,6 +643,13 @@ export async function compilePalmModel(
     ],
   });
 
+  // Match MediaPipe's f16 intermediate precision (RGBA16F textures)
+  // DISABLED: Testing showed f16 quantization makes accuracy 0.003% worse on desktop
+  // (mediump maps to f32 on ANGLE Metal, so RGBA16F storage rounding doesn't help)
+  function encodeQuantizeF16(_encoder: GPUCommandEncoder, _buffer: GPUBuffer, _count: number): void {
+    // no-op — f16 quantization disabled
+  }
+
   // Helper to encode a DW+PW block into the command encoder
   function encodeDwPwBlock(
     encoder: GPUCommandEncoder,
@@ -646,6 +678,9 @@ export async function compilePalmModel(
     pass1.dispatchWorkgroups(ceil(outW, 8), ceil(uniforms.outH, 8), block.inCh);
     pass1.end();
 
+    // Match MediaPipe's f16 intermediate precision: DW output stored in RGBA16F texture
+    encodeQuantizeF16(encoder, dwOutBuf, block.inCh * uniforms.outH * outW);
+
     const pwBG = device.createBindGroup({
       layout: pwPreluLayout,
       entries: [
@@ -664,6 +699,9 @@ export async function compilePalmModel(
     pass2.setBindGroup(0, pwBG);
     pass2.dispatchWorkgroups(ceil(outW, 8), ceil(uniforms.outH, 8), block.outCh);
     pass2.end();
+
+    // Match MediaPipe's f16 intermediate precision: PW output stored in RGBA16F texture
+    encodeQuantizeF16(encoder, outputBuffer, block.outCh * uniforms.outH * outW);
   }
 
   // Encode a conv1x1 (no activation) for SSD heads
@@ -724,6 +762,9 @@ export async function compilePalmModel(
 
   /** Encode backbone + FPN + SSD heads + readback. Assumes inputBuf already has 192x192 CHW data. */
   async function encodeAndReadback(encoder: GPUCommandEncoder): Promise<PalmDetectionOutput> {
+    // Match MediaPipe: quantize letterbox-resized input to f16 (RGBA16F texture)
+    encodeQuantizeF16(encoder, inputBuf, 192 * 192 * 3);
+
     // Initial conv 5x5 stride 2 + PReLU: 192x192x3 → 96x96x32 (pre-created bind group)
     {
       const pass = encoder.beginComputePass();
@@ -732,6 +773,9 @@ export async function compilePalmModel(
       pass.dispatchWorkgroups(ceil(96, 8), ceil(96, 8), 32);
       pass.end();
     }
+
+    // Match MediaPipe: quantize initial conv output to f16
+    encodeQuantizeF16(encoder, actBufA, 96 * 96 * 32);
 
     // Backbone blocks 0-23 with double buffering (FULL model)
     // After input conv: actBufA has 96x96x32
@@ -748,6 +792,7 @@ export async function compilePalmModel(
       altBuf = tmp;
 
       // Save backbone skip connections for FPN
+      // (skip buffers are already f16-quantized since curBuf was quantized by encodeDwPwBlock)
       if (i === 13) {
         // After block 13: 24x24x128 — skip for FPN level 2 (12→24)
         encoder.copyBufferToBuffer(curBuf, 0, backbone24SkipBuf, 0, 24 * 24 * 128 * 4);
@@ -779,10 +824,12 @@ export async function compilePalmModel(
       pass.end();
     }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    encodeQuantizeF16(encoder, curBuf, 12 * 12 * 256);
 
     // Step 2: conv1x1+PReLU (conv2d_25) on upsampled 12x12x256
     encodeConv1x1PReLU(encoder, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, fpnConv6to12Uniform, 256, 12, 12);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    encodeQuantizeF16(encoder, curBuf, 12 * 12 * 256);
 
     // Step 3: Element-wise add backbone12Skip (identity upsample: 12→12)
     {
@@ -802,6 +849,7 @@ export async function compilePalmModel(
       pass.end();
     }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    encodeQuantizeF16(encoder, curBuf, 12 * 12 * 256);
 
     // Step 4: FPN 12x12 refinement blocks
     encodeDwPwBlock(encoder, fpn12Block1, curBuf, altBuf, curBuf, fpn12Block1Uniforms);
@@ -812,7 +860,9 @@ export async function compilePalmModel(
 
     // Step 5: 12x12 SSD heads (on curBuf = 12x12x256)
     encodeConv1x1(encoder, curBuf, cls16WBuf, cls16BBuf, cls16Buf, ssdCls16Uniform, 6, 12, 12);
+    encodeQuantizeF16(encoder, cls16Buf, 12 * 12 * 6);
     encodeConv1x1(encoder, curBuf, reg16WBuf, reg16BBuf, reg16Buf, ssdReg16Uniform, 108, 12, 12);
+    encodeQuantizeF16(encoder, reg16Buf, 12 * 12 * 108);
 
     // ============ FPN Level 2: 12→24 ============
     // Step 6: Upsample 12→24 (no add — use zeroBuf as skip)
@@ -833,10 +883,12 @@ export async function compilePalmModel(
       pass.end();
     }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    encodeQuantizeF16(encoder, curBuf, 24 * 24 * 256);
 
     // Step 7: conv1x1+PReLU (conv2d_28) on upsampled 24x24: 256→128
     encodeConv1x1PReLU(encoder, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, fpnConv12to24Uniform, 128, 24, 24);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    encodeQuantizeF16(encoder, curBuf, 24 * 24 * 128);
 
     // Step 8: Element-wise add backbone24Skip (identity upsample: 24→24)
     {
@@ -856,6 +908,7 @@ export async function compilePalmModel(
       pass.end();
     }
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
+    encodeQuantizeF16(encoder, curBuf, 24 * 24 * 128);
 
     // Step 9: FPN 24x24 refinement blocks
     encodeDwPwBlock(encoder, fpn24Block1, curBuf, altBuf, curBuf, fpn24Block1Uniforms);
@@ -866,7 +919,9 @@ export async function compilePalmModel(
 
     // Step 10: 24x24 SSD heads (on curBuf = 24x24x128)
     encodeConv1x1(encoder, curBuf, cls8WBuf, cls8BBuf, cls8Buf, ssdCls8Uniform, 2, 24, 24);
+    encodeQuantizeF16(encoder, cls8Buf, 24 * 24 * 2);
     encodeConv1x1(encoder, curBuf, reg8WBuf, reg8BBuf, reg8Buf, ssdReg8Uniform, 36, 24, 24);
+    encodeQuantizeF16(encoder, reg8Buf, 24 * 24 * 36);
 
     // Submit compute passes first
     device.queue.submit([encoder.finish()]);
@@ -974,8 +1029,9 @@ export async function compilePalmModel(
     const scale = Math.min(192 / srcW, 192 / srcH);
     const scaledW = Math.round(srcW * scale);
     const scaledH = Math.round(srcH * scale);
-    const offsetX = (192 - scaledW) / 2;
-    const offsetY = (192 - scaledH) / 2;
+    // Use Math.floor to match MediaPipe's C++ integer division (truncates toward zero)
+    const offsetX = Math.floor((192 - scaledW) / 2);
+    const offsetY = Math.floor((192 - scaledH) / 2);
 
     const lbPadX = offsetX / 192;
     const lbPadY = offsetY / 192;
@@ -984,13 +1040,15 @@ export async function compilePalmModel(
     const tex = ensureLetterboxTexture(srcW, srcH);
 
     // Upload full-res source to GPU texture
-    // For HTMLVideoElement/HTMLImageElement, we need a canvas intermediary
+    // Source is already normalized to ImageBitmap by detect() for video/image inputs,
+    // which handles mobile camera rotation. For canvas/ImageBitmap inputs, use directly.
+    // CRITICAL: colorSpaceConversion:'none' prevents sRGB→P3 conversion on wide-gamut displays
     let uploadSource: HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
-    if (source instanceof HTMLVideoElement || source instanceof HTMLImageElement) {
-      const tmpCanvas = new OffscreenCanvas(srcW, srcH);
-      const tmpCtx = tmpCanvas.getContext('2d')!;
-      tmpCtx.drawImage(source, 0, 0);
-      uploadSource = tmpCanvas;
+    if (source instanceof HTMLVideoElement) {
+      // Shouldn't normally reach here (detect() normalizes first), but handle as fallback
+      uploadSource = await createImageBitmap(source, { colorSpaceConversion: 'none' });
+    } else if (source instanceof HTMLImageElement) {
+      uploadSource = await createImageBitmap(source, { colorSpaceConversion: 'none' });
     } else {
       uploadSource = source;
     }
@@ -1023,6 +1081,7 @@ export async function compilePalmModel(
         { binding: 0, resource: tex.createView() },
         { binding: 1, resource: { buffer: inputBuf } },
         { binding: 2, resource: { buffer: lbParamsUniform } },
+        { binding: 3, resource: linearSampler },
       ],
     });
 
@@ -1054,48 +1113,148 @@ export async function compilePalmModel(
     return data;
   }
 
-  async function debugRun(source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap): Promise<any> {
+  async function debugRun(
+    source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap | HTMLImageElement,
+    srcW?: number, srcH?: number,
+  ): Promise<any> {
     // Run the full model step by step, reading back after key layers
-    device.queue.copyExternalImageToTexture(
-      { source },
-      { texture: canvasInputTexture },
-      [192, 192],
-    );
+    // Supports arbitrary-size images via letterbox resize (same as runWithResize)
 
     function stats(data: Float32Array, n: number = 1000) {
       const d = data.slice(0, n);
+      // Also grab 500 values from the middle of the buffer (avoids letterbox padding)
+      const midStart = Math.max(0, Math.floor(data.length / 2) - 250);
       return {
         min: Math.min(...d),
         max: Math.max(...d),
         mean: d.reduce((a, b) => a + b, 0) / d.length,
         nonZero: d.filter(v => v !== 0).length,
         sample: Array.from(d.slice(0, 10)),
+        data500: Array.from(data.slice(0, 500)),
+        dataMid500: Array.from(data.slice(midStart, midStart + 500)),
+        totalLength: data.length,
       };
+    }
+
+    // Sample spatial center across channels (avoids padding completely)
+    // For CHW data of shape [C, H, W], samples values at (H/2, W/2) for each channel
+    function spatialCenterSample(data: Float32Array, C: number, H: number, W: number): number[] {
+      const result: number[] = [];
+      const centerRow = Math.floor(H / 2);
+      const centerCol = Math.floor(W / 2);
+      const hw = H * W;
+      for (let c = 0; c < C && result.length < 500; c++) {
+        // Sample a 3×3 patch at the spatial center for this channel
+        for (let dr = -1; dr <= 1 && result.length < 500; dr++) {
+          for (let dc = -1; dc <= 1 && result.length < 500; dc++) {
+            const r = centerRow + dr;
+            const col = centerCol + dc;
+            if (r >= 0 && r < H && col >= 0 && col < W) {
+              result.push(data[c * hw + r * W + col]);
+            }
+          }
+        }
+      }
+      return result;
     }
 
     const result: any = {};
 
-    // Canvas → CHW
-    const canvasUniform = makeUniform(new Uint32Array([192, 192, 192]));
-    const canvasBG = device.createBindGroup({
-      layout: canvasInputLayout,
-      entries: [
-        { binding: 0, resource: canvasInputTexture.createView() },
-        { binding: 1, resource: { buffer: inputBuf } },
-        { binding: 2, resource: { buffer: canvasUniform } },
-      ],
-    });
-    let enc = device.createCommandEncoder();
-    let p = enc.beginComputePass();
-    p.setPipeline(canvasInputPipe);
-    p.setBindGroup(0, canvasBG);
-    p.dispatchWorkgroups(ceil(192, 16), ceil(192, 16), 1);
-    p.end();
-    device.queue.submit([enc.finish()]);
-    result.input = stats(await debugReadBuffer(inputBuf, 192 * 192 * 3));
+    // Determine source dimensions and do letterbox resize if needed
+    let uploadSource: HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
+    if (source instanceof HTMLImageElement) {
+      srcW = srcW ?? source.naturalWidth;
+      srcH = srcH ?? source.naturalHeight;
+      uploadSource = await createImageBitmap(source, { colorSpaceConversion: 'none' });
+    } else {
+      srcW = srcW ?? (source as any).width ?? 192;
+      srcH = srcH ?? (source as any).height ?? 192;
+      uploadSource = source as HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
+    }
+
+    if (srcW !== 192 || srcH !== 192) {
+      // Letterbox resize path (same as runWithResize)
+      const scale = Math.min(192 / srcW, 192 / srcH);
+      const scaledW = Math.round(srcW * scale);
+      const scaledH = Math.round(srcH * scale);
+      const offsetX = Math.floor((192 - scaledW) / 2);
+      const offsetY = Math.floor((192 - scaledH) / 2);
+
+      const tex = ensureLetterboxTexture(srcW, srcH);
+      device.queue.copyExternalImageToTexture(
+        { source: uploadSource },
+        { texture: tex },
+        [srcW, srcH],
+      );
+
+      const paramsData = new ArrayBuffer(32);
+      const u32View = new Uint32Array(paramsData);
+      const f32View = new Float32Array(paramsData);
+      u32View[0] = srcW;
+      u32View[1] = srcH;
+      u32View[2] = 192;
+      u32View[3] = 0;
+      f32View[4] = srcW / scaledW;
+      f32View[5] = srcH / scaledH;
+      f32View[6] = offsetX;
+      f32View[7] = offsetY;
+      device.queue.writeBuffer(lbParamsUniform, 0, paramsData);
+
+      const lbBG = device.createBindGroup({
+        layout: letterboxResizeLayout,
+        entries: [
+          { binding: 0, resource: tex.createView() },
+          { binding: 1, resource: { buffer: inputBuf } },
+          { binding: 2, resource: { buffer: lbParamsUniform } },
+          { binding: 3, resource: linearSampler },
+        ],
+      });
+
+      {
+        const enc = device.createCommandEncoder();
+        const p = enc.beginComputePass();
+        p.setPipeline(letterboxResizePipe);
+        p.setBindGroup(0, lbBG);
+        p.dispatchWorkgroups(ceil(192, 16), ceil(192, 16), 1);
+        p.end();
+        device.queue.submit([enc.finish()]);
+      }
+    } else {
+      // Direct 192x192 canvas input
+      device.queue.copyExternalImageToTexture(
+        { source: uploadSource },
+        { texture: canvasInputTexture },
+        [192, 192],
+      );
+
+      const canvasUniform = makeUniform(new Uint32Array([192, 192, 192]));
+      const canvasBG = device.createBindGroup({
+        layout: canvasInputLayout,
+        entries: [
+          { binding: 0, resource: canvasInputTexture.createView() },
+          { binding: 1, resource: { buffer: inputBuf } },
+          { binding: 2, resource: { buffer: canvasUniform } },
+        ],
+      });
+      {
+        const enc = device.createCommandEncoder();
+        const p = enc.beginComputePass();
+        p.setPipeline(canvasInputPipe);
+        p.setBindGroup(0, canvasBG);
+        p.dispatchWorkgroups(ceil(192, 16), ceil(192, 16), 1);
+        p.end();
+        device.queue.submit([enc.finish()]);
+      }
+    }
+    {
+      const buf = await debugReadBuffer(inputBuf, 192 * 192 * 3);
+      const s = stats(buf);
+      s.dataCenter500 = spatialCenterSample(buf, 3, 192, 192);
+      result.input = s;
+    }
 
     // Initial conv
-    enc = device.createCommandEncoder();
+    let enc = device.createCommandEncoder();
     const bg2 = device.createBindGroup({
       layout: inputConvLayout,
       entries: [
@@ -1107,13 +1266,18 @@ export async function compilePalmModel(
         { binding: 5, resource: { buffer: inputConvUniform } },
       ],
     });
-    p = enc.beginComputePass();
+    let p = enc.beginComputePass();
     p.setPipeline(inputConvPipe);
     p.setBindGroup(0, bg2);
     p.dispatchWorkgroups(ceil(96, 8), ceil(96, 8), 32);
     p.end();
     device.queue.submit([enc.finish()]);
-    result.initConv = stats(await debugReadBuffer(actBufA, 96 * 96 * 32));
+    {
+      const buf = await debugReadBuffer(actBufA, 96 * 96 * 32);
+      const s = stats(buf);
+      s.dataCenter500 = spatialCenterSample(buf, 32, 96, 96);
+      result.initConv = s;
+    }
 
     // Run backbone blocks one at a time
     let curBuf = actBufA;
@@ -1129,11 +1293,16 @@ export async function compilePalmModel(
       curBuf = altBuf;
       altBuf = tmp;
 
-      // Read back after key blocks
-      if (i === 0 || i === 4 || i === 9 || i === 14 || i === 18 || i === 19 || i === 23) {
+      // Read back after ALL blocks (for element-wise comparison)
+      {
         const outH = block.stride === 2 ? block.inH / 2 : block.inH;
-        const size = outH * outH * block.outCh;
-        result[`block${i}`] = stats(await debugReadBuffer(curBuf, size));
+        const outW = outH; // square
+        const size = outH * outW * block.outCh;
+        const buf = await debugReadBuffer(curBuf, size);
+        const s = stats(buf);
+        s.dataCenter500 = spatialCenterSample(buf, block.outCh, outH, outW);
+        s.spatialShape = [block.outCh, outH, outW];
+        result[`block${i}`] = s;
       }
 
       // Save backbone skip connections for FPN
@@ -1172,17 +1341,17 @@ export async function compilePalmModel(
     }
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpnUpsample6to12 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+    { const buf = await debugReadBuffer(curBuf, 12*12*256); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 256, 12, 12); result.fpnUpsample6to12 = s; }
 
     // conv1x1+PReLU (conv2d_25) on upsampled 12x12x256
     enc = device.createCommandEncoder();
     encodeConv1x1PReLU(enc, curBuf, fpn6to12WBuf, fpn6to12BBuf, fpn6to12AlphaBuf, altBuf, fpnConv6to12Uniform, 256, 12, 12);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpn6to12Conv = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+    { const buf = await debugReadBuffer(curBuf, 12*12*256); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 256, 12, 12); result.fpn6to12Conv = s; }
 
     // backbone12 skip check
-    result.backbone12Skip = stats(await debugReadBuffer(backbone12SkipBuf, 12 * 12 * 256));
+    { const buf = await debugReadBuffer(backbone12SkipBuf, 12*12*256); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 256, 12, 12); result.backbone12Skip = s; }
 
     // Element-wise add backbone12Skip (identity upsample 12→12)
     enc = device.createCommandEncoder();
@@ -1205,32 +1374,32 @@ export async function compilePalmModel(
     }
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpnAdd12 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+    { const buf = await debugReadBuffer(curBuf, 12*12*256); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 256, 12, 12); result.fpnAdd12 = s; }
 
     // FPN 12x12 block 1 (dw_24 + conv2d_26)
     enc = device.createCommandEncoder();
     encodeDwPwBlock(enc, fpn12Block1, curBuf, altBuf, curBuf, fpn12Block1Uniforms);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpn12Block1 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+    { const buf = await debugReadBuffer(curBuf, 12*12*256); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 256, 12, 12); result.fpn12Block1 = s; }
 
     // FPN 12x12 block 2 (dw_25 + conv2d_27)
     enc = device.createCommandEncoder();
     encodeDwPwBlock(enc, fpn12Block2, curBuf, altBuf, curBuf, fpn12Block2Uniforms);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpn12Block2 = stats(await debugReadBuffer(curBuf, 12 * 12 * 256));
+    { const buf = await debugReadBuffer(curBuf, 12*12*256); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 256, 12, 12); result.fpn12Block2 = s; }
 
     // 12x12 SSD heads
     enc = device.createCommandEncoder();
     encodeConv1x1(enc, curBuf, cls16WBuf, cls16BBuf, cls16Buf, ssdCls16Uniform, 6, 12, 12);
     device.queue.submit([enc.finish()]);
-    result.cls16 = stats(await debugReadBuffer(cls16Buf, 864));
+    { const buf = await debugReadBuffer(cls16Buf, 864); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 6, 12, 12); result.cls16 = s; }
 
     enc = device.createCommandEncoder();
     encodeConv1x1(enc, curBuf, reg16WBuf, reg16BBuf, reg16Buf, ssdReg16Uniform, 108, 12, 12);
     device.queue.submit([enc.finish()]);
-    result.reg16 = stats(await debugReadBuffer(reg16Buf, 15552), 500);
+    { const buf = await debugReadBuffer(reg16Buf, 15552); const s = stats(buf, 500); s.dataCenter500 = spatialCenterSample(buf, 108, 12, 12); result.reg16 = s; }
 
     // ============ FPN Level 2: 12→24 ============
 
@@ -1255,17 +1424,17 @@ export async function compilePalmModel(
     }
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpnUpsample12to24 = stats(await debugReadBuffer(curBuf, 24 * 24 * 256));
+    { const buf = await debugReadBuffer(curBuf, 24*24*256); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 256, 24, 24); result.fpnUpsample12to24 = s; }
 
     // conv1x1+PReLU (conv2d_28) on upsampled 24x24: 256→128
     enc = device.createCommandEncoder();
     encodeConv1x1PReLU(enc, curBuf, fpn12to24WBuf, fpn12to24BBuf, fpn12to24AlphaBuf, altBuf, fpnConv12to24Uniform, 128, 24, 24);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpn12to24Conv = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+    { const buf = await debugReadBuffer(curBuf, 24*24*128); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 128, 24, 24); result.fpn12to24Conv = s; }
 
     // backbone24 skip check
-    result.backbone24Skip = stats(await debugReadBuffer(backbone24SkipBuf, 24 * 24 * 128));
+    { const buf = await debugReadBuffer(backbone24SkipBuf, 24*24*128); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 128, 24, 24); result.backbone24Skip = s; }
 
     // Element-wise add backbone24Skip (identity upsample 24→24)
     enc = device.createCommandEncoder();
@@ -1288,32 +1457,32 @@ export async function compilePalmModel(
     }
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpnAdd24 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+    { const buf = await debugReadBuffer(curBuf, 24*24*128); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 128, 24, 24); result.fpnAdd24 = s; }
 
     // FPN 24x24 block 1 (dw_26 + conv2d_29)
     enc = device.createCommandEncoder();
     encodeDwPwBlock(enc, fpn24Block1, curBuf, altBuf, curBuf, fpn24Block1Uniforms);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpn24Block1 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+    { const buf = await debugReadBuffer(curBuf, 24*24*128); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 128, 24, 24); result.fpn24Block1 = s; }
 
     // FPN 24x24 block 2 (dw_27 + conv2d_30)
     enc = device.createCommandEncoder();
     encodeDwPwBlock(enc, fpn24Block2, curBuf, altBuf, curBuf, fpn24Block2Uniforms);
     device.queue.submit([enc.finish()]);
     { const tmp = curBuf; curBuf = altBuf; altBuf = tmp; }
-    result.fpn24Block2 = stats(await debugReadBuffer(curBuf, 24 * 24 * 128));
+    { const buf = await debugReadBuffer(curBuf, 24*24*128); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 128, 24, 24); result.fpn24Block2 = s; }
 
     // 24x24 SSD heads
     enc = device.createCommandEncoder();
     encodeConv1x1(enc, curBuf, cls8WBuf, cls8BBuf, cls8Buf, ssdCls8Uniform, 2, 24, 24);
     device.queue.submit([enc.finish()]);
-    result.cls8 = stats(await debugReadBuffer(cls8Buf, 24 * 24 * 2));
+    { const buf = await debugReadBuffer(cls8Buf, 24*24*2); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 2, 24, 24); result.cls8 = s; }
 
     enc = device.createCommandEncoder();
     encodeConv1x1(enc, curBuf, reg8WBuf, reg8BBuf, reg8Buf, ssdReg8Uniform, 36, 24, 24);
     device.queue.submit([enc.finish()]);
-    result.reg8 = stats(await debugReadBuffer(reg8Buf, 24 * 24 * 36));
+    { const buf = await debugReadBuffer(reg8Buf, 24*24*36); const s = stats(buf); s.dataCenter500 = spatialCenterSample(buf, 36, 24, 24); result.reg8 = s; }
 
     // Weight checks
     result.initWeights = stats(await debugReadBuffer(initConvWeightBuf, 100), 100);
@@ -1323,6 +1492,28 @@ export async function compilePalmModel(
     result.cls8Weights = stats(await debugReadBuffer(cls8WBuf, 100), 100);
     result.cls8Bias = stats(await debugReadBuffer(cls8BBuf, 2), 2);
     result.fpn6to12Weights = stats(await debugReadBuffer(fpn6to12WBuf, 100), 100);
+
+    // Raw SSD output arrays (full readback for external comparison)
+    // cls16: 12x12 grid, 6 anchors per cell → 864 logits
+    // cls8: 24x24 grid, 2 anchors per cell → 1152 logits
+    // Combined: 2016 total score logits
+    const rawCls16 = await debugReadBuffer(cls16Buf, 864);
+    const rawCls8 = await debugReadBuffer(cls8Buf, 24 * 24 * 2);
+    result.rawScores = new Float32Array(864 + 1152);
+    result.rawScores.set(rawCls16, 0);
+    result.rawScores.set(rawCls8, 864);
+
+    // reg16: 12x12 grid, 6 anchors × 18 values → 15552
+    // reg8: 24x24 grid, 2 anchors × 18 values → 20736
+    // Combined: 36288 total regressor values
+    const rawReg16 = await debugReadBuffer(reg16Buf, 15552);
+    const rawReg8 = await debugReadBuffer(reg8Buf, 24 * 24 * 36);
+    result.rawRegressors = new Float32Array(15552 + 20736);
+    result.rawRegressors.set(rawReg16, 0);
+    result.rawRegressors.set(rawReg8, 15552);
+
+    // Also return the input buffer for verification
+    result.rawInput = await debugReadBuffer(inputBuf, 192 * 192 * 3);
 
     return result;
   }
