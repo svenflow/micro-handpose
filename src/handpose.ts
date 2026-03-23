@@ -168,25 +168,13 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     boxW /= imgW; // normalized
     boxH /= imgH; // normalized
 
-    // Step 3: RectTransformationCalculator
-    // shift_y = -0.1 (shift upward toward fingers)
+    // Step 3: RectTransformationCalculator (shift_y=-0.1, shift upward toward fingers)
+    // MediaPipe formula with shift_x=0:
+    //   x_shift = (-imgH * h * shift_y * sin(rot)) / imgW
+    //   y_shift = (imgH * h * shift_y * cos(rot)) / imgH = h * shift_y * cos(rot)
     const shiftY = -0.1;
-    const boxHpx = boxH * imgH;
-    cx += (0.5 * boxHpx * shiftY * sinR) / imgW; // wait, shift_x=0 so simplified
-    // Actually: with shift_x=0, shift_y=-0.1:
-    //   x_shift = (imgH * h * 0.1 * sin(rot)) / imgW  (note: -shift_y = +0.1)
-    //   y_shift = h * (-0.1) * cos(rot)
-    // Re-derive properly:
-    //   x_shift = (-imgH * boxH * shiftY * sin(rot)) / imgW  -- wait, MediaPipe formula:
-    //   x_shift = (imgW*w*shift_x*cos - imgH*h*shift_y*sin) / imgW
-    //   y_shift = (imgW*w*shift_x*sin + imgH*h*shift_y*cos) / imgH
-    // With shift_x=0:
-    //   x_shift = (-imgH * boxH * shiftY * sin(rot)) / imgW = (imgH * boxH * 0.1 * sin(rot)) / imgW
-    //   y_shift = (imgH * boxH * shiftY * cos(rot)) / imgH = boxH * (-0.1) * cos(rot)
-    const xShift = (-imgH * boxH * shiftY * sinR) / imgW;
-    const yShift = (imgH * boxH * shiftY * cosR) / imgH;
-    cx += xShift;
-    cy += yShift;
+    cx += (-imgH * boxH * shiftY * sinR) / imgW;
+    cy += boxH * shiftY * cosR;
 
     // square_long: use max dimension in pixels
     const longSidePx = Math.max(boxW * imgW, boxH * imgH);
