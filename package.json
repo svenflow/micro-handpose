@@ -14,10 +14,19 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/svenflow/micro-handpose"
+  },
+  "homepage": "https://svenflow.github.io/micro-handpose/",
+  "bugs": {
+    "url": "https://github.com/svenflow/micro-handpose/issues"
+  },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --minify",
     "dev": "tsup src/index.ts --format esm --dts --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run typecheck"
   },
   "keywords": [
     "hand",

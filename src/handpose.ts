@@ -4,16 +4,13 @@ import { compileFullModel, loadFullWeightsFromBuffer } from './model_full.js';
 import { compilePalmModel } from './palm_model.js';
 import { createPalmDetector } from './palm_detection.js';
 import type { PalmDetection } from './palm_detection.js';
-import type { Handpose, HandposeInput, HandposeOptions, HandposeResult, HandposeDebugResult, Landmark } from './types.js';
+import type { Handpose, HandposeInput, HandposeOptions, HandposeResult, Landmark } from './types.js';
 import { toKeypoints } from './types.js';
-// Note: One Euro Filter (filter.ts) is available but not used by default.
-// MediaPipe's hand tracking does NOT apply temporal smoothing — smoothness
-// comes from ROI tracking (reusing previous landmarks to compute next crop).
 import { createCropPipeline } from './crop_shader.js';
 import type { CropPipeline } from './crop_shader.js';
 
 // Default: jsdelivr CDN (auto-mirrors npm packages)
-const DEFAULT_WEIGHTS_BASE = 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@latest/weights';
+const DEFAULT_WEIGHTS_BASE = 'https://cdn.jsdelivr.net/npm/@svenflow/micro-handpose@0.3.0/weights';
 
 /**
  * Create a hand detector.
@@ -36,7 +33,6 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     scoreThreshold = 0.5,
     palmScoreThreshold = 0.5,
     maxHands = 3,
-    forceF32 = false,
   } = options;
 
   if (typeof navigator === 'undefined' || !navigator.gpu) {
@@ -72,9 +68,9 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   const LANDMARK_SIZE = 224;
 
   // Compile FULL landmark model (EfficientNet-B0, 224x224)
-  // When f16 is available and forceF32 is not set, use f16 compute to match
-  // MediaPipe's mediump WebGL behavior (reduces ~1.5% precision gap to near-zero)
-  let landmarkModel = await compileFullModel(landmarkWeights, { forceF32 });
+  // When f16 is available, use f16 compute to match MediaPipe's mediump
+  // WebGL behavior (reduces ~1.5% precision gap to near-zero)
+  let landmarkModel = await compileFullModel(landmarkWeights);
 
   // f16 self-test (FULL model doesn't have f16 toggle — always f32 BN weights)
   {
@@ -191,20 +187,6 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     };
   }
 
-  // Scratch canvases
-  let palmScratchCanvas: OffscreenCanvas | null = null;
-  let cropScratchCanvas: OffscreenCanvas | null = null;
-
-  function getPalmScratchCanvas(): OffscreenCanvas {
-    if (!palmScratchCanvas) palmScratchCanvas = new OffscreenCanvas(192, 192);
-    return palmScratchCanvas;
-  }
-
-  function getCropScratchCanvas(): OffscreenCanvas {
-    if (!cropScratchCanvas) cropScratchCanvas = new OffscreenCanvas(LANDMARK_SIZE, LANDMARK_SIZE);
-    return cropScratchCanvas;
-  }
-
   // GPU crop resources (lazy-initialized, reused across frames)
   const cropDevice = landmarkModel.device;
   let gpuCropPipeline: CropPipeline | null = null;
@@ -247,38 +229,6 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
   // Letterbox padding for removing letterbox from detections
   let lbPadX = 0; // normalized padding on left (and right)
   let lbPadY = 0; // normalized padding on top (and bottom)
-
-  /**
-   * Convert input to 192x192 for palm detection using LETTERBOXING.
-   * MediaPipe uses FIT mode (maintain aspect ratio, zero-pad) not STRETCH.
-   */
-  function toPalmInputLetterbox(source: HandposeInput, srcW: number, srcH: number): OffscreenCanvas {
-    const canvas = getPalmScratchCanvas();
-    canvas.width = 192;
-    canvas.height = 192;
-    const ctx = canvas.getContext('2d')!;
-
-    ctx.clearRect(0, 0, 192, 192);
-
-    const scale = Math.min(192 / srcW, 192 / srcH);
-    const dstW = Math.round(srcW * scale);
-    const dstH = Math.round(srcH * scale);
-    const offsetX = (192 - dstW) / 2;
-    const offsetY = (192 - dstH) / 2;
-
-    lbPadX = offsetX / 192;
-    lbPadY = offsetY / 192;
-
-    if (source instanceof ImageData) {
-      const tmp = new OffscreenCanvas(source.width, source.height);
-      const tmpCtx = tmp.getContext('2d')!;
-      tmpCtx.putImageData(source, 0, 0);
-      ctx.drawImage(tmp, offsetX, offsetY, dstW, dstH);
-    } else {
-      ctx.drawImage(source as CanvasImageSource, 0, 0, srcW, srcH, offsetX, offsetY, dstW, dstH);
-    }
-    return canvas;
-  }
 
   /**
    * Remove letterbox from a palm detection.
@@ -356,54 +306,6 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       sizePx,
       rotation,
     };
-  }
-
-  /**
-   * Crop a hand region from the source image and render to LANDMARK_SIZE canvas.
-   * Uses pixel-based ROI (center and size in original image pixels).
-   * The crop is always SQUARE in pixel space, matching MediaPipe.
-   */
-  function cropHandRegion(
-    source: HandposeInput,
-    pxROI: { centerXpx: number; centerYpx: number; sizePx: number; rotation: number },
-  ): OffscreenCanvas {
-    const canvas = getCropScratchCanvas();
-    canvas.width = LANDMARK_SIZE;
-    canvas.height = LANDMARK_SIZE;
-    const ctx = canvas.getContext('2d')!;
-
-    ctx.clearRect(0, 0, LANDMARK_SIZE, LANDMARK_SIZE);
-
-    const s = LANDMARK_SIZE / pxROI.sizePx;
-    const cosR = Math.cos(pxROI.rotation);
-    const sinR = Math.sin(pxROI.rotation);
-
-    // Apply R(-rotation) to straighten the hand in the crop.
-    // setTransform(a, b, c, d, e, f) maps source (x,y) → canvas:
-    //   canvas_x = a*x + c*y + e
-    //   canvas_y = b*x + d*y + f
-    // R(-θ) = [[cos(θ), sin(θ)], [-sin(θ), cos(θ)]]
-    const a = cosR * s;
-    const b = -sinR * s;
-    const c = sinR * s;
-    const d = cosR * s;
-    const half = LANDMARK_SIZE / 2;
-    const e = -pxROI.centerXpx * a - pxROI.centerYpx * c + half;
-    const f = -pxROI.centerXpx * b - pxROI.centerYpx * d + half;
-
-    ctx.setTransform(a, b, c, d, e, f);
-
-    if (source instanceof ImageData) {
-      const tmp = new OffscreenCanvas(source.width, source.height);
-      const tmpCtx = tmp.getContext('2d')!;
-      tmpCtx.putImageData(source, 0, 0);
-      ctx.drawImage(tmp, 0, 0);
-    } else {
-      ctx.drawImage(source as CanvasImageSource, 0, 0);
-    }
-
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    return canvas;
   }
 
   function getSourceDimensions(source: HandposeInput): [number, number] {
@@ -588,205 +490,6 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     return results;
   }
 
-  /**
-   * Detect hands with full debug information.
-   * Returns intermediate pipeline values for each hand:
-   * - cropLandmarks: raw [0,1] landmarks in crop space (before back-projection)
-   * - roi: crop ROI in pixel space
-   * - palmDetection: palm detection after letterbox removal
-   */
-  async function detectWithDebug(source: HandposeInput): Promise<HandposeDebugResult[]> {
-    // Normalize video/image to ImageBitmap (same as detect() — handles mobile rotation)
-    let normalizedSource: HandposeInput = source;
-    let srcWidth: number;
-    let srcHeight: number;
-
-    if (source instanceof HTMLVideoElement || source instanceof HTMLImageElement) {
-      const bmp = await createImageBitmap(source, { colorSpaceConversion: 'none' });
-      normalizedSource = bmp;
-      srcWidth = bmp.width;
-      srcHeight = bmp.height;
-    } else {
-      [srcWidth, srcHeight] = getSourceDimensions(source);
-    }
-
-    const { detections: rawDetections, lbPadX: gpuLbPadX, lbPadY: gpuLbPadY } =
-      await palmDetector.detectRawWithResize(normalizedSource, srcWidth, srcHeight);
-    lbPadX = gpuLbPadX;
-    lbPadY = gpuLbPadY;
-
-    if (rawDetections.length === 0) return [];
-
-    const results: HandposeDebugResult[] = [];
-
-    const cropPipeline = ensureCropPipeline();
-    const cropOutputBuf = ensureCropOutputBuffer();
-    const srcTexture = ensureCropSourceTexture(srcWidth, srcHeight);
-
-    // Upload source to GPU texture
-    let debugUploadSource: HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
-    if (normalizedSource instanceof ImageData) {
-      debugUploadSource = await createImageBitmap(normalizedSource, { colorSpaceConversion: 'none' });
-    } else {
-      debugUploadSource = normalizedSource as HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
-    }
-    cropDevice.queue.copyExternalImageToTexture(
-      { source: debugUploadSource }, { texture: srcTexture }, [srcWidth, srcHeight],
-    );
-
-    for (const rawDet of rawDetections) {
-      const det = removeLetterbox(rawDet);
-      const pxROI = detectionToPixelROI(det, srcWidth, srcHeight);
-
-      const cosR = Math.cos(pxROI.rotation);
-      const sinR = Math.sin(pxROI.rotation);
-      const s = pxROI.sizePx / LANDMARK_SIZE;
-
-      const halfLM = LANDMARK_SIZE / 2;
-      const a = cosR * s / srcWidth;
-      const b = -sinR * s / srcWidth;
-      const tx = pxROI.centerXpx / srcWidth - halfLM * (a + b);
-      const c = sinR * s / srcHeight;
-      const d = cosR * s / srcHeight;
-      const ty = pxROI.centerYpx / srcHeight - halfLM * (c + d);
-
-      const encoder = cropDevice.createCommandEncoder();
-      cropPipeline.crop(
-        encoder, srcTexture, cropOutputBuf,
-        [a, b, tx, c, d, ty],
-        srcWidth, srcHeight, LANDMARK_SIZE,
-      );
-      cropDevice.queue.submit([encoder.finish()]);
-
-      const output = await landmarkModel.runFromGPUBuffer(cropOutputBuf);
-      const handScore = output.handflag[0]!;
-
-      if (handScore < scoreThreshold) continue;
-
-      const isRight = output.handedness[0]! > 0.5;
-
-      // Save raw crop-space landmarks
-      const cropLandmarks: Landmark[] = [];
-      const landmarks: Landmark[] = [];
-
-      for (let i = 0; i < 21; i++) {
-        const lx = output.landmarks[i * 3]!;
-        const ly = output.landmarks[i * 3 + 1]!;
-        const lz = output.landmarks[i * 3 + 2]!;
-
-        cropLandmarks.push({ x: lx, y: ly, z: lz });
-
-        const dx = (lx - 0.5) * pxROI.sizePx;
-        const dy = (ly - 0.5) * pxROI.sizePx;
-        const origXpx = cosR * dx - sinR * dy + pxROI.centerXpx;
-        const origYpx = sinR * dx + cosR * dy + pxROI.centerYpx;
-
-        landmarks.push({
-          x: origXpx / srcWidth,
-          y: origYpx / srcHeight,
-          z: lz,
-        });
-      }
-
-      results.push({
-        score: handScore,
-        handedness: isRight ? 'right' : 'left',
-        landmarks,
-        keypoints: toKeypoints(landmarks),
-        cropLandmarks,
-        roi: { ...pxROI },
-        palmDetection: {
-          score: det.score,
-          box: [...det.box] as [number, number, number, number],
-          keypoints: det.keypoints.map(([kx, ky]) => [kx, ky] as [number, number]),
-        },
-      });
-    }
-
-    return results;
-  }
-
-  /**
-   * Run crop + landmark inference from externally-provided palm detections.
-   * Useful for hybrid pipelines (e.g., WASM palm detection + WebGPU landmarks).
-   */
-  async function detectFromDetections(
-    source: HandposeInput,
-    detections: Array<{ score: number; box: [number, number, number, number]; keypoints: [number, number][] }>,
-  ): Promise<HandposeResult[]> {
-    const [srcWidth, srcHeight] = getSourceDimensions(source);
-    if (detections.length === 0) return [];
-
-    const results: HandposeResult[] = [];
-
-    const cropPipeline = ensureCropPipeline();
-    const cropOutputBuf = ensureCropOutputBuffer();
-    const srcTexture = ensureCropSourceTexture(srcWidth, srcHeight);
-
-    let uploadSource: HTMLCanvasElement | OffscreenCanvas | ImageBitmap | HTMLVideoElement;
-    if (source instanceof ImageData) {
-      uploadSource = await createImageBitmap(source, { colorSpaceConversion: 'none' });
-    } else if (source instanceof HTMLImageElement) {
-      uploadSource = await createImageBitmap(source, { colorSpaceConversion: 'none' });
-    } else {
-      uploadSource = source as HTMLCanvasElement | OffscreenCanvas | ImageBitmap | HTMLVideoElement;
-    }
-    cropDevice.queue.copyExternalImageToTexture(
-      { source: uploadSource }, { texture: srcTexture }, [srcWidth, srcHeight],
-    );
-
-    for (const det of detections) {
-      // Compute pixel-based ROI (detections should already be in image-normalized coords)
-      const pxROI = detectionToPixelROI(det as any, srcWidth, srcHeight);
-
-      const cosR = Math.cos(pxROI.rotation);
-      const sinR = Math.sin(pxROI.rotation);
-      const s = pxROI.sizePx / LANDMARK_SIZE;
-
-      const halfLM = LANDMARK_SIZE / 2;
-      const a = cosR * s / srcWidth;
-      const b = -sinR * s / srcWidth;
-      const tx = pxROI.centerXpx / srcWidth - halfLM * (a + b);
-      const c = sinR * s / srcHeight;
-      const d = cosR * s / srcHeight;
-      const ty = pxROI.centerYpx / srcHeight - halfLM * (c + d);
-
-      const encoder = cropDevice.createCommandEncoder();
-      cropPipeline.crop(
-        encoder, srcTexture, cropOutputBuf,
-        [a, b, tx, c, d, ty],
-        srcWidth, srcHeight, LANDMARK_SIZE,
-      );
-      cropDevice.queue.submit([encoder.finish()]);
-
-      const output = await landmarkModel.runFromGPUBuffer(cropOutputBuf);
-      const handScore = output.handflag[0]!;
-      if (handScore < scoreThreshold) continue;
-
-      const isRight = output.handedness[0]! > 0.5;
-      const landmarks: Landmark[] = [];
-      for (let i = 0; i < 21; i++) {
-        const lx = output.landmarks[i * 3]!;
-        const ly = output.landmarks[i * 3 + 1]!;
-        const lz = output.landmarks[i * 3 + 2]!;
-        const dx = (lx - 0.5) * pxROI.sizePx;
-        const dy = (ly - 0.5) * pxROI.sizePx;
-        const origXpx = cosR * dx - sinR * dy + pxROI.centerXpx;
-        const origYpx = sinR * dx + cosR * dy + pxROI.centerYpx;
-        landmarks.push({ x: origXpx / srcWidth, y: origYpx / srcHeight, z: lz });
-      }
-
-      results.push({
-        score: handScore,
-        handedness: isRight ? 'right' : 'left',
-        landmarks,
-        keypoints: toKeypoints(landmarks),
-      });
-    }
-
-    return results;
-  }
-
   function dispose(): void {
     if (gpuCropSourceTexture) gpuCropSourceTexture.destroy();
     if (gpuCropOutputBuffer) gpuCropOutputBuffer.destroy();
@@ -795,24 +498,12 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     gpuCropPipeline = null;
     landmarkModel.device.destroy();
     palmModel.device.destroy();
-    palmScratchCanvas = null;
-    cropScratchCanvas = null;
   }
-
-  // Expose internals for debugging
-  const _debug = {
-    palmDetector,
-    palmModel,
-    landmarkModel,
-    removeLetterbox,
-    detectionToPixelROI,
-    cropHandRegion,
-  };
 
   /** Reset tracking state (call between unrelated images or when hand is lost) */
   function reset(): void {
     trackedHands = [];
   }
 
-  return { detect, detectWithDebug, detectFromDetections, dispose, reset, _debug };
+  return { detect, dispose, reset };
 }

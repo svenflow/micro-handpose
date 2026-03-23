@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/@svenflow/micro-handpose)](https://www.npmjs.com/package/@svenflow/micro-handpose)
 [![license](https://img.shields.io/npm/l/@svenflow/micro-handpose)](./LICENSE)
 
-**WebGPU hand tracking for the browser. Multi-hand detection with ROI tracking, 21 landmarks per hand. No WASM, no ONNX Runtime — just 15 compute shaders. 80KB JS + model weights downloaded at runtime.**
+**WebGPU hand tracking for the browser. Multi-hand detection with ROI tracking, 21 landmarks per hand. No WASM, no ONNX Runtime — just 15 compute shaders. 74KB JS + model weights downloaded at runtime.**
 
 [**Live Demo**](https://svenflow.github.io/micro-handpose/) | [npm](https://www.npmjs.com/package/@svenflow/micro-handpose)
 
@@ -61,6 +61,7 @@ Creates and initializes the detector. Downloads weights and compiles WebGPU pipe
 |--------|------|---------|-------------|
 | `weightsUrl` | `string` | jsdelivr CDN | Base URL for weight files |
 | `scoreThreshold` | `number` | `0.5` | Minimum hand confidence (0-1) |
+| `palmScoreThreshold` | `number` | `0.5` | Minimum palm detection score (0-1) |
 | `maxHands` | `number` | `3` | Maximum hands to detect |
 
 ### `handpose.detect(source)`
@@ -116,6 +117,81 @@ Copy the `weights/` directory from the npm package to your server.
 | Edge 113+ | ✅ |
 | Safari 18+ (macOS/iOS) | ✅ |
 | Firefox Nightly | Experimental |
+
+## Error Handling
+
+Check for WebGPU support before initializing:
+
+```typescript
+if (!navigator.gpu) {
+  console.error('WebGPU is not supported in this browser')
+  // Fall back to a non-WebGPU solution or show a message
+}
+```
+
+Wrap initialization in a try/catch to handle GPU adapter or device failures:
+
+```typescript
+try {
+  const handpose = await createHandpose()
+  const hands = await handpose.detect(videoElement)
+} catch (err) {
+  console.error('Failed to initialize hand tracking:', err)
+}
+```
+
+## SSR / Server-Side Rendering
+
+`micro-handpose` requires WebGPU and browser APIs (`navigator.gpu`, `OffscreenCanvas`, etc.) that are not available in server environments. If you use a framework with server-side rendering (Next.js, Nuxt, SvelteKit, etc.), make sure to only import and initialize it on the client:
+
+```typescript
+// Next.js example (app router)
+'use client'
+
+import { useEffect, useState } from 'react'
+import type { Handpose } from '@svenflow/micro-handpose'
+
+export default function HandTracker() {
+  const [handpose, setHandpose] = useState<Handpose | null>(null)
+
+  useEffect(() => {
+    import('@svenflow/micro-handpose').then(({ createHandpose }) => {
+      createHandpose().then(setHandpose)
+    })
+  }, [])
+
+  // ...
+}
+```
+
+## FAQ
+
+**Does it work on mobile?**
+Yes. WebGPU is supported in Chrome on Android and Safari on iOS 18+. Performance varies by device.
+
+**How many hands can it track?**
+Up to 3 by default. Set `maxHands` in the options to change this.
+
+**Does it work offline?**
+Model weights are downloaded on first use and cached by the browser. After that, it works offline. You can also self-host the weights (see [Self-Hosting Weights](#self-hosting-weights)).
+
+**What license is the model under?**
+The model architecture and weights are derived from MediaPipe's hand landmark model, which is published under the Apache 2.0 license.
+
+## Development
+
+```bash
+git clone https://github.com/svenflow/micro-handpose.git
+cd micro-handpose
+npm install
+npm run dev    # Watch mode with hot reload
+npm run build  # Production build
+```
+
+## Credits
+
+- Hand landmark model architecture and weights adapted from [MediaPipe Hands](https://github.com/google-ai-edge/mediapipe) (Apache 2.0 license).
+- ROI tracking approach follows MediaPipe's pipeline design (palm detection + landmark tracking with re-detection on loss).
 
 ## License
 
