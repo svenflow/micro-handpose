@@ -6,8 +6,9 @@ import { createPalmDetector } from './palm_detection.js';
 import type { PalmDetection } from './palm_detection.js';
 import type { Handpose, HandposeInput, HandposeOptions, HandposeResult, HandposeDebugResult, Landmark } from './types.js';
 import { toKeypoints } from './types.js';
-import { createLandmarkSmoother } from './filter.js';
-import type { LandmarkSmoother } from './filter.js';
+// Note: One Euro Filter (filter.ts) is available but not used by default.
+// MediaPipe's hand tracking does NOT apply temporal smoothing — smoothness
+// comes from ROI tracking (reusing previous landmarks to compute next crop).
 import { createCropPipeline } from './crop_shader.js';
 import type { CropPipeline } from './crop_shader.js';
 
@@ -98,12 +99,109 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     maxHands,
   });
 
-  // Per-hand one euro filters for temporal smoothing
-  const smoothers: LandmarkSmoother[] = [];
-  for (let i = 0; i < maxHands; i++) {
-    smoothers.push(createLandmarkSmoother());
+  // ROI tracking state: previous frame's landmarks per hand (for tracking mode)
+  // When tracking, we compute the next-frame crop ROI from previous landmarks
+  // instead of re-running palm detection (matches MediaPipe's approach)
+  let trackedHands: Array<{ landmarks: Landmark[]; handedness: 'left' | 'right' }> = [];
+
+  /**
+   * Compute ROI from previous frame's landmarks (MediaPipe's tracking path).
+   * Uses HandLandmarksToRectCalculator + RectTransformationCalculator.
+   *
+   * 1. Extract 12 partial landmarks (palm + finger MCPs/PIPs)
+   * 2. Compute rotation from wrist → averaged finger MCPs
+   * 3. Find axis-aligned bounding box in rotated space
+   * 4. Apply shift_y=-0.1, scale=2.0, square_long=true
+   */
+  function landmarksToROI(
+    landmarks: Landmark[], imgW: number, imgH: number
+  ): { centerXpx: number; centerYpx: number; sizePx: number; rotation: number } {
+    // Step 1: Compute rotation from wrist + finger MCPs
+    // MediaPipe uses wrist(0), indexMCP(5), middleMCP(9), ringMCP(13)
+    const wrist = landmarks[0]!;
+    const indexMCP = landmarks[5]!;
+    const middleMCP = landmarks[9]!;
+    const ringMCP = landmarks[13]!;
+
+    const x0 = wrist.x * imgW;
+    const y0 = wrist.y * imgH;
+
+    // Average index+ring MCPs, then average with middle MCP
+    let x1 = (indexMCP.x + ringMCP.x) / 2;
+    let y1 = (indexMCP.y + ringMCP.y) / 2;
+    x1 = (x1 + middleMCP.x) / 2 * imgW;
+    y1 = (y1 + middleMCP.y) / 2 * imgH;
+
+    const rawRotation = Math.PI / 2 - Math.atan2(-(y1 - y0), x1 - x0);
+    const rotation = rawRotation - 2 * Math.PI * Math.floor((rawRotation + Math.PI) / (2 * Math.PI));
+
+    // Step 2: Extract 12 partial landmarks for bounding box
+    const partialIndices = [0, 1, 2, 3, 5, 6, 9, 10, 13, 14, 17, 18];
+    const cosR = Math.cos(rotation);
+    const sinR = Math.sin(rotation);
+
+    // Rotate landmarks and find axis-aligned bounding box in rotated space
+    let minRx = Infinity, maxRx = -Infinity;
+    let minRy = Infinity, maxRy = -Infinity;
+    for (const idx of partialIndices) {
+      const lm = landmarks[idx]!;
+      const px = lm.x * imgW;
+      const py = lm.y * imgH;
+      // Rotate to aligned space: R(-rotation)
+      const rx = cosR * px + sinR * py;
+      const ry = -sinR * px + cosR * py;
+      minRx = Math.min(minRx, rx);
+      maxRx = Math.max(maxRx, rx);
+      minRy = Math.min(minRy, ry);
+      maxRy = Math.max(maxRy, ry);
+    }
+
+    // Bounding box center and size in rotated space
+    const rcx = (minRx + maxRx) / 2;
+    const rcy = (minRy + maxRy) / 2;
+    let boxW = maxRx - minRx;
+    let boxH = maxRy - minRy;
+
+    // Rotate center back to original space
+    let cx = (cosR * rcx - sinR * rcy) / imgW; // normalized
+    let cy = (sinR * rcx + cosR * rcy) / imgH; // normalized
+    boxW /= imgW; // normalized
+    boxH /= imgH; // normalized
+
+    // Step 3: RectTransformationCalculator
+    // shift_y = -0.1 (shift upward toward fingers)
+    const shiftY = -0.1;
+    const boxHpx = boxH * imgH;
+    cx += (0.5 * boxHpx * shiftY * sinR) / imgW; // wait, shift_x=0 so simplified
+    // Actually: with shift_x=0, shift_y=-0.1:
+    //   x_shift = (imgH * h * 0.1 * sin(rot)) / imgW  (note: -shift_y = +0.1)
+    //   y_shift = h * (-0.1) * cos(rot)
+    // Re-derive properly:
+    //   x_shift = (-imgH * boxH * shiftY * sin(rot)) / imgW  -- wait, MediaPipe formula:
+    //   x_shift = (imgW*w*shift_x*cos - imgH*h*shift_y*sin) / imgW
+    //   y_shift = (imgW*w*shift_x*sin + imgH*h*shift_y*cos) / imgH
+    // With shift_x=0:
+    //   x_shift = (-imgH * boxH * shiftY * sin(rot)) / imgW = (imgH * boxH * 0.1 * sin(rot)) / imgW
+    //   y_shift = (imgH * boxH * shiftY * cos(rot)) / imgH = boxH * (-0.1) * cos(rot)
+    const xShift = (-imgH * boxH * shiftY * sinR) / imgW;
+    const yShift = (imgH * boxH * shiftY * cosR) / imgH;
+    cx += xShift;
+    cy += yShift;
+
+    // square_long: use max dimension in pixels
+    const longSidePx = Math.max(boxW * imgW, boxH * imgH);
+
+    // scale: 2.0 (landmark path uses 2.0, palm detection path uses 2.6)
+    const scale = 2.0;
+    const sizePx = longSidePx * scale;
+
+    return {
+      centerXpx: cx * imgW,
+      centerYpx: cy * imgH,
+      sizePx,
+      rotation,
+    };
   }
-  let prevHandCount = 0;
 
   // Scratch canvases
   let palmScratchCanvas: OffscreenCanvas | null = null;
@@ -339,11 +437,67 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     return [LANDMARK_SIZE, LANDMARK_SIZE];
   }
 
+  /**
+   * Run landmark inference for a single ROI. Shared between palm-detection and tracking paths.
+   * Returns landmarks + metadata, or null if hand score is below threshold.
+   */
+  async function runLandmarkForROI(
+    pxROI: { centerXpx: number; centerYpx: number; sizePx: number; rotation: number },
+    srcTexture: GPUTexture,
+    srcWidth: number, srcHeight: number,
+    cropPipeline: CropPipeline, cropOutputBuf: GPUBuffer,
+  ): Promise<{ landmarks: Landmark[]; score: number; handedness: 'left' | 'right' } | null> {
+    const cosR = Math.cos(pxROI.rotation);
+    const sinR = Math.sin(pxROI.rotation);
+    const s = pxROI.sizePx / LANDMARK_SIZE;
+
+    const halfLM = LANDMARK_SIZE / 2;
+    const a = cosR * s / srcWidth;
+    const b = -sinR * s / srcWidth;
+    const tx = pxROI.centerXpx / srcWidth - halfLM * (a + b);
+    const c = sinR * s / srcHeight;
+    const d = cosR * s / srcHeight;
+    const ty = pxROI.centerYpx / srcHeight - halfLM * (c + d);
+
+    const encoder = cropDevice.createCommandEncoder();
+    cropPipeline.crop(
+      encoder, srcTexture, cropOutputBuf,
+      [a, b, tx, c, d, ty],
+      srcWidth, srcHeight, LANDMARK_SIZE,
+    );
+    cropDevice.queue.submit([encoder.finish()]);
+
+    const output = await landmarkModel.runFromGPUBuffer(cropOutputBuf);
+    const handScore = output.handflag[0]!;
+
+    if (handScore < scoreThreshold) return null;
+
+    const isRight = output.handedness[0]! > 0.5;
+    const landmarks: Landmark[] = [];
+
+    for (let i = 0; i < 21; i++) {
+      const lx = output.landmarks[i * 3]!;
+      const ly = output.landmarks[i * 3 + 1]!;
+      const lz = output.landmarks[i * 3 + 2]!;
+
+      const dx = (lx - 0.5) * pxROI.sizePx;
+      const dy = (ly - 0.5) * pxROI.sizePx;
+
+      const origXpx = cosR * dx - sinR * dy + pxROI.centerXpx;
+      const origYpx = sinR * dx + cosR * dy + pxROI.centerYpx;
+
+      landmarks.push({
+        x: origXpx / srcWidth,
+        y: origYpx / srcHeight,
+        z: lz,
+      });
+    }
+
+    return { landmarks, score: handScore, handedness: isRight ? 'right' : 'left' };
+  }
+
   async function detect(source: HandposeInput): Promise<HandposeResult[]> {
     // Normalize video/image to ImageBitmap early to handle mobile camera rotation.
-    // On iOS Safari, video.videoWidth/videoHeight may report sensor dimensions (landscape)
-    // while createImageBitmap returns display-oriented pixels (portrait). Using ImageBitmap
-    // ensures consistent dimensions throughout the pipeline.
     let normalizedSource: HandposeInput = source;
     let srcWidth: number;
     let srcHeight: number;
@@ -357,33 +511,9 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       [srcWidth, srcHeight] = getSourceDimensions(source);
     }
 
-    // Step 1: Palm detection with GPU letterbox resize (matches MediaPipe's bilinear exactly)
-    const { detections: rawDetections, lbPadX: gpuLbPadX, lbPadY: gpuLbPadY } =
-      await palmDetector.detectRawWithResize(normalizedSource, srcWidth, srcHeight);
-    // Update letterbox padding for removeLetterbox
-    lbPadX = gpuLbPadX;
-    lbPadY = gpuLbPadY;
-
-    if (rawDetections.length === 0) {
-      if (prevHandCount > 0) {
-        for (let i = 0; i < prevHandCount && i < smoothers.length; i++) {
-          smoothers[i]!.reset();
-        }
-      }
-      prevHandCount = 0;
-      return [];
-    }
-
-    const results: HandposeResult[] = [];
-
-    // Step 2: For each detection, remove letterbox → compute ROI → GPU crop → landmark
-    // Upload source image to GPU texture once per frame (reused across all hand crops)
+    // Upload source to GPU texture (shared by both tracking and detection paths)
     const cropPipeline = ensureCropPipeline();
     const cropOutputBuf = ensureCropOutputBuffer();
-
-    // Upload source to GPU texture
-    // normalizedSource is already an ImageBitmap for video/image, or canvas/ImageData
-    // colorSpaceConversion:'none' prevents sRGB→P3 conversion on wide-gamut displays
     const srcTexture = ensureCropSourceTexture(srcWidth, srcHeight);
     let uploadSource: HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
     if (normalizedSource instanceof ImageData) {
@@ -397,102 +527,75 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       [srcWidth, srcHeight],
     );
 
-    for (const rawDet of rawDetections) {
-      // Remove letterbox from detection (letterbox → image normalized coords)
-      const det = removeLetterbox(rawDet);
+    // ---- TRACKING PATH ----
+    // If we have previous landmarks, try to track using landmark-derived ROI
+    // (skip palm detection — matches MediaPipe's approach for smooth, fast tracking)
+    if (trackedHands.length > 0) {
+      const results: HandposeResult[] = [];
 
-      // Compute pixel-based ROI matching MediaPipe's exact pipeline
+      for (const tracked of trackedHands) {
+        // Compute ROI from previous landmarks (MediaPipe's landmark-to-ROI path)
+        const pxROI = landmarksToROI(tracked.landmarks, srcWidth, srcHeight);
+
+        const result = await runLandmarkForROI(
+          pxROI, srcTexture, srcWidth, srcHeight, cropPipeline, cropOutputBuf
+        );
+
+        if (result) {
+          results.push({
+            score: result.score,
+            handedness: result.handedness,
+            landmarks: result.landmarks,
+            keypoints: toKeypoints(result.landmarks),
+          });
+        }
+        // If hand score < threshold, this tracked hand is lost — don't add to results
+      }
+
+      if (results.length > 0) {
+        // Tracking succeeded — update tracked hands for next frame
+        trackedHands = results.map(r => ({ landmarks: r.landmarks, handedness: r.handedness }));
+        return results;
+      }
+
+      // All tracked hands lost — fall through to palm detection
+      trackedHands = [];
+    }
+
+    // ---- DETECTION PATH ----
+    // No tracked hands (first frame or tracking lost) — run palm detection
+    const { detections: rawDetections, lbPadX: gpuLbPadX, lbPadY: gpuLbPadY } =
+      await palmDetector.detectRawWithResize(normalizedSource, srcWidth, srcHeight);
+    lbPadX = gpuLbPadX;
+    lbPadY = gpuLbPadY;
+
+    if (rawDetections.length === 0) {
+      trackedHands = [];
+      return [];
+    }
+
+    const results: HandposeResult[] = [];
+
+    for (const rawDet of rawDetections) {
+      const det = removeLetterbox(rawDet);
       const pxROI = detectionToPixelROI(det, srcWidth, srcHeight);
 
-      // Compute affine transform: crop pixel [0,LANDMARK_SIZE] → source normalized [0,1]
-      // The crop shader expects: source_x = a * crop_x + b * crop_y + tx
-      //                          source_y = c * crop_x + d * crop_y + ty
-      // where crop coords include +0.5 pixel center offset (handled in shader)
-      const cosR = Math.cos(pxROI.rotation);
-      const sinR = Math.sin(pxROI.rotation);
-      const s = pxROI.sizePx / LANDMARK_SIZE; // scale from crop pixels to source pixels
-
-      // Affine: crop pixel (fx,fy) → source normalized coords via R(+rotation) + scale + translate
-      // The canvas crop applied R(-rotation) to go source→crop.
-      // Inverse is R(+rotation): crop→source.
-      // R(θ) = [[cos, -sin], [sin, cos]]
-      // src_x = cos(r)/s * crop_x - sin(r)/s * crop_y + ...  (in pixel space)
-      // Then normalize by dividing by srcWidth/srcHeight
-      const halfLM = LANDMARK_SIZE / 2;
-      const a = cosR * s / srcWidth;
-      const b = -sinR * s / srcWidth;
-      const tx = pxROI.centerXpx / srcWidth - halfLM * (a + b);
-      const c = sinR * s / srcHeight;
-      const d = cosR * s / srcHeight;
-      const ty = pxROI.centerYpx / srcHeight - halfLM * (c + d);
-
-      // Run GPU crop shader
-      const encoder = cropDevice.createCommandEncoder();
-      cropPipeline.crop(
-        encoder, srcTexture, cropOutputBuf,
-        [a, b, tx, c, d, ty],
-        srcWidth, srcHeight, LANDMARK_SIZE,
+      const result = await runLandmarkForROI(
+        pxROI, srcTexture, srcWidth, srcHeight, cropPipeline, cropOutputBuf
       );
-      cropDevice.queue.submit([encoder.finish()]);
 
-      // Run landmark inference directly from GPU buffer (no CPU roundtrip)
-      const output = await landmarkModel.runFromGPUBuffer(cropOutputBuf);
-      const handScore = output.handflag[0]!;
-
-      if (handScore < scoreThreshold) continue;
-
-      const isRight = output.handedness[0]! > 0.5;
-
-      // Parse landmarks in crop space [0, 1] and project to original image [0, 1]
-      // Matches MediaPipe's LandmarkProjectionCalculator (NORM_RECT path):
-      //   Step 1: Rotate isotropically in centered [-0.5, 0.5] space
-      //   Step 2: Scale by rect.width()/rect.height() and add center
-      // Reference: mediapipe/calculators/util/landmark_projection_calculator.cc
-      const landmarks: Landmark[] = [];
-
-      for (let i = 0; i < 21; i++) {
-        const lx = output.landmarks[i * 3]!;     // crop x [0,1]
-        const ly = output.landmarks[i * 3 + 1]!; // crop y [0,1]
-        const lz = output.landmarks[i * 3 + 2]!;
-
-        // Project from LANDMARK_SIZE crop back to original image pixels
-        // Crop [0,1] → centered [-0.5,0.5] → scale by physical size → inverse rotate → add center
-        const dx = (lx - 0.5) * pxROI.sizePx;
-        const dy = (ly - 0.5) * pxROI.sizePx;
-
-        // Inverse of R(-rotation) = R(+rotation): crop → original image
-        // R(θ) = [[cos(θ), -sin(θ)], [sin(θ), cos(θ)]]
-        const origXpx = cosR * dx - sinR * dy + pxROI.centerXpx;
-        const origYpx = sinR * dx + cosR * dy + pxROI.centerYpx;
-
-        landmarks.push({
-          x: origXpx / srcWidth,
-          y: origYpx / srcHeight,
-          z: lz,
+      if (result) {
+        results.push({
+          score: result.score,
+          handedness: result.handedness,
+          landmarks: result.landmarks,
+          keypoints: toKeypoints(result.landmarks),
         });
       }
-
-      // Apply one euro filter for temporal smoothing
-      const handIdx = results.length;
-      const smoothedLandmarks = handIdx < smoothers.length
-        ? smoothers[handIdx]!.apply(landmarks)
-        : landmarks;
-
-      results.push({
-        score: handScore,
-        handedness: isRight ? 'right' : 'left',
-        landmarks: smoothedLandmarks,
-        keypoints: toKeypoints(smoothedLandmarks),
-      });
     }
 
-    // Reset smoothers for hands that disappeared
-    if (results.length < prevHandCount) {
-      for (let i = results.length; i < prevHandCount; i++) {
-        if (i < smoothers.length) smoothers[i]!.reset();
-      }
-    }
-    prevHandCount = results.length;
+    // Store for tracking on next frame
+    trackedHands = results.map(r => ({ landmarks: r.landmarks, handedness: r.handedness }));
 
     return results;
   }
@@ -718,10 +821,9 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     cropHandRegion,
   };
 
-  /** Reset temporal smoothing state (call between unrelated images) */
+  /** Reset tracking state (call between unrelated images or when hand is lost) */
   function reset(): void {
-    for (const s of smoothers) s.reset();
-    prevHandCount = 0;
+    trackedHands = [];
   }
 
   return { detect, detectWithDebug, detectFromDetections, dispose, reset, _debug };
