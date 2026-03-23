@@ -845,6 +845,15 @@ handpose.<span class="fn">dispose</span>()</pre>
     const errorBar = document.getElementById('errorBar');
     const modelLabel = document.getElementById('modelLabel');
 
+    // Diagnostic mode: ?diag shows dimension info overlay
+    const diagMode = new URLSearchParams(location.search).has('diag');
+    // Canvas capture mode: always capture video to 2D canvas before model input
+    // This works around potential ImageBitmap orientation issues on iOS Safari
+    const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    let captureCanvas = null;
+    let captureCtx = null;
+    let diagInfo = {};
+
     function showError(msg) {
       errorBar.textContent = msg;
       errorBar.style.display = 'block';
@@ -997,20 +1006,37 @@ handpose.<span class="fn">dispose</span>()</pre>
         video.srcObject = stream;
         await video.play();
 
-        // Get ACTUAL frame dimensions (handles iOS portrait rotation).
-        // On iOS Safari, video.videoWidth/Height may report sensor dims (640x480 landscape)
-        // while createImageBitmap returns display-oriented dims (480x640 portrait).
-        // The model pipeline uses ImageBitmap, so the canvas must match.
+        // Probe actual frame dimensions via ImageBitmap (handles iOS rotation)
         const probeBmp = await createImageBitmap(video);
-        const vw = probeBmp.width;
-        const vh = probeBmp.height;
+        const bmpW = probeBmp.width;
+        const bmpH = probeBmp.height;
         probeBmp.close();
 
+        // Use video element dimensions for canvas (what the browser displays)
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
         canvas.width = vw;
         canvas.height = vh;
 
+        // Store diagnostic info
+        diagInfo = {
+          videoW: vw, videoH: vh,
+          bmpW: bmpW, bmpH: bmpH,
+          screen: `${screen.width}x${screen.height}`,
+          orientation: screen.orientation?.type || 'unknown',
+          isMobile,
+        };
+        console.log('[micro-handpose] Diag:', JSON.stringify(diagInfo));
+
+        // On mobile, create a capture canvas to work around potential
+        // ImageBitmap/WebGPU video orientation issues on iOS Safari
+        if (isMobile) {
+          captureCanvas = new OffscreenCanvas(vw, vh);
+          captureCtx = captureCanvas.getContext('2d');
+          console.log('[micro-handpose] Mobile detected — using canvas capture');
+        }
+
         document.getElementById('viewport').style.aspectRatio = `${vw} / ${vh}`;
-        console.log(`[micro-handpose] Camera: videoElement=${video.videoWidth}x${video.videoHeight}, actual=${vw}x${vh}`);
 
         placeholder.style.display = 'none';
         cameraReady = true;
@@ -1086,8 +1112,15 @@ handpose.<span class="fn">dispose</span>()</pre>
     let debugFrameCount = 0;
 
     async function detectMicro() {
+      // On mobile, capture video to 2D canvas first (normalizes rotation/orientation)
+      let source = video;
+      if (captureCanvas && captureCtx) {
+        captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+        source = captureCanvas;
+      }
+
       const t0 = performance.now();
-      const hands = await microHandpose.detect(video);
+      const hands = await microHandpose.detect(source);
       const inferTime = performance.now() - t0;
 
       updateInferDisplay(inferTime);
@@ -1124,6 +1157,30 @@ handpose.<span class="fn">dispose</span>()</pre>
       } else {
         handVal.textContent = '\u2014';
         handVal.classList.remove('active');
+      }
+
+      // Diagnostic overlay
+      if (diagMode) {
+        ctx.save();
+        ctx.font = '14px monospace';
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillRect(0, 0, canvas.width, 80);
+        ctx.fillStyle = '#0f0';
+        ctx.fillText(`video: ${diagInfo.videoW}x${diagInfo.videoH} | bmp: ${diagInfo.bmpW}x${diagInfo.bmpH} | canvas: ${canvas.width}x${canvas.height}`, 8, 18);
+        ctx.fillText(`screen: ${diagInfo.screen} | orient: ${diagInfo.orientation} | mobile: ${diagInfo.isMobile} | capture: ${!!captureCanvas}`, 8, 36);
+        if (hands.length > 0) {
+          const w0 = hands[0].landmarks[0];
+          ctx.fillText(`wrist: (${w0.x.toFixed(3)}, ${w0.y.toFixed(3)}) | ${hands[0].handedness}`, 8, 54);
+          // Draw a crosshair at wrist position for visual verification
+          const wx = w0.x * canvas.width, wy = w0.y * canvas.height;
+          ctx.strokeStyle = '#f00';
+          ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(wx - 20, wy); ctx.lineTo(wx + 20, wy); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(wx, wy - 20); ctx.lineTo(wx, wy + 20); ctx.stroke();
+        } else {
+          ctx.fillText('no hand detected', 8, 54);
+        }
+        ctx.restore();
       }
     }
 
