@@ -997,15 +997,20 @@ handpose.<span class="fn">dispose</span>()</pre>
         video.srcObject = stream;
         await video.play();
 
-        // Use actual display dimensions (handles mobile camera rotation where
-        // videoWidth/videoHeight may report sensor dimensions, not display dimensions)
-        const vw = video.videoWidth;
-        const vh = video.videoHeight;
+        // Get ACTUAL frame dimensions (handles iOS portrait rotation).
+        // On iOS Safari, video.videoWidth/Height may report sensor dims (640x480 landscape)
+        // while createImageBitmap returns display-oriented dims (480x640 portrait).
+        // The model pipeline uses ImageBitmap, so the canvas must match.
+        const probeBmp = await createImageBitmap(video);
+        const vw = probeBmp.width;
+        const vh = probeBmp.height;
+        probeBmp.close();
+
         canvas.width = vw;
         canvas.height = vh;
 
         document.getElementById('viewport').style.aspectRatio = `${vw} / ${vh}`;
-        console.log(`[micro-handpose] Camera: ${vw}x${vh}`);
+        console.log(`[micro-handpose] Camera: videoElement=${video.videoWidth}x${video.videoHeight}, actual=${vw}x${vh}`);
 
         placeholder.style.display = 'none';
         cameraReady = true;
