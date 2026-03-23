@@ -1050,15 +1050,18 @@ handpose.<span class="fn">dispose</span>()</pre>
           const bmpH = probeBmp.height;
           probeBmp.close();
 
-          // Use video element dimensions for canvas (what the browser displays)
-          vw = video.videoWidth;
-          vh = video.videoHeight;
+          // Use ImageBitmap-probed dimensions for canvas — on iOS Safari,
+          // video.videoWidth/Height can report sensor (landscape) dimensions
+          // while the actual frames are display-oriented (portrait).
+          // ImageBitmap always reflects true pixel orientation.
+          vw = bmpW;
+          vh = bmpH;
           canvas.width = vw;
           canvas.height = vh;
 
           // Store diagnostic info
           diagInfo = {
-            videoW: vw, videoH: vh,
+            videoW: video.videoWidth, videoH: video.videoHeight,
             bmpW: bmpW, bmpH: bmpH,
             screen: `${screen.width}x${screen.height}`,
             orientation: screen.orientation?.type || 'unknown',
@@ -1066,13 +1069,10 @@ handpose.<span class="fn">dispose</span>()</pre>
           };
           console.log('[micro-handpose] Diag:', JSON.stringify(diagInfo));
 
-          // On mobile, create a capture canvas to work around potential
-          // ImageBitmap/WebGPU video orientation issues on iOS Safari
-          if (isMobile) {
-            captureCanvas = new OffscreenCanvas(vw, vh);
-            captureCtx = captureCanvas.getContext('2d');
-            console.log('[micro-handpose] Mobile detected — using canvas capture');
-          }
+          // NOTE: We pass the video element directly to detect() —
+          // the library normalizes via createImageBitmap internally,
+          // which correctly handles iOS orientation. Do NOT use
+          // OffscreenCanvas capture here as it bypasses that fix.
         }
 
         document.getElementById('viewport').style.aspectRatio = `${vw} / ${vh}`;
@@ -1151,12 +1151,9 @@ handpose.<span class="fn">dispose</span>()</pre>
     let debugFrameCount = 0;
 
     async function detectMicro() {
-      // Choose source: reference image, mobile canvas capture, or video
-      let source = refImage || video;
-      if (!refImage && captureCanvas && captureCtx) {
-        captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
-        source = captureCanvas;
-      }
+      // Choose source: reference image or video element
+      // The library's detect() handles video orientation via createImageBitmap
+      const source = refImage || video;
 
       const t0 = performance.now();
       const hands = await microHandpose.detect(source);
