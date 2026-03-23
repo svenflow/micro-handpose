@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reference Image Test</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 10px; }
+    canvas { border: 1px solid #333; display: block; margin: 10px 0; }
+    pre { background: #222; padding: 8px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; }
+    .side { display: flex; gap: 10px; flex-wrap: wrap; }
+    .side > div { flex: 1; min-width: 300px; }
+    h3 { margin: 5px 0; }
+  </style>
+</head>
+<body>
+  <h2>Reference Image: micro-handpose vs MediaPipe</h2>
+  <div id="status">Loading...</div>
+  <div class="side">
+    <div>
+      <h3>micro-handpose (purple)</h3>
+      <canvas id="micro"></canvas>
+    </div>
+    <div>
+      <h3>MediaPipe (green)</h3>
+      <canvas id="mp"></canvas>
+    </div>
+  </div>
+  <div>
+    <h3>Overlay (both)</h3>
+    <canvas id="overlay"></canvas>
+  </div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const status = document.getElementById('status');
+    const output = document.getElementById('output');
+    let text = '';
+    function log(msg) { text += msg + '\n'; output.textContent = text; }
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17],
+    ];
+
+    const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip',
+      'index_mcp','index_pip','index_dip','index_tip',
+      'middle_mcp','middle_pip','middle_dip','middle_tip',
+      'ring_mcp','ring_pip','ring_dip','ring_tip',
+      'pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
+
+    function drawLm(ctx, lm, w, h, color, lineWidth = 2) {
+      ctx.strokeStyle = color; ctx.lineWidth = lineWidth;
+      for (const [a, b] of CONNECTIONS) {
+        ctx.beginPath();
+        ctx.moveTo(lm[a].x * w, lm[a].y * h);
+        ctx.lineTo(lm[b].x * w, lm[b].y * h);
+        ctx.stroke();
+      }
+      for (let i = 0; i < lm.length; i++) {
+        ctx.beginPath();
+        ctx.arc(lm[i].x * w, lm[i].y * h, 3, 0, Math.PI * 2);
+        ctx.fillStyle = color; ctx.fill();
+        // Label index
+        ctx.fillStyle = '#fff';
+        ctx.font = '9px monospace';
+        ctx.fillText(i.toString(), lm[i].x * w + 5, lm[i].y * h - 3);
+      }
+    }
+
+    async function run() {
+      try {
+        // Load reference image
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = 'test-hand-ref.png'; });
+        const W = img.naturalWidth, H = img.naturalHeight;
+        log(`Image: ${W}x${H}`);
+
+        // Scale to fit
+        const maxW = 500;
+        const scale = Math.min(maxW / W, maxW / H);
+        const cw = Math.round(W * scale);
+        const ch = Math.round(H * scale);
+
+        // Setup canvases
+        for (const id of ['micro', 'mp', 'overlay']) {
+          const c = document.getElementById(id);
+          c.width = cw; c.height = ch;
+          c.getContext('2d').drawImage(img, 0, 0, cw, ch);
+        }
+
+        // Load micro-handpose
+        status.textContent = 'Loading micro-handpose...';
+        const { createHandpose } = await import('./dist/index.js?v=reftest1');
+        const handpose = await createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.1, palmScoreThreshold: 0.3 });
+        log('micro-handpose loaded');
+
+        // Run micro detection
+        status.textContent = 'Running micro-handpose...';
+        handpose.reset();
+        const microHands = await handpose.detectWithDebug(img);
+        log(`micro-handpose: ${microHands.length} hand(s) detected`);
+
+        if (microHands.length > 0) {
+          const h = microHands[0];
+          log(`  score: ${h.score.toFixed(3)}, handedness: ${h.handedness}`);
+          log(`  palm score: ${h.palmDetection.score.toFixed(3)}`);
+          log(`  palm box: [${h.palmDetection.box.map(v => v.toFixed(3)).join(', ')}]`);
+          log(`  roi: center=(${h.roi.centerXpx.toFixed(1)}, ${h.roi.centerYpx.toFixed(1)}) size=${h.roi.sizePx.toFixed(1)} rot=${(h.roi.rotation * 180/Math.PI).toFixed(1)}°`);
+          log('  landmarks (image-normalized):');
+          for (let i = 0; i < 21; i++) {
+            const l = h.landmarks[i];
+            log(`    ${NAMES[i].padEnd(12)} (${l.x.toFixed(4)}, ${l.y.toFixed(4)})`);
+          }
+          log('  crop landmarks (model output):');
+          for (let i = 0; i < 21; i++) {
+            const l = h.cropLandmarks[i];
+            log(`    ${NAMES[i].padEnd(12)} (${l.x.toFixed(4)}, ${l.y.toFixed(4)})`);
+          }
+
+          const ctx = document.getElementById('micro').getContext('2d');
+          drawLm(ctx, h.landmarks, cw, ch, '#7c6aef');
+
+          // Draw palm box
+          ctx.strokeStyle = '#ff0'; ctx.lineWidth = 1;
+          const [bx, by, bw, bh] = h.palmDetection.box;
+          ctx.strokeRect(bx * cw, by * ch, bw * cw, bh * ch);
+
+          // Draw ROI
+          ctx.strokeStyle = '#f00'; ctx.lineWidth = 1; ctx.setLineDash([4,4]);
+          const roiHalf = h.roi.sizePx * scale / 2;
+          const rcx = h.roi.centerXpx * scale, rcy = h.roi.centerYpx * scale;
+          ctx.save();
+          ctx.translate(rcx, rcy);
+          ctx.rotate(h.roi.rotation);
+          ctx.strokeRect(-roiHalf, -roiHalf, roiHalf*2, roiHalf*2);
+          ctx.restore();
+          ctx.setLineDash([]);
+        }
+
+        // Load MediaPipe
+        status.textContent = 'Loading MediaPipe...';
+        let mp = null;
+        try {
+          const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+          const wasmFileset = await vision.FilesetResolver.forVisionTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+          );
+          mp = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+              delegate: 'GPU',
+            },
+            runningMode: 'IMAGE', numHands: 2,
+          });
+          log('MediaPipe GPU loaded');
+        } catch(e) {
+          log('MediaPipe GPU failed, trying CPU...');
+          const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+          const wasmFileset = await vision.FilesetResolver.forVisionTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+          );
+          mp = await vision.HandLandmarker.createFromOptions(wasmFileset, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
+              delegate: 'CPU',
+            },
+            runningMode: 'IMAGE', numHands: 2,
+          });
+          log('MediaPipe CPU loaded');
+        }
+
+        // Run MediaPipe
+        status.textContent = 'Running MediaPipe...';
+        const mpResult = mp.detect(img);
+        const mpHands = mpResult.landmarks || [];
+        log(`MediaPipe: ${mpHands.length} hand(s) detected`);
+
+        if (mpHands.length > 0) {
+          const mpLm = mpHands[0];
+          log('  landmarks:');
+          for (let i = 0; i < 21; i++) {
+            log(`    ${NAMES[i].padEnd(12)} (${mpLm[i].x.toFixed(4)}, ${mpLm[i].y.toFixed(4)})`);
+          }
+
+          const ctx = document.getElementById('mp').getContext('2d');
+          drawLm(ctx, mpLm, cw, ch, '#34d399');
+        }
+
+        // Overlay both
+        if (microHands.length > 0 && mpHands.length > 0) {
+          const ctx = document.getElementById('overlay').getContext('2d');
+          drawLm(ctx, mpHands[0], cw, ch, '#34d399', 3);
+          drawLm(ctx, microHands[0].landmarks, cw, ch, '#7c6aef', 2);
+
+          // Compute errors
+          log('\n=== Error comparison ===');
+          let sumDist = 0, maxDist = 0, maxIdx = 0;
+          for (let i = 0; i < 21; i++) {
+            const dx = (microHands[0].landmarks[i].x - mpHands[0][i].x) * 100;
+            const dy = (microHands[0].landmarks[i].y - mpHands[0][i].y) * 100;
+            const d = Math.sqrt(dx*dx + dy*dy);
+            sumDist += d;
+            if (d > maxDist) { maxDist = d; maxIdx = i; }
+            log(`  ${NAMES[i].padEnd(12)} err=${d.toFixed(3)}% (dx=${dx.toFixed(3)}, dy=${dy.toFixed(3)})`);
+          }
+          log(`\n  AVG: ${(sumDist/21).toFixed(3)}%  MAX: ${maxDist.toFixed(3)}% (${NAMES[maxIdx]})`);
+        }
+
+        status.textContent = 'Done!';
+        status.style.color = '#34d399';
+      } catch(e) {
+        log('FATAL: ' + e.message + '\n' + e.stack);
+        status.textContent = 'ERROR';
+        status.style.color = '#ff6b6b';
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
