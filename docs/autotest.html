@@ -68,23 +68,23 @@
       for (const [a, b] of CONNECTIONS) {
         const la = landmarks[a], lb = landmarks[b];
         ctx.beginPath();
-        ctx.moveTo(la[0] * w, la[1] * h);
-        ctx.lineTo(lb[0] * w, lb[1] * h);
+        ctx.moveTo(la.x * w, la.y * h);
+        ctx.lineTo(lb.x * w, lb.y * h);
         ctx.stroke();
       }
       // Draw points
       ctx.globalAlpha = 1;
       for (let i = 0; i < landmarks.length; i++) {
-        const [x, y] = landmarks[i];
+        const lm = landmarks[i];
         ctx.beginPath();
-        ctx.arc(x * w, y * h, i === 0 ? 5 : 3, 0, Math.PI * 2);
+        ctx.arc(lm.x * w, lm.y * h, i === 0 ? 5 : 3, 0, Math.PI * 2);
         ctx.fillStyle = i === 0 ? '#ff6b6b' : color;
         ctx.fill();
         // Label key landmarks
         if ([0, 4, 8, 12, 16, 20].includes(i)) {
           ctx.fillStyle = '#fff';
           ctx.font = '9px monospace';
-          ctx.fillText(i.toString(), x * w + 5, y * h - 5);
+          ctx.fillText(i.toString(), lm.x * w + 5, lm.y * h - 5);
         }
       }
     }
@@ -206,15 +206,15 @@
             drawHand(srcCtx, hand.landmarks, srcCanvas.width, srcCanvas.height,
               hand.handedness === 'left' ? '#34d399' : '#60a5fa');
 
-            // Key landmarks
-            const names = ['wrist', 'thumb_tip', 'index_tip', 'middle_tip', 'ring_tip', 'pinky_tip'];
+            // Key landmarks via keypoints API
+            const kpNames = ['wrist', 'thumb_tip', 'index_finger_tip', 'middle_finger_tip', 'ring_finger_tip', 'pinky_finger_tip'];
             const indices = [0, 4, 8, 12, 16, 20];
             div('', '<br><span class="dim">Key landmarks (normalized 0-1):</span>');
             const grid = document.createElement('div');
             grid.className = 'landmark-grid';
-            for (let j = 0; j < names.length; j++) {
+            for (let j = 0; j < kpNames.length; j++) {
               const lm = hand.landmarks[indices[j]];
-              grid.innerHTML += `<span class="ln">${names[j]}</span><span class="lv">[${lm[0].toFixed(3)}, ${lm[1].toFixed(3)}, ${lm[2].toFixed(3)}]</span>`;
+              grid.innerHTML += `<span class="ln">${kpNames[j]}</span><span class="lv">[${lm.x.toFixed(3)}, ${lm.y.toFixed(3)}, ${lm.z.toFixed(3)}]</span>`;
             }
             log.appendChild(grid);
           }
