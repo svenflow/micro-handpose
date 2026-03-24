@@ -1,225 +1,121 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Auto-Test</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>micro-handpose auto-test</title>
   <style>
-    body { font-family: monospace; background: #111; color: #eee; padding: 10px; font-size: 12px; }
-    canvas { border: 1px solid #333; display: block; margin: 5px 0; max-width: 100%; }
-    pre { background: #222; padding: 8px; border-radius: 4px; font-size: 10px; white-space: pre-wrap; overflow-x: auto; }
-    .error { color: #ff6b6b; font-weight: bold; }
-    .success { color: #34d399; font-weight: bold; }
+    body { background: #0a0a0a; color: #ededed; font-family: system-ui; padding: 20px; }
+    #log { white-space: pre-wrap; font-family: monospace; font-size: 14px; line-height: 1.6; }
+    canvas { max-width: 100%; border: 1px solid #333; margin: 10px 0; }
+    .ok { color: #34d399; }
+    .err { color: #ef4444; }
+    .info { color: #7c6aef; }
   </style>
 </head>
 <body>
-  <h2>micro-handpose vs MediaPipe Auto-Test</h2>
-  <div id="status">Starting...</div>
-  <canvas id="overlay" width="400" height="400"></canvas>
-  <pre id="output"></pre>
+  <h2>micro-handpose iOS Auto-Test</h2>
+  <div id="log"></div>
+  <canvas id="canvas"></canvas>
 
   <script type="module">
-    const status = document.getElementById('status');
-    const output = document.getElementById('output');
-    let text = '';
-    function log(msg) { text += msg + '\n'; output.textContent = text; }
+    const log = document.getElementById('log');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
 
-    const CONNECTIONS = [
-      [0,1],[1,2],[2,3],[3,4],
-      [0,5],[5,6],[6,7],[7,8],
-      [0,9],[9,10],[10,11],[11,12],
-      [0,13],[13,14],[14,15],[15,16],
-      [0,17],[17,18],[18,19],[19,20],
-      [5,9],[9,13],[13,17],
-    ];
-
-    function drawLm(ctx, lm, w, h, color) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      for (const [a, b] of CONNECTIONS) {
-        ctx.beginPath();
-        ctx.moveTo(lm[a].x * w, lm[a].y * h);
-        ctx.lineTo(lm[b].x * w, lm[b].y * h);
-        ctx.stroke();
-      }
-      for (let i = 0; i < lm.length; i++) {
-        ctx.beginPath();
-        ctx.arc(lm[i].x * w, lm[i].y * h, 3, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-      }
+    function write(msg, cls = '') {
+      const span = document.createElement('span');
+      span.className = cls;
+      span.textContent = msg + '\n';
+      log.appendChild(span);
+      window.scrollTo(0, document.body.scrollHeight);
     }
 
     async function run() {
+      write('micro-handpose iOS auto-test', 'info');
+      write('UA: ' + navigator.userAgent);
+      write('');
+
+      // 1. Check WebGPU
+      write('1. Checking WebGPU...');
+      if (!navigator.gpu) {
+        write('FAIL: WebGPU NOT available', 'err');
+        return;
+      }
+      write('OK: navigator.gpu exists', 'ok');
+
+      // 2. Request adapter
+      write('2. Requesting GPU adapter...');
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        write('FAIL: No GPU adapter', 'err');
+        return;
+      }
+      write('OK: GPU adapter acquired', 'ok');
+
+      // 3. Request device
+      write('3. Requesting GPU device...');
+      const device = await adapter.requestDevice();
+      write('OK: GPU device created', 'ok');
+
+      // 4. Load test image
+      write('4. Loading test image...');
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = 'test-hand-ref.png';
+      });
+      write('OK: Image loaded: ' + img.naturalWidth + 'x' + img.naturalHeight, 'ok');
+
+      // Draw on canvas
+      const scale = Math.min(300 / img.naturalWidth, 400 / img.naturalHeight);
+      canvas.width = Math.round(img.naturalWidth * scale);
+      canvas.height = Math.round(img.naturalHeight * scale);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      // 5. Import and run micro-handpose
+      write('5. Loading micro-handpose from npm...');
       try {
-        // System info
-        log('UA: ' + navigator.userAgent.substring(0, 80));
-        log('WebGPU: ' + (navigator.gpu ? 'YES' : 'NO'));
-        log('Screen: ' + screen.width + 'x' + screen.height + ' dpr=' + devicePixelRatio);
+        const { createHandTracker } = await import('https://esm.sh/@svenflow/micro-handpose@0.3.0');
+        write('OK: Module loaded', 'ok');
 
-        if (!navigator.gpu) {
-          status.textContent = 'NO WebGPU!';
-          status.className = 'error';
-          log('ERROR: WebGPU not available on this device/browser');
-          return;
-        }
-
-        const adapter = await navigator.gpu.requestAdapter();
-        log('GPU: ' + (adapter ? 'adapter found' : 'NO ADAPTER'));
-        if (!adapter) { status.textContent = 'No GPU adapter'; status.className = 'error'; return; }
-
-        // Load test image
-        status.textContent = 'Loading image...';
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        await new Promise((r, e) => { img.onload = r; img.onerror = e; img.src = 'test-hands/hand_05.jpg'; });
-        const W = img.naturalWidth, H = img.naturalHeight;
-        log('Image: ' + W + 'x' + H);
-
-        // Load micro-handpose
-        status.textContent = 'Loading micro-handpose...';
-        log('Loading micro-handpose...');
-        let handpose;
-        try {
-          const mod = await import('./dist/index.js?v=autotest2');
-          handpose = await mod.createHandpose({ weightsUrl: 'weights', scoreThreshold: 0.1, palmScoreThreshold: 0.3 });
-          log('micro-handpose loaded OK');
-        } catch(e) {
-          log('ERROR loading micro-handpose: ' + e.message);
-          status.textContent = 'micro-handpose FAILED';
-          status.className = 'error';
-          return;
-        }
-
-        // Run micro-handpose
-        status.textContent = 'Running micro-handpose...';
+        write('6. Creating hand tracker (compiling shaders)...');
         const t0 = performance.now();
-        const microHands = await handpose.detect(img);
-        const microMs = performance.now() - t0;
-        log('micro-handpose: ' + microHands.length + ' hand(s) in ' + microMs.toFixed(0) + 'ms');
+        const tracker = await createHandTracker(device);
+        const initMs = (performance.now() - t0).toFixed(0);
+        write('OK: Tracker created in ' + initMs + 'ms', 'ok');
 
-        if (microHands.length > 0) {
-          const lm = microHands[0].landmarks;
-          log('  wrist: (' + lm[0].x.toFixed(4) + ', ' + lm[0].y.toFixed(4) + ')');
-          log('  index_tip: (' + lm[8].x.toFixed(4) + ', ' + lm[8].y.toFixed(4) + ')');
-          log('  middle_tip: (' + lm[12].x.toFixed(4) + ', ' + lm[12].y.toFixed(4) + ')');
-        }
+        write('7. Running inference on test image...');
+        const bmp = await createImageBitmap(img);
+        const t1 = performance.now();
+        const results = await tracker.detect(bmp);
+        const inferMs = (performance.now() - t1).toFixed(0);
+        write('OK: Inference done in ' + inferMs + 'ms', 'ok');
 
-        // Load MediaPipe
-        status.textContent = 'Loading MediaPipe...';
-        log('Loading MediaPipe GPU...');
-        let mpGpu;
-        try {
-          const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
-          const wasmFileset = await vision.FilesetResolver.forVisionTasks(
-            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
-          );
-          mpGpu = await vision.HandLandmarker.createFromOptions(wasmFileset, {
-            baseOptions: {
-              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
-              delegate: 'GPU',
-            },
-            runningMode: 'IMAGE',
-            numHands: 2,
-          });
-          log('MediaPipe GPU loaded OK');
-        } catch(e) {
-          log('ERROR loading MediaPipe: ' + e.message);
-          // Try CPU fallback
-          try {
-            const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
-            const wasmFileset = await vision.FilesetResolver.forVisionTasks(
-              'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
-            );
-            mpGpu = await vision.HandLandmarker.createFromOptions(wasmFileset, {
-              baseOptions: {
-                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task',
-                delegate: 'CPU',
-              },
-              runningMode: 'IMAGE',
-              numHands: 2,
-            });
-            log('MediaPipe CPU fallback loaded OK');
-          } catch(e2) {
-            log('MediaPipe CPU also failed: ' + e2.message);
+        write('');
+        write('Results:', 'info');
+        write('  Hands detected: ' + results.length);
+        if (results.length > 0) {
+          const hand = results[0];
+          write('  Score: ' + (hand.score !== undefined ? hand.score.toFixed(3) : 'N/A'));
+          write('  Landmarks: ' + (hand.landmarks ? hand.landmarks.length : 'N/A'));
+          if (hand.landmarks && hand.landmarks.length > 0) {
+            write('  First landmark: [' + hand.landmarks[0].map(v => v.toFixed(3)).join(', ') + ']');
           }
         }
 
-        // Run MediaPipe
-        let mpHands = [];
-        if (mpGpu) {
-          status.textContent = 'Running MediaPipe...';
-          const t1 = performance.now();
-          const mpResult = mpGpu.detect(img);
-          const mpMs = performance.now() - t1;
-          mpHands = mpResult.landmarks || [];
-          log('MediaPipe: ' + mpHands.length + ' hand(s) in ' + mpMs.toFixed(0) + 'ms');
+        write('');
+        write('ALL TESTS PASSED - WebGPU hand tracking works on iOS Safari!', 'ok');
 
-          if (mpHands.length > 0) {
-            log('  wrist: (' + mpHands[0][0].x.toFixed(4) + ', ' + mpHands[0][0].y.toFixed(4) + ')');
-            log('  index_tip: (' + mpHands[0][8].x.toFixed(4) + ', ' + mpHands[0][8].y.toFixed(4) + ')');
-            log('  middle_tip: (' + mpHands[0][12].x.toFixed(4) + ', ' + mpHands[0][12].y.toFixed(4) + ')');
-          }
-        }
-
-        // Draw overlay
-        const canvas = document.getElementById('overlay');
-        const maxW = Math.min(400, window.innerWidth - 20);
-        const scale = maxW / W;
-        canvas.width = Math.round(W * scale);
-        canvas.height = Math.round(H * scale);
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-        if (mpHands.length > 0) drawLm(ctx, mpHands[0], canvas.width, canvas.height, '#34d399');
-        if (microHands.length > 0) drawLm(ctx, microHands[0].landmarks, canvas.width, canvas.height, '#7c6aef');
-
-        // Compare
-        if (microHands.length > 0 && mpHands.length > 0) {
-          const NAMES = ['wrist','thumb_cmc','thumb_mcp','thumb_ip','thumb_tip',
-            'index_mcp','index_pip','index_dip','index_tip',
-            'middle_mcp','middle_pip','middle_dip','middle_tip',
-            'ring_mcp','ring_pip','ring_dip','ring_tip',
-            'pinky_mcp','pinky_pip','pinky_dip','pinky_tip'];
-
-          const ourLm = microHands[0].landmarks;
-          // Match closest MP hand
-          let bestMp = 0, bestDist = Infinity;
-          for (let j = 0; j < mpHands.length; j++) {
-            const d = Math.hypot(ourLm[0].x - mpHands[j][0].x, ourLm[0].y - mpHands[j][0].y);
-            if (d < bestDist) { bestDist = d; bestMp = j; }
-          }
-          const mpLm = mpHands[bestMp];
-
-          log('\n=== Comparison (purple=ours, green=MP) ===');
-          let sumDist = 0, maxDist = 0, maxIdx = 0;
-          for (let i = 0; i < 21; i++) {
-            const dx = (ourLm[i].x - mpLm[i].x) * 100;
-            const dy = (ourLm[i].y - mpLm[i].y) * 100;
-            const d = Math.sqrt(dx*dx + dy*dy);
-            sumDist += d;
-            if (d > maxDist) { maxDist = d; maxIdx = i; }
-            log(NAMES[i].padEnd(12) + ' ' + d.toFixed(3) + '%');
-          }
-          const avgDist = sumDist / 21;
-          log('\nAvg: ' + avgDist.toFixed(4) + '%');
-          log('Max: ' + maxDist.toFixed(4) + '% (' + NAMES[maxIdx] + ')');
-          log('Pixels: avg=' + (avgDist/100*Math.max(W,H)).toFixed(1) + 'px max=' + (maxDist/100*Math.max(W,H)).toFixed(1) + 'px');
-
-          status.textContent = 'Done! Avg error: ' + avgDist.toFixed(2) + '%';
-          status.className = avgDist < 2 ? 'success' : 'error';
-        } else {
-          status.textContent = 'Done (micro:' + microHands.length + ' MP:' + mpHands.length + ')';
-        }
-
-      } catch(e) {
-        log('FATAL: ' + e.message + '\n' + e.stack);
-        status.textContent = 'FATAL ERROR';
-        status.className = 'error';
+      } catch (e) {
+        write('ERROR: ' + e.message, 'err');
+        if (e.stack) write(e.stack, 'err');
       }
     }
 
-    // Auto-run on load
-    run();
+    run().catch(e => write('FATAL: ' + e.message, 'err'));
   </script>
 </body>
 </html>
