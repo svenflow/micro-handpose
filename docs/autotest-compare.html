@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3-way handpose benchmark</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0a; color: #ededed; font-family: 'SF Mono', 'Menlo', monospace; padding: 12px; font-size: 13px; }
+    h2 { font-family: system-ui; margin-bottom: 8px; font-size: 18px; }
+    .row { display: flex; gap: 4px; align-items: baseline; padding: 2px 0; }
+    .label { color: #888; min-width: 120px; }
+    .val { font-weight: 600; }
+    .ok { color: #34d399; }
+    .err { color: #ef4444; }
+    .warn { color: #fbbf24; }
+    .num { color: #60a5fa; }
+    .dim { color: #555; }
+    hr { border: none; border-top: 1px solid #222; margin: 8px 0; }
+    canvas { max-width: 100%; border: 1px solid #333; margin: 6px 0; border-radius: 4px; }
+    #log { line-height: 1.5; }
+    .section { margin: 10px 0 4px 0; font-weight: 700; font-size: 14px; }
+    .section-mhp { color: #34d399; }
+    .section-mp-gpu { color: #ef8f24; }
+    .section-mp-cpu { color: #c084fc; }
+    .section-sys { color: #7c6aef; }
+    .section-summary { color: #60a5fa; }
+    .error-box { background: #1a0505; border: 1px solid #ef4444; padding: 8px; border-radius: 4px; margin: 8px 0; }
+    table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+    th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #222; }
+    th { color: #888; font-weight: 400; }
+    td { font-weight: 600; }
+    .winner { color: #34d399; }
+  </style>
+</head>
+<body>
+  <h2>3-way handpose benchmark 🖐️</h2>
+  <div id="log"></div>
+
+  <script type="module">
+    const log = document.getElementById('log');
+
+    function div(cls, html) {
+      const d = document.createElement('div');
+      d.className = cls;
+      d.innerHTML = html;
+      log.appendChild(d);
+      window.scrollTo(0, document.body.scrollHeight);
+      return d;
+    }
+
+    function row(label, value, cls = '') {
+      div('row', `<span class="label">${label}</span><span class="val ${cls}">${value}</span>`);
+    }
+
+    function section(title, cls = 'section-sys') { div(`section ${cls}`, title); }
+    function hr() { const h = document.createElement('hr'); log.appendChild(h); }
+
+    async function run() {
+      section('SYSTEM', 'section-sys');
+      row('UA', navigator.userAgent.substring(0, 60));
+      row('Screen', `${screen.width}x${screen.height} @${devicePixelRatio}x`);
+      row('WebGPU', navigator.gpu ? 'YES' : 'NO', navigator.gpu ? 'ok' : 'err');
+
+      hr();
+      section('LOAD IMAGE', 'section-sys');
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error('Image load failed'));
+        img.src = 'test-hand-ref.png';
+      });
+      row('Image', `${img.naturalWidth}x${img.naturalHeight}`, 'ok');
+
+      const results = {};
+
+      // ─── 1. micro-handpose (WebGPU) ───
+      hr();
+      section('① micro-handpose (WebGPU)', 'section-mhp');
+      if (!navigator.gpu) {
+        row('Status', 'SKIPPED — no WebGPU', 'err');
+        results.mhp = null;
+      } else {
+        try {
+          const { createHandpose } = await import('https://esm.sh/@svenflow/micro-handpose@0.3.0');
+          row('Module', 'loaded', 'ok');
+
+          const initT0 = performance.now();
+          const handpose = await createHandpose({ scoreThreshold: 0.3, palmScoreThreshold: 0.3 });
+          const initMs = (performance.now() - initT0).toFixed(0);
+          row('Init', initMs + 'ms', 'num');
+
+          // Warmup
+          const bmp = await createImageBitmap(img);
+          const warmT0 = performance.now();
+          await handpose.detect(bmp);
+          row('Warmup', (performance.now() - warmT0).toFixed(0) + 'ms', 'dim');
+
+          // Timed runs
+          const times = [];
+          let lastResult = null;
+          for (let i = 0; i < 5; i++) {
+            const bmp2 = await createImageBitmap(img);
+            handpose.reset();
+            const t0 = performance.now();
+            lastResult = await handpose.detect(bmp2);
+            times.push(performance.now() - t0);
+          }
+          times.sort((a, b) => a - b);
+
+          const median = times[2];
+          const avg = times.reduce((a, b) => a + b) / times.length;
+          row('Median', median.toFixed(1) + 'ms', 'num');
+          row('Avg', avg.toFixed(1) + 'ms', 'num');
+          row('Min/Max', `${times[0].toFixed(1)}/${times[4].toFixed(1)}ms`, 'num');
+          row('FPS', (1000 / median).toFixed(1), 'num');
+          row('Hands', lastResult.length.toString(), lastResult.length > 0 ? 'ok' : 'warn');
+          if (lastResult.length > 0) {
+            row('Score', lastResult[0].score.toFixed(4), 'num');
+          }
+
+          results.mhp = { median, avg, min: times[0], max: times[4], score: lastResult[0]?.score, init: parseFloat(initMs) };
+          handpose.dispose();
+        } catch (e) {
+          div('error-box', `❌ ${e.message}<br><span class="dim">${e.stack || ''}</span>`);
+          results.mhp = null;
+        }
+      }
+
+      // ─── 2. MediaPipe GPU ───
+      hr();
+      section('② MediaPipe (GPU delegate)', 'section-mp-gpu');
+      try {
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        row('Module', 'loaded', 'ok');
+
+        const initT0 = performance.now();
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const handLandmarkerGPU = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+          minHandDetectionConfidence: 0.3,
+          minHandPresenceConfidence: 0.3,
+          minTrackingConfidence: 0.3,
+        });
+        const initMs = (performance.now() - initT0).toFixed(0);
+        row('Init', initMs + 'ms', 'num');
+
+        // Warmup
+        const warmT0 = performance.now();
+        handLandmarkerGPU.detect(img);
+        row('Warmup', (performance.now() - warmT0).toFixed(0) + 'ms', 'dim');
+
+        // Timed runs
+        const times = [];
+        let lastResult = null;
+        for (let i = 0; i < 5; i++) {
+          const t0 = performance.now();
+          lastResult = handLandmarkerGPU.detect(img);
+          times.push(performance.now() - t0);
+        }
+        times.sort((a, b) => a - b);
+
+        const median = times[2];
+        const avg = times.reduce((a, b) => a + b) / times.length;
+        row('Median', median.toFixed(1) + 'ms', 'num');
+        row('Avg', avg.toFixed(1) + 'ms', 'num');
+        row('Min/Max', `${times[0].toFixed(1)}/${times[4].toFixed(1)}ms`, 'num');
+        row('FPS', (1000 / median).toFixed(1), 'num');
+        const hands = lastResult.landmarks || [];
+        row('Hands', hands.length.toString(), hands.length > 0 ? 'ok' : 'warn');
+        if (hands.length > 0) {
+          const score = lastResult.handednesses?.[0]?.[0]?.score;
+          row('Score', score?.toFixed(4) || 'N/A', 'num');
+          results.mpGPU = { median, avg, min: times[0], max: times[4], score, init: parseFloat(initMs) };
+        } else {
+          results.mpGPU = { median, avg, min: times[0], max: times[4], score: 0, init: parseFloat(initMs) };
+        }
+
+        handLandmarkerGPU.close();
+      } catch (e) {
+        div('error-box', `❌ ${e.message}<br><span class="dim">${e.stack || ''}</span>`);
+        results.mpGPU = null;
+      }
+
+      // ─── 3. MediaPipe CPU ───
+      hr();
+      section('③ MediaPipe (CPU/WASM)', 'section-mp-cpu');
+      try {
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+
+        const initT0 = performance.now();
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        const handLandmarkerCPU = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+            delegate: 'CPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+          minHandDetectionConfidence: 0.3,
+          minHandPresenceConfidence: 0.3,
+          minTrackingConfidence: 0.3,
+        });
+        const initMs = (performance.now() - initT0).toFixed(0);
+        row('Init', initMs + 'ms', 'num');
+
+        // Warmup
+        const warmT0 = performance.now();
+        handLandmarkerCPU.detect(img);
+        row('Warmup', (performance.now() - warmT0).toFixed(0) + 'ms', 'dim');
+
+        // Timed runs
+        const times = [];
+        let lastResult = null;
+        for (let i = 0; i < 5; i++) {
+          const t0 = performance.now();
+          lastResult = handLandmarkerCPU.detect(img);
+          times.push(performance.now() - t0);
+        }
+        times.sort((a, b) => a - b);
+
+        const median = times[2];
+        const avg = times.reduce((a, b) => a + b) / times.length;
+        row('Median', median.toFixed(1) + 'ms', 'num');
+        row('Avg', avg.toFixed(1) + 'ms', 'num');
+        row('Min/Max', `${times[0].toFixed(1)}/${times[4].toFixed(1)}ms`, 'num');
+        row('FPS', (1000 / median).toFixed(1), 'num');
+        const hands = lastResult.landmarks || [];
+        row('Hands', hands.length.toString(), hands.length > 0 ? 'ok' : 'warn');
+        if (hands.length > 0) {
+          const score = lastResult.handednesses?.[0]?.[0]?.score;
+          row('Score', score?.toFixed(4) || 'N/A', 'num');
+          results.mpCPU = { median, avg, min: times[0], max: times[4], score, init: parseFloat(initMs) };
+        } else {
+          results.mpCPU = { median, avg, min: times[0], max: times[4], score: 0, init: parseFloat(initMs) };
+        }
+
+        handLandmarkerCPU.close();
+      } catch (e) {
+        div('error-box', `❌ ${e.message}<br><span class="dim">${e.stack || ''}</span>`);
+        results.mpCPU = null;
+      }
+
+      // ─── Summary Table ───
+      hr();
+      section('📊 COMPARISON', 'section-summary');
+
+      const rows = [
+        ['', 'micro-handpose', 'MediaPipe GPU', 'MediaPipe CPU'],
+        ['Backend', 'WebGPU', 'WASM+WebGL', 'WASM'],
+      ];
+
+      function fmtMs(r, key) { return r ? r[key].toFixed(1) + 'ms' : '—'; }
+      function fmtFps(r) { return r ? (1000 / r.median).toFixed(1) : '—'; }
+
+      // Find winner (lowest median)
+      const all = [
+        { name: 'mhp', r: results.mhp },
+        { name: 'mpGPU', r: results.mpGPU },
+        { name: 'mpCPU', r: results.mpCPU },
+      ].filter(x => x.r);
+      const winner = all.length > 0 ? all.reduce((best, cur) => cur.r.median < best.r.median ? cur : best).name : null;
+
+      let tableHTML = '<table>';
+      // Header
+      tableHTML += '<tr><th></th><th style="color:#34d399">micro-handpose</th><th style="color:#ef8f24">MP GPU</th><th style="color:#c084fc">MP CPU</th></tr>';
+
+      function winCls(name) { return name === winner ? ' class="winner"' : ''; }
+      function cellVal(r, key, name) {
+        if (!r) return '<td>—</td>';
+        const isWinner = name === winner && key !== 'score';
+        return `<td${isWinner ? ' class="winner"' : ''}>${r[key].toFixed(1)}ms</td>`;
+      }
+
+      tableHTML += `<tr><td>Backend</td><td>WebGPU</td><td>WASM+WebGL</td><td>WASM</td></tr>`;
+      tableHTML += `<tr><td>Init</td>${cellVal(results.mhp, 'init', 'mhp')}${cellVal(results.mpGPU, 'init', 'mpGPU')}${cellVal(results.mpCPU, 'init', 'mpCPU')}</tr>`;
+      tableHTML += `<tr><td>Median</td>${cellVal(results.mhp, 'median', 'mhp')}${cellVal(results.mpGPU, 'median', 'mpGPU')}${cellVal(results.mpCPU, 'median', 'mpCPU')}</tr>`;
+      tableHTML += `<tr><td>Min</td>${cellVal(results.mhp, 'min', 'mhp')}${cellVal(results.mpGPU, 'min', 'mpGPU')}${cellVal(results.mpCPU, 'min', 'mpCPU')}</tr>`;
+      tableHTML += `<tr><td>Max</td>${cellVal(results.mhp, 'max', 'mhp')}${cellVal(results.mpGPU, 'max', 'mpGPU')}${cellVal(results.mpCPU, 'max', 'mpCPU')}</tr>`;
+
+      // FPS row
+      tableHTML += '<tr><td>FPS</td>';
+      for (const r of [results.mhp, results.mpGPU, results.mpCPU]) {
+        if (!r) { tableHTML += '<td>—</td>'; continue; }
+        const fps = (1000 / r.median).toFixed(1);
+        const isW = r === results.mhp && winner === 'mhp' || r === results.mpGPU && winner === 'mpGPU' || r === results.mpCPU && winner === 'mpCPU';
+        tableHTML += `<td${isW ? ' class="winner"' : ''}>${fps}</td>`;
+      }
+      tableHTML += '</tr>';
+
+      // Score row
+      tableHTML += '<tr><td>Score</td>';
+      for (const r of [results.mhp, results.mpGPU, results.mpCPU]) {
+        if (!r) { tableHTML += '<td>—</td>'; continue; }
+        tableHTML += `<td>${r.score?.toFixed(4) || 'N/A'}</td>`;
+      }
+      tableHTML += '</tr>';
+
+      tableHTML += '</table>';
+      div('', tableHTML);
+
+      // Speedup summary
+      if (results.mhp && results.mpGPU) {
+        const gpuSpeedup = (results.mpGPU.median / results.mhp.median).toFixed(1);
+        row('vs MP GPU', `${gpuSpeedup}x faster`, 'ok');
+      }
+      if (results.mhp && results.mpCPU) {
+        const cpuSpeedup = (results.mpCPU.median / results.mhp.median).toFixed(1);
+        row('vs MP CPU', `${cpuSpeedup}x faster`, 'ok');
+      }
+
+      hr();
+      div('ok', '<br><b>✅ Benchmark complete</b>');
+    }
+
+    run().catch(e => div('error-box', `❌ FATAL: ${e.message}`));
+  </script>
+</body>
+</html>
