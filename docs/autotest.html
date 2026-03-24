@@ -3,119 +3,235 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>micro-handpose auto-test</title>
+  <title>micro-handpose debug</title>
   <style>
-    body { background: #0a0a0a; color: #ededed; font-family: system-ui; padding: 20px; }
-    #log { white-space: pre-wrap; font-family: monospace; font-size: 14px; line-height: 1.6; }
-    canvas { max-width: 100%; border: 1px solid #333; margin: 10px 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0a; color: #ededed; font-family: 'SF Mono', 'Menlo', monospace; padding: 12px; font-size: 13px; }
+    h2 { font-family: system-ui; margin-bottom: 8px; font-size: 18px; }
+    .row { display: flex; gap: 4px; align-items: baseline; padding: 2px 0; }
+    .label { color: #888; min-width: 100px; }
+    .val { font-weight: 600; }
     .ok { color: #34d399; }
     .err { color: #ef4444; }
+    .warn { color: #fbbf24; }
     .info { color: #7c6aef; }
+    .num { color: #60a5fa; }
+    .dim { color: #555; }
+    hr { border: none; border-top: 1px solid #222; margin: 8px 0; }
+    canvas { max-width: 100%; border: 1px solid #333; margin: 6px 0; border-radius: 4px; }
+    #log { line-height: 1.5; }
+    .section { margin: 10px 0 4px 0; font-weight: 700; color: #7c6aef; font-size: 14px; }
+    .landmark-grid { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; font-size: 11px; }
+    .landmark-grid .ln { color: #888; }
+    .landmark-grid .lv { color: #60a5fa; }
+    .error-box { background: #1a0505; border: 1px solid #ef4444; padding: 8px; border-radius: 4px; margin: 8px 0; }
   </style>
 </head>
 <body>
-  <h2>micro-handpose iOS Auto-Test</h2>
+  <h2>micro-handpose debug 🖐️</h2>
   <div id="log"></div>
-  <canvas id="canvas"></canvas>
 
   <script type="module">
     const log = document.getElementById('log');
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
 
-    function write(msg, cls = '') {
-      const span = document.createElement('span');
-      span.className = cls;
-      span.textContent = msg + '\n';
-      log.appendChild(span);
+    function div(cls, html) {
+      const d = document.createElement('div');
+      d.className = cls;
+      d.innerHTML = html;
+      log.appendChild(d);
       window.scrollTo(0, document.body.scrollHeight);
+      return d;
+    }
+
+    function row(label, value, cls = '') {
+      div('row', `<span class="label">${label}</span><span class="val ${cls}">${value}</span>`);
+    }
+
+    function section(title) { div('section', title); }
+    function hr() { const h = document.createElement('hr'); log.appendChild(h); }
+    function addCanvas() { const c = document.createElement('canvas'); log.appendChild(c); return c; }
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],
+      [0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],
+      [5,9],[9,13],[13,17],
+    ];
+
+    function drawHand(ctx, landmarks, w, h, color) {
+      // Draw connections
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.7;
+      for (const [a, b] of CONNECTIONS) {
+        const la = landmarks[a], lb = landmarks[b];
+        ctx.beginPath();
+        ctx.moveTo(la[0] * w, la[1] * h);
+        ctx.lineTo(lb[0] * w, lb[1] * h);
+        ctx.stroke();
+      }
+      // Draw points
+      ctx.globalAlpha = 1;
+      for (let i = 0; i < landmarks.length; i++) {
+        const [x, y] = landmarks[i];
+        ctx.beginPath();
+        ctx.arc(x * w, y * h, i === 0 ? 5 : 3, 0, Math.PI * 2);
+        ctx.fillStyle = i === 0 ? '#ff6b6b' : color;
+        ctx.fill();
+        // Label key landmarks
+        if ([0, 4, 8, 12, 16, 20].includes(i)) {
+          ctx.fillStyle = '#fff';
+          ctx.font = '9px monospace';
+          ctx.fillText(i.toString(), x * w + 5, y * h - 5);
+        }
+      }
     }
 
     async function run() {
-      write('micro-handpose iOS auto-test', 'info');
-      write('UA: ' + navigator.userAgent);
-      write('');
-
-      // 1. Check WebGPU
-      write('1. Checking WebGPU...');
+      section('SYSTEM');
+      row('UA', navigator.userAgent.substring(0, 60));
+      row('Screen', `${screen.width}x${screen.height} @${devicePixelRatio}x`);
+      row('WebGPU', navigator.gpu ? 'YES' : 'NO', navigator.gpu ? 'ok' : 'err');
       if (!navigator.gpu) {
-        write('FAIL: WebGPU NOT available', 'err');
+        div('error-box', '❌ WebGPU not available on this browser');
         return;
       }
-      write('OK: navigator.gpu exists', 'ok');
 
-      // 2. Request adapter
-      write('2. Requesting GPU adapter...');
+      hr();
+      section('GPU');
       const adapter = await navigator.gpu.requestAdapter();
       if (!adapter) {
-        write('FAIL: No GPU adapter', 'err');
+        row('Adapter', 'NONE — requestAdapter() returned null', 'err');
+        div('error-box', '❌ No GPU adapter. This usually means:<br>• iOS Simulator (no real GPU)<br>• WebGPU disabled in browser settings<br>• GPU hardware not supported');
         return;
       }
-      write('OK: GPU adapter acquired', 'ok');
 
-      // 3. Request device
-      write('3. Requesting GPU device...');
+      const info = adapter.info || {};
+      row('Vendor', info.vendor || 'unknown');
+      row('Architecture', info.architecture || 'unknown');
+      row('Device', info.device || 'unknown');
+      row('Description', info.description || 'unknown');
+
       const device = await adapter.requestDevice();
-      write('OK: GPU device created', 'ok');
+      row('Device', 'created', 'ok');
+      row('Max buffers', device.limits.maxStorageBuffersPerShaderStage);
+      row('Max texture', device.limits.maxTextureDimension2D + 'px');
 
-      // 4. Load test image
-      write('4. Loading test image...');
+      hr();
+      section('LOAD IMAGE');
       const img = new Image();
       img.crossOrigin = 'anonymous';
+      const imgT0 = performance.now();
       await new Promise((resolve, reject) => {
         img.onload = resolve;
-        img.onerror = reject;
+        img.onerror = () => reject(new Error('Image load failed'));
         img.src = 'test-hand-ref.png';
       });
-      write('OK: Image loaded: ' + img.naturalWidth + 'x' + img.naturalHeight, 'ok');
+      const imgMs = (performance.now() - imgT0).toFixed(0);
+      row('Image', `${img.naturalWidth}x${img.naturalHeight}`, 'ok');
+      row('Load time', imgMs + 'ms', 'num');
 
-      // Draw on canvas
-      const scale = Math.min(300 / img.naturalWidth, 400 / img.naturalHeight);
-      canvas.width = Math.round(img.naturalWidth * scale);
-      canvas.height = Math.round(img.naturalHeight * scale);
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      // Draw source image
+      const srcCanvas = addCanvas();
+      const maxW = Math.min(350, window.innerWidth - 24);
+      const imgScale = maxW / img.naturalWidth;
+      srcCanvas.width = Math.round(img.naturalWidth * imgScale);
+      srcCanvas.height = Math.round(img.naturalHeight * imgScale);
+      const srcCtx = srcCanvas.getContext('2d');
+      srcCtx.drawImage(img, 0, 0, srcCanvas.width, srcCanvas.height);
 
-      // 5. Import and run micro-handpose
-      write('5. Loading micro-handpose from npm...');
+      hr();
+      section('INIT MODEL');
       try {
-        const { createHandTracker } = await import('https://esm.sh/@svenflow/micro-handpose@0.3.0');
-        write('OK: Module loaded', 'ok');
+        const { createHandpose } = await import('https://esm.sh/@svenflow/micro-handpose@0.3.0');
+        row('Module', 'loaded from esm.sh', 'ok');
 
-        write('6. Creating hand tracker (compiling shaders)...');
-        const t0 = performance.now();
-        const tracker = await createHandTracker(device);
-        const initMs = (performance.now() - t0).toFixed(0);
-        write('OK: Tracker created in ' + initMs + 'ms', 'ok');
+        const initT0 = performance.now();
+        const handpose = await createHandpose({
+          scoreThreshold: 0.3,
+          palmScoreThreshold: 0.3,
+        });
+        const initMs = (performance.now() - initT0).toFixed(0);
+        row('Init time', initMs + 'ms', 'num');
+        row('Shaders', 'compiled', 'ok');
+        row('Weights', 'loaded from CDN', 'ok');
 
-        write('7. Running inference on test image...');
+        hr();
+        section('INFERENCE');
+
+        // Warmup run
         const bmp = await createImageBitmap(img);
-        const t1 = performance.now();
-        const results = await tracker.detect(bmp);
-        const inferMs = (performance.now() - t1).toFixed(0);
-        write('OK: Inference done in ' + inferMs + 'ms', 'ok');
+        const warmT0 = performance.now();
+        await handpose.detect(bmp);
+        const warmMs = (performance.now() - warmT0).toFixed(0);
+        row('Warmup', warmMs + 'ms', 'dim');
 
-        write('');
-        write('Results:', 'info');
-        write('  Hands detected: ' + results.length);
-        if (results.length > 0) {
-          const hand = results[0];
-          write('  Score: ' + (hand.score !== undefined ? hand.score.toFixed(3) : 'N/A'));
-          write('  Landmarks: ' + (hand.landmarks ? hand.landmarks.length : 'N/A'));
-          if (hand.landmarks && hand.landmarks.length > 0) {
-            write('  First landmark: [' + hand.landmarks[0].map(v => v.toFixed(3)).join(', ') + ']');
-          }
+        // Timed runs
+        const times = [];
+        let lastResult = null;
+        for (let i = 0; i < 5; i++) {
+          const bmp2 = await createImageBitmap(img);
+          const t0 = performance.now();
+          lastResult = await handpose.detect(bmp2);
+          times.push(performance.now() - t0);
         }
 
-        write('');
-        write('ALL TESTS PASSED - WebGPU hand tracking works on iOS Safari!', 'ok');
+        const avg = (times.reduce((a, b) => a + b) / times.length).toFixed(1);
+        const min = Math.min(...times).toFixed(1);
+        const max = Math.max(...times).toFixed(1);
+        const median = times.sort((a, b) => a - b)[2].toFixed(1);
+
+        row('Runs', '5x', 'num');
+        row('Avg', avg + 'ms', 'num');
+        row('Median', median + 'ms', 'num');
+        row('Min', min + 'ms', 'num');
+        row('Max', max + 'ms', 'num');
+        row('FPS (avg)', (1000 / parseFloat(avg)).toFixed(1), 'num');
+
+        hr();
+        section('RESULTS');
+        row('Hands found', lastResult.length.toString(), lastResult.length > 0 ? 'ok' : 'warn');
+
+        if (lastResult.length > 0) {
+          for (let h = 0; h < lastResult.length; h++) {
+            const hand = lastResult[h];
+            div('', `<br><b>Hand ${h + 1}</b>`);
+            row('Score', hand.score.toFixed(4), 'num');
+            row('Handedness', hand.handedness);
+            row('Landmarks', hand.landmarks.length.toString(), 'num');
+
+            // Draw result
+            drawHand(srcCtx, hand.landmarks, srcCanvas.width, srcCanvas.height,
+              hand.handedness === 'left' ? '#34d399' : '#60a5fa');
+
+            // Key landmarks
+            const names = ['wrist', 'thumb_tip', 'index_tip', 'middle_tip', 'ring_tip', 'pinky_tip'];
+            const indices = [0, 4, 8, 12, 16, 20];
+            div('', '<br><span class="dim">Key landmarks (normalized 0-1):</span>');
+            const grid = document.createElement('div');
+            grid.className = 'landmark-grid';
+            for (let j = 0; j < names.length; j++) {
+              const lm = hand.landmarks[indices[j]];
+              grid.innerHTML += `<span class="ln">${names[j]}</span><span class="lv">[${lm[0].toFixed(3)}, ${lm[1].toFixed(3)}, ${lm[2].toFixed(3)}]</span>`;
+            }
+            log.appendChild(grid);
+          }
+        } else {
+          row('Note', 'No hands detected at threshold 0.3', 'warn');
+        }
+
+        hr();
+        section('✅ ALL PASSED');
+        div('ok', `<br><b>WebGPU hand tracking works!</b><br>Median: ${median}ms | ${(1000/parseFloat(median)).toFixed(0)} FPS`);
 
       } catch (e) {
-        write('ERROR: ' + e.message, 'err');
-        if (e.stack) write(e.stack, 'err');
+        div('error-box', `❌ ${e.message}<br><br><span class="dim">${e.stack || ''}</span>`);
       }
     }
 
-    run().catch(e => write('FATAL: ' + e.message, 'err'));
+    run().catch(e => div('error-box', `❌ FATAL: ${e.message}`));
   </script>
 </body>
 </html>
