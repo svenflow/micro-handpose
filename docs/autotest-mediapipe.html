@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MediaPipe handpose debug</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0a; color: #ededed; font-family: 'SF Mono', 'Menlo', monospace; padding: 12px; font-size: 13px; }
+    h2 { font-family: system-ui; margin-bottom: 8px; font-size: 18px; }
+    .row { display: flex; gap: 4px; align-items: baseline; padding: 2px 0; }
+    .label { color: #888; min-width: 100px; }
+    .val { font-weight: 600; }
+    .ok { color: #34d399; }
+    .err { color: #ef4444; }
+    .warn { color: #fbbf24; }
+    .info { color: #7c6aef; }
+    .num { color: #60a5fa; }
+    .dim { color: #555; }
+    hr { border: none; border-top: 1px solid #222; margin: 8px 0; }
+    canvas { max-width: 100%; border: 1px solid #333; margin: 6px 0; border-radius: 4px; }
+    #log { line-height: 1.5; }
+    .section { margin: 10px 0 4px 0; font-weight: 700; color: #ef8f24; font-size: 14px; }
+    .landmark-grid { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; font-size: 11px; }
+    .landmark-grid .ln { color: #888; }
+    .landmark-grid .lv { color: #60a5fa; }
+    .error-box { background: #1a0505; border: 1px solid #ef4444; padding: 8px; border-radius: 4px; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h2>MediaPipe handpose debug 🖐️</h2>
+  <div id="log"></div>
+
+  <script type="module">
+    const log = document.getElementById('log');
+
+    function div(cls, html) {
+      const d = document.createElement('div');
+      d.className = cls;
+      d.innerHTML = html;
+      log.appendChild(d);
+      window.scrollTo(0, document.body.scrollHeight);
+      return d;
+    }
+
+    function row(label, value, cls = '') {
+      div('row', `<span class="label">${label}</span><span class="val ${cls}">${value}</span>`);
+    }
+
+    function section(title) { div('section', title); }
+    function hr() { const h = document.createElement('hr'); log.appendChild(h); }
+    function addCanvas() { const c = document.createElement('canvas'); log.appendChild(c); return c; }
+
+    const CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],
+      [0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],
+      [5,9],[9,13],[13,17],
+    ];
+
+    function drawHand(ctx, landmarks, w, h, color) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.7;
+      for (const [a, b] of CONNECTIONS) {
+        const la = landmarks[a], lb = landmarks[b];
+        ctx.beginPath();
+        ctx.moveTo(la.x * w, la.y * h);
+        ctx.lineTo(lb.x * w, lb.y * h);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i];
+        ctx.beginPath();
+        ctx.arc(lm.x * w, lm.y * h, i === 0 ? 5 : 3, 0, Math.PI * 2);
+        ctx.fillStyle = i === 0 ? '#ff6b6b' : color;
+        ctx.fill();
+        if ([0, 4, 8, 12, 16, 20].includes(i)) {
+          ctx.fillStyle = '#fff';
+          ctx.font = '9px monospace';
+          ctx.fillText(i.toString(), lm.x * w + 5, lm.y * h - 5);
+        }
+      }
+    }
+
+    async function run() {
+      section('SYSTEM');
+      row('UA', navigator.userAgent.substring(0, 60));
+      row('Screen', `${screen.width}x${screen.height} @${devicePixelRatio}x`);
+
+      hr();
+      section('LOAD IMAGE');
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      const imgT0 = performance.now();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error('Image load failed'));
+        img.src = 'test-hand-ref.png';
+      });
+      const imgMs = (performance.now() - imgT0).toFixed(0);
+      row('Image', `${img.naturalWidth}x${img.naturalHeight}`, 'ok');
+      row('Load time', imgMs + 'ms', 'num');
+
+      const srcCanvas = addCanvas();
+      const maxW = Math.min(350, window.innerWidth - 24);
+      const imgScale = maxW / img.naturalWidth;
+      srcCanvas.width = Math.round(img.naturalWidth * imgScale);
+      srcCanvas.height = Math.round(img.naturalHeight * imgScale);
+      const srcCtx = srcCanvas.getContext('2d');
+      srcCtx.drawImage(img, 0, 0, srcCanvas.width, srcCanvas.height);
+
+      hr();
+      section('LOAD MEDIAPIPE');
+      try {
+        const loadT0 = performance.now();
+
+        // Load MediaPipe vision bundle
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
+        const { HandLandmarker, FilesetResolver } = vision;
+        const loadMs = (performance.now() - loadT0).toFixed(0);
+        row('Module', 'loaded from CDN', 'ok');
+        row('Load time', loadMs + 'ms', 'num');
+
+        hr();
+        section('INIT MODEL');
+        const initT0 = performance.now();
+
+        const wasmFileset = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        row('WASM', 'loaded', 'ok');
+
+        const handLandmarker = await HandLandmarker.createFromOptions(wasmFileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'IMAGE',
+          numHands: 2,
+          minHandDetectionConfidence: 0.3,
+          minHandPresenceConfidence: 0.3,
+          minTrackingConfidence: 0.3,
+        });
+        const initMs = (performance.now() - initT0).toFixed(0);
+        row('Init time', initMs + 'ms', 'num');
+        row('Delegate', 'GPU', 'ok');
+        row('Model', 'hand_landmarker float16', 'ok');
+
+        hr();
+        section('INFERENCE');
+
+        // Warmup
+        const warmT0 = performance.now();
+        handLandmarker.detect(img);
+        const warmMs = (performance.now() - warmT0).toFixed(0);
+        row('Warmup', warmMs + 'ms', 'dim');
+
+        // Timed runs
+        const times = [];
+        let lastResult = null;
+        for (let i = 0; i < 5; i++) {
+          const t0 = performance.now();
+          lastResult = handLandmarker.detect(img);
+          times.push(performance.now() - t0);
+        }
+
+        const avg = (times.reduce((a, b) => a + b) / times.length).toFixed(1);
+        const min = Math.min(...times).toFixed(1);
+        const max = Math.max(...times).toFixed(1);
+        const median = times.sort((a, b) => a - b)[2].toFixed(1);
+
+        row('Runs', '5x', 'num');
+        row('Avg', avg + 'ms', 'num');
+        row('Median', median + 'ms', 'num');
+        row('Min', min + 'ms', 'num');
+        row('Max', max + 'ms', 'num');
+        row('FPS (avg)', (1000 / parseFloat(avg)).toFixed(1), 'num');
+
+        hr();
+        section('RESULTS');
+        const landmarks = lastResult.landmarks || [];
+        const handedness = lastResult.handednesses || [];
+        row('Hands found', landmarks.length.toString(), landmarks.length > 0 ? 'ok' : 'warn');
+
+        if (landmarks.length > 0) {
+          for (let h = 0; h < landmarks.length; h++) {
+            const hand = landmarks[h];
+            const handed = handedness[h]?.[0];
+            div('', `<br><b>Hand ${h + 1}</b>`);
+            row('Score', handed ? handed.score.toFixed(4) : 'N/A', 'num');
+            row('Handedness', handed ? handed.categoryName : 'N/A');
+            row('Landmarks', hand.length.toString(), 'num');
+
+            // Draw result — MediaPipe landmarks are already normalized {x, y, z}
+            drawHand(srcCtx, hand, srcCanvas.width, srcCanvas.height,
+              (handed?.categoryName || '').toLowerCase() === 'left' ? '#ef8f24' : '#ff6b6b');
+
+            // Key landmarks
+            const kpNames = ['wrist', 'thumb_tip', 'index_finger_tip', 'middle_finger_tip', 'ring_finger_tip', 'pinky_finger_tip'];
+            const indices = [0, 4, 8, 12, 16, 20];
+            div('', '<br><span class="dim">Key landmarks (normalized 0-1):</span>');
+            const grid = document.createElement('div');
+            grid.className = 'landmark-grid';
+            for (let j = 0; j < kpNames.length; j++) {
+              const lm = hand[indices[j]];
+              grid.innerHTML += `<span class="ln">${kpNames[j]}</span><span class="lv">[${lm.x.toFixed(3)}, ${lm.y.toFixed(3)}, ${lm.z.toFixed(3)}]</span>`;
+            }
+            log.appendChild(grid);
+          }
+        } else {
+          row('Note', 'No hands detected at threshold 0.3', 'warn');
+        }
+
+        hr();
+        section('✅ ALL PASSED');
+        div('ok', `<br><b>MediaPipe hand tracking works!</b><br>Median: ${median}ms | ${(1000/parseFloat(median)).toFixed(0)} FPS`);
+
+      } catch (e) {
+        div('error-box', `❌ ${e.message}<br><br><span class="dim">${e.stack || ''}</span>`);
+      }
+    }
+
+    run().catch(e => div('error-box', `❌ FATAL: ${e.message}`));
+  </script>
+</body>
+</html>
