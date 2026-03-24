@@ -39,12 +39,19 @@ Create once, detect per frame. Weights download on first call from CDN and are c
 | MediaPipe | 4.0ms | 6.5ms | WebGPU |
 | MediaPipe | 4.5ms | 8.2ms | WASM |
 
-**~2x faster than MediaPipe** on the same hardware. With ROI tracking, most frames skip palm detection entirely — only landmark inference runs (~1.5ms).
+### iPhone — Safari (iOS 18, WebGPU)
+
+| | Median | FPS | Score |
+|---|---|---|---|
+| **micro-handpose** | **37ms** | **27** | 0.987 |
+| MediaPipe | 106ms | 9.5 | 0.922 |
+
+**~3x faster than MediaPipe** on iPhone Safari. On desktop, ~2x faster. With ROI tracking, most frames skip palm detection entirely — only landmark inference runs (~1.5ms on desktop).
 
 ## Features
 
 - **74KB** minified JS (17KB gzipped) + 7.7MB weights (served via CDN)
-- **~2x faster** than MediaPipe on the same hardware
+- **~3x faster** than MediaPipe on iPhone Safari, ~2x on desktop
 - **Multi-hand tracking** — detects up to 3 hands simultaneously
 - **ROI tracking** — uses previous landmarks to track between frames (same approach as MediaPipe), skipping palm detection for smoother, faster results
 - **21 landmarks** per hand following MediaPipe ordering
@@ -167,7 +174,7 @@ export default function HandTracker() {
 ## FAQ
 
 **Does it work on mobile?**
-Yes. WebGPU is supported in Chrome on Android and Safari on iOS 18+. Performance varies by device.
+Yes. WebGPU is supported in Chrome on Android and Safari on iOS 18+. On iPhone (iOS 18, Safari), we measured 37ms median (27 FPS) — about 3x faster than MediaPipe on the same device.
 
 **How many hands can it track?**
 Up to 3 by default. Set `maxHands` in the options to change this.
