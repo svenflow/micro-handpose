@@ -331,12 +331,12 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
    * Run landmark inference for a single ROI. Shared between palm-detection and tracking paths.
    * Returns landmarks + metadata, or null if hand score is below threshold.
    */
-  async function runLandmarkForROI(
+  function submitCropAndInference(
     pxROI: { centerXpx: number; centerYpx: number; sizePx: number; rotation: number },
     srcTexture: GPUTexture,
     srcWidth: number, srcHeight: number,
     cropPipeline: CropPipeline, cropOutputBuf: GPUBuffer,
-  ): Promise<{ landmarks: Landmark[]; score: number; handedness: 'left' | 'right' } | null> {
+  ) {
     const cosR = Math.cos(pxROI.rotation);
     const sinR = Math.sin(pxROI.rotation);
     const s = pxROI.sizePx / LANDMARK_SIZE;
@@ -357,10 +357,18 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     );
     cropDevice.queue.submit([encoder.finish()]);
 
-    const output = await landmarkModel.runFromGPUBuffer(cropOutputBuf);
-    const handScore = output.handflag[0]!;
+    return { cosR, sinR, pxROI };
+  }
 
-    if (handScore < scoreThreshold) return null;
+  function decodeOutput(
+    output: { handflag: Float32Array; handedness: Float32Array; landmarks: Float32Array },
+    cosR: number, sinR: number,
+    pxROI: { centerXpx: number; centerYpx: number; sizePx: number; rotation: number },
+    srcWidth: number, srcHeight: number,
+    threshold: number,
+  ): { landmarks: Landmark[]; score: number; handedness: 'left' | 'right' } | null {
+    const handScore = output.handflag[0]!;
+    if (handScore < threshold) return null;
 
     const isRight = output.handedness[0]! > 0.5;
     const landmarks: Landmark[] = [];
@@ -386,49 +394,114 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
     return { landmarks, score: handScore, handedness: isRight ? 'right' : 'left' };
   }
 
+  async function runLandmarkForROI(
+    pxROI: { centerXpx: number; centerYpx: number; sizePx: number; rotation: number },
+    srcTexture: GPUTexture,
+    srcWidth: number, srcHeight: number,
+    cropPipeline: CropPipeline, cropOutputBuf: GPUBuffer,
+    isTracking = false,
+  ): Promise<{ landmarks: Landmark[]; score: number; handedness: 'left' | 'right' } | null> {
+    const { cosR, sinR } = submitCropAndInference(pxROI, srcTexture, srcWidth, srcHeight, cropPipeline, cropOutputBuf);
+
+    const output = await landmarkModel.runFromGPUBuffer(cropOutputBuf);
+    const effectiveThreshold = isTracking ? Math.min(scoreThreshold, 0.1) : scoreThreshold;
+    return decodeOutput(output, cosR, sinR, pxROI, srcWidth, srcHeight, effectiveThreshold);
+  }
+
+  // Pipelined tracking state: stores context needed to decode previous frame's GPU result
+  let pendingTrackContext: {
+    cosR: number; sinR: number;
+    pxROI: { centerXpx: number; centerYpx: number; sizePx: number; rotation: number };
+    srcWidth: number; srcHeight: number;
+  } | null = null;
+
   async function detect(source: HandposeInput): Promise<HandposeResult[]> {
-    // Normalize video/image to ImageBitmap early to handle mobile camera rotation.
-    let normalizedSource: HandposeInput = source;
+    // Get source dimensions and prepare upload source.
+    // IMPORTANT: iOS Safari's WebGPU copyExternalImageToTexture silently produces
+    // garbage when given an HTMLVideoElement directly. We MUST convert to ImageBitmap
+    // first. createImageBitmap is well-optimized on all platforms and proven reliable.
     let srcWidth: number;
     let srcHeight: number;
+    let uploadSource: HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
 
-    if (source instanceof HTMLVideoElement || source instanceof HTMLImageElement) {
+    if (source instanceof HTMLVideoElement) {
+      srcWidth = source.videoWidth;
+      srcHeight = source.videoHeight;
+      uploadSource = await createImageBitmap(source, { colorSpaceConversion: 'none' });
+    } else if (source instanceof HTMLImageElement) {
+      srcWidth = source.naturalWidth;
+      srcHeight = source.naturalHeight;
+      uploadSource = await createImageBitmap(source, { colorSpaceConversion: 'none' });
+    } else if (source instanceof ImageData) {
       const bmp = await createImageBitmap(source, { colorSpaceConversion: 'none' });
-      normalizedSource = bmp;
-      srcWidth = bmp.width;
-      srcHeight = bmp.height;
+      [srcWidth, srcHeight] = [bmp.width, bmp.height];
+      uploadSource = bmp;
     } else {
       [srcWidth, srcHeight] = getSourceDimensions(source);
+      uploadSource = source as HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
     }
 
     // Upload source to GPU texture (shared by both tracking and detection paths)
     const cropPipeline = ensureCropPipeline();
     const cropOutputBuf = ensureCropOutputBuffer();
     const srcTexture = ensureCropSourceTexture(srcWidth, srcHeight);
-    let uploadSource: HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
-    if (normalizedSource instanceof ImageData) {
-      uploadSource = await createImageBitmap(normalizedSource, { colorSpaceConversion: 'none' });
-    } else {
-      uploadSource = normalizedSource as HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
-    }
     cropDevice.queue.copyExternalImageToTexture(
       { source: uploadSource },
       { texture: srcTexture },
       [srcWidth, srcHeight],
     );
 
-    // ---- TRACKING PATH ----
+    // ---- PIPELINED TRACKING PATH ----
+    // For single-hand tracking: submit GPU work, return previous frame's result.
+    // The GPU has the entire rAF interval to complete, so readback on the next
+    // frame is nearly instant. This matches MediaPipe's pipelining strategy.
+    if (trackedHands.length === 1 && pendingTrackContext !== null) {
+      // Read previous frame's GPU result (should be done — GPU had ~16ms)
+      const prevOutput = await landmarkModel.flushGPUBufferPipelined();
+      let prevResult: HandposeResult[] = [];
+      if (prevOutput) {
+        const ctx = pendingTrackContext;
+        const decoded = decodeOutput(
+          prevOutput, ctx.cosR, ctx.sinR, ctx.pxROI,
+          ctx.srcWidth, ctx.srcHeight,
+          Math.min(scoreThreshold, 0.1),
+        );
+        if (decoded) {
+          prevResult = [{
+            score: decoded.score,
+            handedness: decoded.handedness,
+            landmarks: decoded.landmarks,
+            keypoints: toKeypoints(decoded.landmarks),
+          }];
+          trackedHands = [{ landmarks: decoded.landmarks, handedness: decoded.handedness }];
+        } else {
+          // Tracking lost — fall through to detection
+          trackedHands = [];
+          pendingTrackContext = null;
+        }
+      }
+
+      if (trackedHands.length === 1) {
+        // Submit current frame's work (non-blocking — returns null on first pipeline call)
+        const tracked = trackedHands[0]!;
+        const pxROI = landmarksToROI(tracked.landmarks, srcWidth, srcHeight);
+        const ctx = submitCropAndInference(pxROI, srcTexture, srcWidth, srcHeight, cropPipeline, cropOutputBuf);
+        await landmarkModel.runFromGPUBufferPipelined(cropOutputBuf);
+        pendingTrackContext = { ...ctx, srcWidth, srcHeight };
+        return prevResult;
+      }
+    }
+
+    // ---- BLOCKING TRACKING PATH (multi-hand or first tracking frame) ----
     // If we have previous landmarks, try to track using landmark-derived ROI
-    // (skip palm detection — matches MediaPipe's approach for smooth, fast tracking)
     if (trackedHands.length > 0) {
       const results: HandposeResult[] = [];
 
       for (const tracked of trackedHands) {
-        // Compute ROI from previous landmarks (MediaPipe's landmark-to-ROI path)
         const pxROI = landmarksToROI(tracked.landmarks, srcWidth, srcHeight);
 
         const result = await runLandmarkForROI(
-          pxROI, srcTexture, srcWidth, srcHeight, cropPipeline, cropOutputBuf
+          pxROI, srcTexture, srcWidth, srcHeight, cropPipeline, cropOutputBuf, true
         );
 
         if (result) {
@@ -439,23 +512,32 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
             keypoints: toKeypoints(result.landmarks),
           });
         }
-        // If hand score < threshold, this tracked hand is lost — don't add to results
       }
 
       if (results.length > 0) {
-        // Tracking succeeded — update tracked hands for next frame
         trackedHands = results.map(r => ({ landmarks: r.landmarks, handedness: r.handedness }));
+
+        // Prime the pipeline for next frame (single hand only)
+        if (results.length === 1) {
+          const tracked = trackedHands[0]!;
+          const pxROI = landmarksToROI(tracked.landmarks, srcWidth, srcHeight);
+          const ctx = submitCropAndInference(pxROI, srcTexture, srcWidth, srcHeight, cropPipeline, cropOutputBuf);
+          await landmarkModel.runFromGPUBufferPipelined(cropOutputBuf);
+          pendingTrackContext = { ...ctx, srcWidth, srcHeight };
+        }
+
         return results;
       }
 
       // All tracked hands lost — fall through to palm detection
       trackedHands = [];
+      pendingTrackContext = null;
     }
 
     // ---- DETECTION PATH ----
     // No tracked hands (first frame or tracking lost) — run palm detection
     const { detections: rawDetections, lbPadX: gpuLbPadX, lbPadY: gpuLbPadY } =
-      await palmDetector.detectRawWithResize(normalizedSource, srcWidth, srcHeight);
+      await palmDetector.detectRawWithResize(uploadSource, srcWidth, srcHeight);
     lbPadX = gpuLbPadX;
     lbPadY = gpuLbPadY;
 
@@ -470,8 +552,10 @@ export async function createHandpose(options: HandposeOptions = {}): Promise<Han
       const det = removeLetterbox(rawDet);
       const pxROI = detectionToPixelROI(det, srcWidth, srcHeight);
 
+      // Use lower threshold for detection path since palm model already confirmed a hand.
+      // This ensures tracking can start even when landmark confidence is moderate.
       const result = await runLandmarkForROI(
-        pxROI, srcTexture, srcWidth, srcHeight, cropPipeline, cropOutputBuf
+        pxROI, srcTexture, srcWidth, srcHeight, cropPipeline, cropOutputBuf, true
       );
 
       if (result) {

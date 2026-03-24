@@ -71,6 +71,8 @@ export interface CompiledModel {
   run: (input: Float32Array) => Promise<HandLandmarksOutput>;
   runFromCanvas: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<HandLandmarksOutput>;
   runFromGPUBuffer: (inputBuffer: GPUBuffer) => Promise<HandLandmarksOutput>;
+  runFromGPUBufferPipelined: (inputBuffer: GPUBuffer) => Promise<HandLandmarksOutput | null>;
+  flushGPUBufferPipelined: () => Promise<HandLandmarksOutput | null>;
   runFromCanvasPipelined: (source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap) => Promise<HandLandmarksOutput | null>;
   flushPipelined: () => Promise<HandLandmarksOutput | null>;
   benchmark: (iterations?: number) => Promise<{ avgMs: number; fps: number }>;
@@ -1612,7 +1614,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   return {
-    device, run, runFromCanvas, runFromGPUBuffer, runFromCanvasViaRender, runFromCanvasPipelined, flushPipelined,
+    device, run, runFromCanvas, runFromGPUBuffer,
+    runFromGPUBufferPipelined: async (_: GPUBuffer) => null,
+    flushGPUBufferPipelined: async () => null,
+    runFromCanvasViaRender, runFromCanvasPipelined, flushPipelined,
     benchmark, benchmarkGPU, benchmarkDiagnostic, debugLayerOutputs,
   } satisfies CompiledModel;
 }

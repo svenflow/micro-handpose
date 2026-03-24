@@ -1033,17 +1033,17 @@ export async function compilePalmModel(
     const tex = ensureLetterboxTexture(srcW, srcH);
 
     // Upload full-res source to GPU texture
-    // Source is already normalized to ImageBitmap by detect() for video/image inputs,
-    // which handles mobile camera rotation. For canvas/ImageBitmap inputs, use directly.
-    // CRITICAL: colorSpaceConversion:'none' prevents sRGB→P3 conversion on wide-gamut displays
+    // The caller (handpose.ts detect()) always normalizes video/image sources to
+    // ImageBitmap before reaching here, so source is always canvas/ImageBitmap.
+    // Keep createImageBitmap fallback for direct API usage safety.
     let uploadSource: HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
     if (source instanceof HTMLVideoElement) {
-      // Shouldn't normally reach here (detect() normalizes first), but handle as fallback
+      // iOS Safari: copyExternalImageToTexture from video produces garbage. Use ImageBitmap.
       uploadSource = await createImageBitmap(source, { colorSpaceConversion: 'none' });
     } else if (source instanceof HTMLImageElement) {
       uploadSource = await createImageBitmap(source, { colorSpaceConversion: 'none' });
     } else {
-      uploadSource = source;
+      uploadSource = source as HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
     }
     device.queue.copyExternalImageToTexture(
       { source: uploadSource },
