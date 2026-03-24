@@ -854,6 +854,9 @@ handpose.<span class="fn">dispose</span>()</pre>
     const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     let captureCanvas = null;
     let captureCtx = null;
+    // Canvas intermediate for micro-handpose input (avoids createImageBitmap overhead)
+    let microInputCanvas = null;
+    let microInputCtx = null;
     let diagInfo = {};
     let refImage = null; // static reference image for ?ref mode
 
@@ -1069,10 +1072,13 @@ handpose.<span class="fn">dispose</span>()</pre>
           };
           console.log('[micro-handpose] Diag:', JSON.stringify(diagInfo));
 
-          // NOTE: We pass the video element directly to detect() —
-          // the library normalizes via createImageBitmap internally,
-          // which correctly handles iOS orientation. Do NOT use
-          // OffscreenCanvas capture here as it bypasses that fix.
+          // Set up canvas intermediate for micro-handpose input.
+          // Passing a canvas avoids createImageBitmap() overhead per frame,
+          // and works around iOS Safari WebGPU bug with video elements.
+          microInputCanvas = document.createElement('canvas');
+          microInputCanvas.width = vw;
+          microInputCanvas.height = vh;
+          microInputCtx = microInputCanvas.getContext('2d');
         }
 
         document.getElementById('viewport').style.aspectRatio = `${vw} / ${vh}`;
@@ -1151,9 +1157,17 @@ handpose.<span class="fn">dispose</span>()</pre>
     let debugFrameCount = 0;
 
     async function detectMicro() {
-      // Choose source: reference image or video element
-      // The library's detect() handles video orientation via createImageBitmap
-      const source = refImage || video;
+      // Use canvas intermediate to avoid createImageBitmap overhead per frame
+      // and work around iOS Safari WebGPU bug with video elements.
+      let source;
+      if (refImage) {
+        source = refImage;
+      } else if (microInputCanvas) {
+        microInputCtx.drawImage(video, 0, 0);
+        source = microInputCanvas;
+      } else {
+        source = video;
+      }
 
       const t0 = performance.now();
       const hands = await microHandpose.detect(source);
@@ -1291,8 +1305,15 @@ handpose.<span class="fn">dispose</span>()</pre>
       const wasRunning = running;
       running = false;
 
-      // Use test source if available (canvas fallback for iOS), otherwise video
-      const source = window._testSource || video;
+      // Use canvas intermediate for micro-handpose (avoids createImageBitmap overhead)
+      function microSource() {
+        if (microInputCanvas) {
+          microInputCtx.drawImage(video, 0, 0);
+          return microInputCanvas;
+        }
+        return window._testSource || video;
+      }
+      const mpSource = window._testSource || video;
 
       const results = {};
 
@@ -1302,11 +1323,11 @@ handpose.<span class="fn">dispose</span>()</pre>
         await ensureMicroHandpose();
         btn.textContent = 'Profiling micro (0/' + N + ')...';
         // warmup
-        for (let i = 0; i < 3; i++) await microHandpose.detect(source);
+        for (let i = 0; i < 3; i++) await microHandpose.detect(microSource());
         const microTimes = [];
         for (let i = 0; i < N; i++) {
           const t0 = performance.now();
-          await microHandpose.detect(source);
+          await microHandpose.detect(microSource());
           microTimes.push(performance.now() - t0);
           btn.textContent = 'Profiling micro (' + (i+1) + '/' + N + ')...';
         }
@@ -1331,13 +1352,13 @@ handpose.<span class="fn">dispose</span>()</pre>
         // warmup
         for (let i = 0; i < 3; i++) {
           mpGpuTs += 33;
-          mpHandsGpu.detectForVideo(source, mpGpuTs);
+          mpHandsGpu.detectForVideo(mpSource, mpGpuTs);
         }
         const mpGpuTimes = [];
         for (let i = 0; i < N; i++) {
           mpGpuTs += 33;
           const t0 = performance.now();
-          mpHandsGpu.detectForVideo(source, mpGpuTs);
+          mpHandsGpu.detectForVideo(mpSource, mpGpuTs);
           mpGpuTimes.push(performance.now() - t0);
           btn.textContent = 'Profiling MediaPipe GPU (' + (i+1) + '/' + N + ')...';
         }
@@ -1361,13 +1382,13 @@ handpose.<span class="fn">dispose</span>()</pre>
         // warmup
         for (let i = 0; i < 3; i++) {
           mpWasmTimestamp += 33;
-          mpHandsWasm.detectForVideo(source, mpWasmTimestamp);
+          mpHandsWasm.detectForVideo(mpSource, mpWasmTimestamp);
         }
         const mpTimes = [];
         for (let i = 0; i < N; i++) {
           mpWasmTimestamp += 33;
           const t0 = performance.now();
-          mpHandsWasm.detectForVideo(source, mpWasmTimestamp);
+          mpHandsWasm.detectForVideo(mpSource, mpWasmTimestamp);
           mpTimes.push(performance.now() - t0);
           btn.textContent = 'Profiling MediaPipe WASM (' + (i+1) + '/' + N + ')...';
         }
@@ -1442,11 +1463,11 @@ handpose.<span class="fn">dispose</span>()</pre>
         const gpuDevice = microHandpose._device;
         if (gpuDevice && microHandpose._benchmarkSubmitOnly) {
           // warmup
-          for (let i = 0; i < 3; i++) await microHandpose.detect(source);
+          for (let i = 0; i < 3; i++) await microHandpose.detect(microSource());
           // Time N submits + single fence
           const gpuT0 = performance.now();
           for (let i = 0; i < N; i++) {
-            microHandpose._benchmarkSubmitOnly(source);
+            microHandpose._benchmarkSubmitOnly(microSource());
           }
           // Force GPU to finish all work
           await gpuDevice.queue.onSubmittedWorkDone();
@@ -1489,8 +1510,9 @@ handpose.<span class="fn">dispose</span>()</pre>
         const wasRunning = running;
         running = false;
 
-        // Run micro-handpose on current video frame
-        const microHands = await microHandpose.detect(video);
+        // Run micro-handpose on current video frame (use canvas intermediate)
+        if (microInputCanvas) microInputCtx.drawImage(video, 0, 0);
+        const microHands = await microHandpose.detect(microInputCanvas || video);
         const microResult = microHands.length > 0 ? microHands[0] : null;
 
         // Run MediaPipe on current video frame

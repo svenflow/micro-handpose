@@ -1082,9 +1082,8 @@ export async function compileFullModel(
 
     device.queue.submit([encoder.finish()]);
 
-    const mapPromise = readbackBuf.mapAsync(GPUMapMode.READ);
-    await device.queue.onSubmittedWorkDone();
-    await mapPromise;
+    // Just await mapAsync directly — onSubmittedWorkDone is redundant overhead
+    await readbackBuf.mapAsync(GPUMapMode.READ);
     const mapped = new Float32Array(readbackBuf.getMappedRange());
     outputHandflag[0] = mapped[0]!;
     outputHandedness[0] = mapped[1]!;
@@ -1112,9 +1111,8 @@ export async function compileFullModel(
 
     device.queue.submit([encoder.finish()]);
 
-    const mapPromise = readbackBuf.mapAsync(GPUMapMode.READ);
-    await device.queue.onSubmittedWorkDone();
-    await mapPromise;
+    // Just await mapAsync directly — onSubmittedWorkDone is redundant overhead
+    await readbackBuf.mapAsync(GPUMapMode.READ);
     const mapped = new Float32Array(readbackBuf.getMappedRange());
     outputHandflag[0] = mapped[0]!;
     outputHandedness[0] = mapped[1]!;
@@ -1128,6 +1126,67 @@ export async function compileFullModel(
       handflag: new Float32Array(outputHandflag),
       handedness: new Float32Array(outputHandedness),
       landmarks: new Float32Array(outputLandmarks),
+    };
+  }
+
+  // ============ Pipelined Run from GPUBuffer (double-buffered readback) ============
+  // Overlaps GPU compute with CPU readback. Returns PREVIOUS frame's result.
+  // First call returns null (priming the pipeline). One frame of latency.
+  const readbackBufB = makeBuf(65 * 4, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
+  let pipeIdx = 0;
+  const pipeBufs = [readbackBuf, readbackBufB];
+  let pendingMap: Promise<void> | null = null;
+  let pendingBuf: GPUBuffer | null = null;
+
+  async function runFromGPUBufferPipelined(inputBuffer: GPUBuffer): Promise<HandLandmarksOutput | null> {
+    const curBuf = pipeBufs[pipeIdx]!;
+    pipeIdx = 1 - pipeIdx;
+
+    // Submit current frame's GPU work
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(inputBuffer, 0, bufA, 0, 3 * 224 * 224 * 4);
+    encodeInference(encoder, curBuf);
+    device.queue.submit([encoder.finish()]);
+
+    // Read previous frame's result (should already be done)
+    let result: HandLandmarksOutput | null = null;
+    if (pendingMap !== null && pendingBuf !== null) {
+      await pendingMap;
+      const mapped = new Float32Array(pendingBuf.getMappedRange());
+      const hf = mapped[0]!;
+      const hd = mapped[1]!;
+      const lm = new Float32Array(63);
+      for (let i = 0; i < 63; i++) lm[i] = mapped[2 + i]! / 224;
+      pendingBuf.unmap();
+      result = {
+        handflag: new Float32Array([hf]),
+        handedness: new Float32Array([hd]),
+        landmarks: lm,
+      };
+    }
+
+    // Start mapping current frame's buffer (will be read on next call)
+    pendingBuf = curBuf;
+    pendingMap = curBuf.mapAsync(GPUMapMode.READ);
+
+    return result;
+  }
+
+  async function flushGPUBufferPipelined(): Promise<HandLandmarksOutput | null> {
+    if (!pendingMap || !pendingBuf) return null;
+    await pendingMap;
+    const mapped = new Float32Array(pendingBuf.getMappedRange());
+    const hf = mapped[0]!;
+    const hd = mapped[1]!;
+    const lm = new Float32Array(63);
+    for (let i = 0; i < 63; i++) lm[i] = mapped[2 + i]! / 224;
+    pendingBuf.unmap();
+    pendingMap = null;
+    pendingBuf = null;
+    return {
+      handflag: new Float32Array([hf]),
+      handedness: new Float32Array([hd]),
+      landmarks: lm,
     };
   }
 
@@ -1235,6 +1294,8 @@ export async function compileFullModel(
     run,
     runFromCanvas,
     runFromGPUBuffer,
+    runFromGPUBufferPipelined,
+    flushGPUBufferPipelined,
     runFromCanvasPipelined,
     flushPipelined,
     benchmark,
