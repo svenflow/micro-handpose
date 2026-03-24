@@ -31,6 +31,13 @@ Create once, detect per frame. Weights download on first call from CDN and are c
 
 ## Benchmarks
 
+### iPhone 17 Pro — Safari (iOS 26, WebGPU)
+
+| | Inference | FPS | Backend |
+|---|---|---|---|
+| **micro-handpose** | **4.1ms** | **60** | WebGPU |
+| MediaPipe | 11.4ms | 60 | WebGPU |
+
 ### Mac Mini M4 Pro — Chrome 134
 
 | | Median | p99 | Backend |
@@ -39,22 +46,14 @@ Create once, detect per frame. Weights download on first call from CDN and are c
 | MediaPipe | 4.0ms | 6.5ms | WebGPU |
 | MediaPipe | 4.5ms | 8.2ms | WASM |
 
-### iPhone — Safari (iOS 18, WebGPU)
+[**Run this benchmark on your device →**](https://svenflow.github.io/micro-handpose/)
 
-| | Median | FPS | Backend |
-|---|---|---|---|
-| **micro-handpose** | **72ms** | **14** | WebGPU |
-| MediaPipe | 97ms | 10.3 | WASM+WebGL |
-| MediaPipe | 136ms | 7.4 | WASM |
-
-[**Run this benchmark on your device →**](https://svenflow.github.io/micro-handpose/autotest-compare.html)
-
-**~1.4x faster than MediaPipe GPU, ~1.9x faster than MediaPipe CPU** on iPhone Safari. On desktop, ~2x faster. With ROI tracking, most frames skip palm detection entirely — only landmark inference runs (~1.5ms on desktop).
+**~3x faster than MediaPipe GPU on iPhone Safari.** On desktop, ~2x faster. With ROI tracking, 99% of frames skip palm detection entirely — only landmark inference runs.
 
 ## Features
 
 - **74KB** minified JS (17KB gzipped) + 7.7MB weights (served via CDN)
-- **~1.4–2x faster** than MediaPipe on the same hardware
+- **~3x faster** than MediaPipe on iPhone, ~2x on desktop
 - **Multi-hand tracking** — detects up to 3 hands simultaneously
 - **ROI tracking** — uses previous landmarks to track between frames (same approach as MediaPipe), skipping palm detection for smoother, faster results
 - **21 landmarks** per hand following MediaPipe ordering
